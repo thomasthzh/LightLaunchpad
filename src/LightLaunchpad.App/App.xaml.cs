@@ -175,10 +175,10 @@ public partial class App : System.Windows.Application
     {
         try
         {
-            var vuiFiles = Directory.EnumerateFiles(Environment.CurrentDirectory, "*.vui", SearchOption.TopDirectoryOnly).ToList();
+            var vuiFiles = FindVuiFiles();
             if (vuiFiles.Count == 0)
             {
-                _trayService.ShowMessage(AppName, "No .vui files were found in the current directory.");
+                _trayService.ShowMessage(AppName, "No .vui files were found near the app or current directory.");
                 return;
             }
 
@@ -192,6 +192,29 @@ public partial class App : System.Windows.Application
         catch (Exception ex)
         {
             _trayService.ShowMessage(AppName, $"Could not import .vui files: {ex.Message}");
+        }
+    }
+
+    private static List<string> FindVuiFiles()
+    {
+        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddDirectoryAndParents(Environment.CurrentDirectory, roots);
+        AddDirectoryAndParents(AppContext.BaseDirectory, roots);
+
+        return roots
+            .Where(Directory.Exists)
+            .SelectMany(root => Directory.EnumerateFiles(root, "*.vui", SearchOption.TopDirectoryOnly))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static void AddDirectoryAndParents(string directory, ISet<string> roots)
+    {
+        var current = new DirectoryInfo(directory);
+        for (var depth = 0; current is not null && depth < 8; depth++)
+        {
+            roots.Add(current.FullName);
+            current = current.Parent;
         }
     }
 
