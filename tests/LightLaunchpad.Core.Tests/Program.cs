@@ -17,7 +17,11 @@ internal static class Program
             (nameof(LaunchItemSearchTests.Filter_RanksPrefixMatchesBeforeContainsMatches), LaunchItemSearchTests.Filter_RanksPrefixMatchesBeforeContainsMatches),
             (nameof(LaunchItemSearchTests.Filter_ReturnsAllItemsWhenQueryIsBlank), LaunchItemSearchTests.Filter_ReturnsAllItemsWhenQueryIsBlank),
             (nameof(VuiImportParserTests.Parse_ExtractsDecodedPathsAndSkipsEmptyValues), VuiImportParserTests.Parse_ExtractsDecodedPathsAndSkipsEmptyValues),
-            (nameof(VuiImportParserTests.Parse_DeduplicatesNormalizedPaths), VuiImportParserTests.Parse_DeduplicatesNormalizedPaths)
+            (nameof(VuiImportParserTests.Parse_DeduplicatesNormalizedPaths), VuiImportParserTests.Parse_DeduplicatesNormalizedPaths),
+            (nameof(LayoutServiceTests.Load_CreatesDefaultLayoutWhenMissing), LayoutServiceTests.Load_CreatesDefaultLayoutWhenMissing),
+            (nameof(LayoutServiceTests.MergeItems_AddsNewFolderItemsToUncategorized), LayoutServiceTests.MergeItems_AddsNewFolderItemsToUncategorized),
+            (nameof(LayoutServiceTests.DeleteRegion_MovesItemsToUncategorized), LayoutServiceTests.DeleteRegion_MovesItemsToUncategorized),
+            (nameof(LayoutServiceTests.SaveAndLoad_RoundTripsViewMode), LayoutServiceTests.SaveAndLoad_RoundTripsViewMode)
         };
 
         var failed = 0;
