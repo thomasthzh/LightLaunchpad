@@ -155,9 +155,9 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
         RefreshActiveRegion();
     }
 
-    public void LoadMissingIcons()
+    public void LoadMissingIcons(int limit)
     {
-        foreach (var item in FilteredItems)
+        foreach (var item in FilteredItems.Take(limit))
         {
             item.LoadIcon(_iconFactory);
         }

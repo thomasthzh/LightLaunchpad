@@ -15,6 +15,12 @@ public sealed class IconService
     private const int IldTransparent = 0x1;
     private static readonly Guid ImageListId = new("46EB5926-582E-4017-9FDF-E8998DAA0950");
     private readonly Dictionary<string, ImageSource?> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly bool _useJumboIcons;
+
+    public IconService(string iconQuality)
+    {
+        _useJumboIcons = string.Equals(iconQuality, "High", StringComparison.OrdinalIgnoreCase);
+    }
 
     public ImageSource? GetIcon(string path)
     {
@@ -23,17 +29,20 @@ public sealed class IconService
             return cached;
         }
 
-        var icon = ExtractIcon(path);
+        var icon = ExtractIcon(path, _useJumboIcons);
         _cache[path] = icon;
         return icon;
     }
 
-    private static ImageSource? ExtractIcon(string path)
+    private static ImageSource? ExtractIcon(string path, bool useJumboIcons)
     {
-        var jumbo = ExtractJumboIcon(path);
-        if (jumbo is not null)
+        if (useJumboIcons)
         {
-            return jumbo;
+            var jumbo = ExtractJumboIcon(path);
+            if (jumbo is not null)
+            {
+                return jumbo;
+            }
         }
 
         var info = new ShFileInfo();

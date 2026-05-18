@@ -64,15 +64,14 @@ public partial class App : System.Windows.Application
         _settingsService = new SettingsService(settingsPath, userProfile);
         _layoutService = new LayoutService(Path.Combine(appData, AppName, "layout.json"));
         _settings = _settingsService.Load();
-        _layout = _layoutService.SetViewMode(
-            _layoutService.Load(),
-            Enum.TryParse<LaunchpadViewMode>(_settings.ViewMode, out var mode) ? mode : LaunchpadViewMode.InlineRegions);
+        _layout = _layoutService.Load();
+        _settings = _settings with { ViewMode = _layout.ViewMode.ToString() };
     }
 
     private void BuildServices()
     {
         _repository = new ShortcutRepository(_settings.LaunchpadFolder);
-        _iconService = new IconService();
+        _iconService = new IconService(_settings.IconQuality);
         _launcherService = new LauncherService();
         _viewModel = new LaunchpadViewModel(_settings, item => _iconService.GetIcon(item.SourcePath));
         _launchpadWindow = new LaunchpadWindow(_viewModel, _launcherService);
@@ -145,7 +144,7 @@ public partial class App : System.Windows.Application
         }
 
         _launchpadWindow.ShowLaunchpad();
-        Dispatcher.BeginInvoke(() => _viewModel.LoadMissingIcons(), DispatcherPriority.Background);
+        Dispatcher.BeginInvoke(() => _viewModel.LoadMissingIcons(limit: 48), DispatcherPriority.Background);
     }
 
     private void RefreshItems()
@@ -200,6 +199,7 @@ public partial class App : System.Windows.Application
         _settings = settings;
         _settingsService.Save(_settings);
         _repository = new ShortcutRepository(_settings.LaunchpadFolder);
+        _iconService = new IconService(_settings.IconQuality);
         _viewModel.UpdateSettings(_settings);
         _layout = _layoutService.SetViewMode(
             _layout,
