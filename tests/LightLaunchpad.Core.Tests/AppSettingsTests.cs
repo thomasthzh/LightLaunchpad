@@ -12,6 +12,8 @@ public sealed class AppSettingsTests
         TestAssert.Equal("Alt+D", settings.Hotkey);
         TestAssert.False(settings.StartWithWindows);
         TestAssert.Equal("Medium", settings.IconSize);
+        TestAssert.Equal("InlineRegions", settings.ViewMode);
+        TestAssert.Equal("Balanced", settings.IconQuality);
     }
 
     public static void SettingsService_LoadsDefaultsWhenFileDoesNotExist()
@@ -31,7 +33,7 @@ public sealed class AppSettingsTests
         var tempRoot = TestPaths.CreateTempDirectory();
         var settingsPath = Path.Combine(tempRoot, "settings.json");
         var service = new SettingsService(settingsPath, @"C:\Users\me");
-        var expected = new AppSettings(@"D:\Launchpad", "Alt+L", true, "Large");
+        var expected = new AppSettings(@"D:\Launchpad", "Alt+L", true, "Large", "RegionTabs", "High");
 
         service.Save(expected);
         var actual = service.Load();

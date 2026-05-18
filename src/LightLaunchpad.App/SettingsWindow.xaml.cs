@@ -6,8 +6,11 @@ namespace LightLaunchpad.App;
 
 public partial class SettingsWindow : Window
 {
+    private readonly AppSettings _settings;
+
     public SettingsWindow(AppSettings settings)
     {
+        _settings = settings;
         InitializeComponent();
         FolderTextBox.Text = settings.LaunchpadFolder;
         HotkeyTextBox.Text = settings.Hotkey;
@@ -33,7 +36,9 @@ public partial class SettingsWindow : Window
             FolderTextBox.Text.Trim(),
             HotkeyTextBox.Text.Trim(),
             StartWithWindowsCheckBox.IsChecked == true,
-            ((ComboBoxItem)IconSizeComboBox.SelectedItem).Content?.ToString() ?? "Medium");
+            ((ComboBoxItem)IconSizeComboBox.SelectedItem).Content?.ToString() ?? "Medium",
+            _settings.ViewMode,
+            _settings.IconQuality);
         DialogResult = true;
     }
 }

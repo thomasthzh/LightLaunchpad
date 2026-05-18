@@ -4,7 +4,9 @@ public sealed record AppSettings(
     string LaunchpadFolder,
     string Hotkey,
     bool StartWithWindows,
-    string IconSize)
+    string IconSize,
+    string ViewMode,
+    string IconQuality)
 {
     public static AppSettings CreateDefault(string userProfilePath)
     {
@@ -12,6 +14,8 @@ public sealed record AppSettings(
             Path.Combine(userProfilePath, "Launchpad"),
             "Alt+D",
             StartWithWindows: false,
-            IconSize: "Medium");
+            IconSize: "Medium",
+            ViewMode: "InlineRegions",
+            IconQuality: "Balanced");
     }
 }

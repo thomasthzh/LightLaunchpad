@@ -26,8 +26,20 @@ public sealed class SettingsService
         }
 
         using var stream = File.OpenRead(_settingsPath);
-        return JsonSerializer.Deserialize<AppSettings>(stream, JsonOptions)
-            ?? AppSettings.CreateDefault(_userProfilePath);
+        var loaded = JsonSerializer.Deserialize<AppSettings>(stream, JsonOptions);
+        if (loaded is null)
+        {
+            return AppSettings.CreateDefault(_userProfilePath);
+        }
+
+        var defaults = AppSettings.CreateDefault(_userProfilePath);
+        return new AppSettings(
+            string.IsNullOrWhiteSpace(loaded.LaunchpadFolder) ? defaults.LaunchpadFolder : loaded.LaunchpadFolder,
+            string.IsNullOrWhiteSpace(loaded.Hotkey) ? defaults.Hotkey : loaded.Hotkey,
+            loaded.StartWithWindows,
+            string.IsNullOrWhiteSpace(loaded.IconSize) ? defaults.IconSize : loaded.IconSize,
+            string.IsNullOrWhiteSpace(loaded.ViewMode) ? defaults.ViewMode : loaded.ViewMode,
+            string.IsNullOrWhiteSpace(loaded.IconQuality) ? defaults.IconQuality : loaded.IconQuality);
     }
 
     public void Save(AppSettings settings)
