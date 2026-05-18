@@ -11,12 +11,12 @@
         Topmost="True"
         PreviewKeyDown="Window_PreviewKeyDown"
         Loaded="Window_Loaded">
-    <Window.RenderTransform>
-        <ScaleTransform x:Name="WindowScale" ScaleX="0.98" ScaleY="0.98" />
-    </Window.RenderTransform>
-    <Window.RenderTransformOrigin>0.5,0.5</Window.RenderTransformOrigin>
+    <Grid Background="#CC10151E"
+          RenderTransformOrigin="0.5,0.5">
+        <Grid.RenderTransform>
+            <ScaleTransform x:Name="WindowScale" ScaleX="0.98" ScaleY="0.98" />
+        </Grid.RenderTransform>
 
-    <Grid Background="#CC10151E">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
