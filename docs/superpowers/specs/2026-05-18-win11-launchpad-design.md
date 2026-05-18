@@ -81,6 +81,31 @@ The tray menu includes:
 
 The app watches the launchpad folder with a file system watcher and updates its in-memory shortcut list when files are added, removed, or renamed. Recursive folders are not part of the first version unless explicitly enabled later.
 
+## Existing VUI Import
+
+The workspace contains existing `.vui` files that store launch paths in entries shaped like:
+
+```text
+d1("C:\Program%20Files\App\App.exe")
+```
+
+After the core launchpad is working, add a controlled one-time import path for these files. This is a migration helper, not part of the app's normal runtime scan loop.
+
+Import behavior:
+
+- Read selected `.vui` files without modifying them.
+- Extract quoted values from `d<number>("...")` entries.
+- Ignore empty strings, whitespace-only values, and `NULL`.
+- Decode URL-style escapes such as `%20`.
+- Trim accidental trailing spaces after decoding.
+- Support imported paths that point to `.exe`, `.lnk`, or `.url`.
+- Skip missing paths and report them in a small import summary.
+- Deduplicate by normalized path.
+- For existing `.lnk` and `.url` files, copy them into the launchpad folder when possible.
+- For existing `.exe` files, create a `.lnk` shortcut in the launchpad folder using the executable file name as the display name.
+
+The importer must not use Python. It should be implemented in C# using the same shortcut creation and path-normalization services used by the main app.
+
 ## Hotkey
 
 Default global hotkey:
