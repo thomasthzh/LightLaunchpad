@@ -219,7 +219,11 @@ public partial class App : System.Windows.Application
                 return;
             }
 
-            var executablePath = Environment.ProcessPath ?? Assembly.GetExecutingAssembly().Location;
+            var assemblyPath = Assembly.GetEntryAssembly()?.Location ?? Assembly.GetExecutingAssembly().Location;
+            var appHostPath = Path.ChangeExtension(assemblyPath, ".exe");
+            var executablePath = File.Exists(appHostPath)
+                ? appHostPath
+                : Environment.ProcessPath ?? assemblyPath;
             key.SetValue(AppName, $"\"{executablePath}\"");
         }
     }
