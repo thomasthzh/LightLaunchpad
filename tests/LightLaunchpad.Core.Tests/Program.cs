@@ -6,7 +6,12 @@ internal static class Program
     {
         var tests = new (string Name, Action Run)[]
         {
-            (nameof(LaunchItemTests.LaunchItem_StoresDisplayNameAndSourcePath), LaunchItemTests.LaunchItem_StoresDisplayNameAndSourcePath)
+            (nameof(LaunchItemTests.LaunchItem_StoresDisplayNameAndSourcePath), LaunchItemTests.LaunchItem_StoresDisplayNameAndSourcePath),
+            (nameof(AppSettingsTests.CreateDefault_UsesUserLaunchpadFolderAndAltD), AppSettingsTests.CreateDefault_UsesUserLaunchpadFolderAndAltD),
+            (nameof(AppSettingsTests.SettingsService_LoadsDefaultsWhenFileDoesNotExist), AppSettingsTests.SettingsService_LoadsDefaultsWhenFileDoesNotExist),
+            (nameof(AppSettingsTests.SettingsService_SavesAndLoadsCustomSettings), AppSettingsTests.SettingsService_SavesAndLoadsCustomSettings),
+            (nameof(HotkeyGestureTests.Parse_ReadsAltLetterGesture), HotkeyGestureTests.Parse_ReadsAltLetterGesture),
+            (nameof(HotkeyGestureTests.Parse_NormalizesWhitespaceAndCase), HotkeyGestureTests.Parse_NormalizesWhitespaceAndCase)
         };
 
         var failed = 0;
