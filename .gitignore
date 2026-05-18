@@ -1,0 +1,11 @@
+bin/
+obj/
+.vs/
+.vscode/
+.idea/
+.dotnet/
+.worktrees/
+TestResults/
+*.user
+*.suo
+*.nupkg
