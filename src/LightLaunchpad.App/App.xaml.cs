@@ -3,6 +3,7 @@ using System.IO;
 using System.Reflection;
 using System.Threading;
 using System.Windows;
+using System.Windows.Threading;
 using LightLaunchpad.App.Services;
 using LightLaunchpad.App.ViewModels;
 using LightLaunchpad.Core.Import;
@@ -28,6 +29,7 @@ public partial class App : System.Windows.Application
     private HotkeyService _hotkeyService = null!;
     private TrayService _trayService = null!;
     private ShortcutWatcher _shortcutWatcher = null!;
+    private bool _itemsDirty = true;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -118,7 +120,14 @@ public partial class App : System.Windows.Application
     {
         _shortcutWatcher?.Dispose();
         _shortcutWatcher = new ShortcutWatcher(_settings.LaunchpadFolder);
-        _shortcutWatcher.Changed += (_, _) => Dispatcher.BeginInvoke(RefreshItems);
+        _shortcutWatcher.Changed += (_, _) =>
+        {
+            _itemsDirty = true;
+            if (_launchpadWindow.IsVisible)
+            {
+                Dispatcher.BeginInvoke(RefreshItems);
+            }
+        };
         _shortcutWatcher.Start();
     }
 
@@ -130,8 +139,13 @@ public partial class App : System.Windows.Application
             return;
         }
 
-        RefreshItems();
+        if (_itemsDirty)
+        {
+            RefreshItems();
+        }
+
         _launchpadWindow.ShowLaunchpad();
+        Dispatcher.BeginInvoke(() => _viewModel.LoadMissingIcons(), DispatcherPriority.Background);
     }
 
     private void RefreshItems()
@@ -148,6 +162,7 @@ public partial class App : System.Windows.Application
             _layout = _layoutService.MergeItems(_layout, items);
             _layoutService.Save(_layout);
             _viewModel.LoadItems(_layout, items);
+            _itemsDirty = false;
         }
         catch (Exception ex)
         {

@@ -144,7 +144,7 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
             var layoutItem = FindLayoutItem(item);
             FilteredItems.Add(new LaunchItemViewModel(
                 item with { DisplayName = layoutItem?.DisplayName ?? item.DisplayName },
-                _iconFactory(item),
+                icon: null,
                 ResolveIconSize(),
                 layoutItem?.RegionId ?? LayoutService.UncategorizedRegionId,
                 layoutItem?.Order ?? 0));
@@ -153,6 +153,14 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
         SelectedItem = FilteredItems.FirstOrDefault();
         RefreshRegions();
         RefreshActiveRegion();
+    }
+
+    public void LoadMissingIcons()
+    {
+        foreach (var item in FilteredItems)
+        {
+            item.LoadIcon(_iconFactory);
+        }
     }
 
     private void RefreshRegions()
