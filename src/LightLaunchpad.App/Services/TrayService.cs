@@ -1,3 +1,4 @@
+using System.IO;
 using Forms = System.Windows.Forms;
 
 namespace LightLaunchpad.App.Services;
@@ -16,12 +17,20 @@ public sealed class TrayService : IDisposable
     {
         _notifyIcon = new Forms.NotifyIcon
         {
-            Icon = System.Drawing.SystemIcons.Application,
+            Icon = LoadTrayIcon(),
             Text = "LightLaunchpad",
             Visible = true,
             ContextMenuStrip = BuildMenu(openLaunchpad, openFolder, refresh, openSettings, importVui, exit)
         };
         _notifyIcon.DoubleClick += (_, _) => openLaunchpad();
+    }
+
+    private static System.Drawing.Icon LoadTrayIcon()
+    {
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Alice.ico");
+        return File.Exists(iconPath)
+            ? new System.Drawing.Icon(iconPath)
+            : System.Drawing.SystemIcons.Application;
     }
 
     public void ShowMessage(string title, string message)

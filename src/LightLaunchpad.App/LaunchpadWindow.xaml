@@ -9,6 +9,7 @@
         Background="Transparent"
         ShowInTaskbar="False"
         Topmost="True"
+        Icon="Assets/Alice.gif"
         PreviewKeyDown="Window_PreviewKeyDown"
         Loaded="Window_Loaded">
     <Window.Resources>
