@@ -21,7 +21,9 @@ internal static class Program
             (nameof(LayoutServiceTests.Load_CreatesDefaultLayoutWhenMissing), LayoutServiceTests.Load_CreatesDefaultLayoutWhenMissing),
             (nameof(LayoutServiceTests.MergeItems_AddsNewFolderItemsToUncategorized), LayoutServiceTests.MergeItems_AddsNewFolderItemsToUncategorized),
             (nameof(LayoutServiceTests.DeleteRegion_MovesItemsToUncategorized), LayoutServiceTests.DeleteRegion_MovesItemsToUncategorized),
-            (nameof(LayoutServiceTests.SaveAndLoad_RoundTripsViewMode), LayoutServiceTests.SaveAndLoad_RoundTripsViewMode)
+            (nameof(LayoutServiceTests.SaveAndLoad_RoundTripsViewMode), LayoutServiceTests.SaveAndLoad_RoundTripsViewMode),
+            (nameof(StartMenuImporterTests.Discover_ReadsShortcutsRecursivelyWithRegionHints), StartMenuImporterTests.Discover_ReadsShortcutsRecursivelyWithRegionHints),
+            (nameof(StartMenuImporterTests.Discover_DeduplicatesByNormalizedSourcePath), StartMenuImporterTests.Discover_DeduplicatesByNormalizedSourcePath)
         };
 
         var failed = 0;
