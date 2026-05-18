@@ -25,4 +25,25 @@ internal static class TestAssert
             throw new InvalidOperationException("Expected true, got false.");
         }
     }
+
+    public static void SequenceEqual<T>(IEnumerable<T> expected, IEnumerable<T> actual)
+    {
+        var expectedList = expected.ToList();
+        var actualList = actual.ToList();
+
+        if (expectedList.Count != actualList.Count)
+        {
+            throw new InvalidOperationException(
+                $"Expected sequence length {expectedList.Count}, got {actualList.Count}.");
+        }
+
+        for (var index = 0; index < expectedList.Count; index++)
+        {
+            if (!EqualityComparer<T>.Default.Equals(expectedList[index], actualList[index]))
+            {
+                throw new InvalidOperationException(
+                    $"Expected sequence item {index} to be '{expectedList[index]}', got '{actualList[index]}'.");
+            }
+        }
+    }
 }

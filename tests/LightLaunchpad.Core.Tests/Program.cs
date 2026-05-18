@@ -11,7 +11,11 @@ internal static class Program
             (nameof(AppSettingsTests.SettingsService_LoadsDefaultsWhenFileDoesNotExist), AppSettingsTests.SettingsService_LoadsDefaultsWhenFileDoesNotExist),
             (nameof(AppSettingsTests.SettingsService_SavesAndLoadsCustomSettings), AppSettingsTests.SettingsService_SavesAndLoadsCustomSettings),
             (nameof(HotkeyGestureTests.Parse_ReadsAltLetterGesture), HotkeyGestureTests.Parse_ReadsAltLetterGesture),
-            (nameof(HotkeyGestureTests.Parse_NormalizesWhitespaceAndCase), HotkeyGestureTests.Parse_NormalizesWhitespaceAndCase)
+            (nameof(HotkeyGestureTests.Parse_NormalizesWhitespaceAndCase), HotkeyGestureTests.Parse_NormalizesWhitespaceAndCase),
+            (nameof(ShortcutRepositoryTests.LoadItems_CreatesFolderWhenMissing), ShortcutRepositoryTests.LoadItems_CreatesFolderWhenMissing),
+            (nameof(ShortcutRepositoryTests.LoadItems_IncludesSupportedFilesAndSkipsUnsupportedFiles), ShortcutRepositoryTests.LoadItems_IncludesSupportedFilesAndSkipsUnsupportedFiles),
+            (nameof(LaunchItemSearchTests.Filter_RanksPrefixMatchesBeforeContainsMatches), LaunchItemSearchTests.Filter_RanksPrefixMatchesBeforeContainsMatches),
+            (nameof(LaunchItemSearchTests.Filter_ReturnsAllItemsWhenQueryIsBlank), LaunchItemSearchTests.Filter_ReturnsAllItemsWhenQueryIsBlank)
         };
 
         var failed = 0;
