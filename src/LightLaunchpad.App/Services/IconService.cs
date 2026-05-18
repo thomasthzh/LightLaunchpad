@@ -9,7 +9,11 @@ namespace LightLaunchpad.App.Services;
 public sealed class IconService
 {
     private const uint ShgfiIcon = 0x000000100;
+    private const uint ShgfiSysIconIndex = 0x000004000;
     private const uint ShgfiLargeIcon = 0x000000000;
+    private const int ShilJumbo = 0x4;
+    private const int IldTransparent = 0x1;
+    private static readonly Guid ImageListId = new("46EB5926-582E-4017-9FDF-E8998DAA0950");
     private readonly Dictionary<string, ImageSource?> _cache = new(StringComparer.OrdinalIgnoreCase);
 
     public ImageSource? GetIcon(string path)
@@ -26,6 +30,12 @@ public sealed class IconService
 
     private static ImageSource? ExtractIcon(string path)
     {
+        var jumbo = ExtractJumboIcon(path);
+        if (jumbo is not null)
+        {
+            return jumbo;
+        }
+
         var info = new ShFileInfo();
         var result = SHGetFileInfo(path, 0, ref info, (uint)Marshal.SizeOf<ShFileInfo>(), ShgfiIcon | ShgfiLargeIcon);
         if (result == IntPtr.Zero || info.IconHandle == IntPtr.Zero)
@@ -48,6 +58,50 @@ public sealed class IconService
         }
     }
 
+    private static ImageSource? ExtractJumboIcon(string path)
+    {
+        var info = new ShFileInfo();
+        var result = SHGetFileInfo(path, 0, ref info, (uint)Marshal.SizeOf<ShFileInfo>(), ShgfiSysIconIndex);
+        if (result == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        var imageListId = ImageListId;
+        var imageListResult = SHGetImageList(ShilJumbo, ref imageListId, out var imageList);
+        if (imageListResult != 0 || imageList is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var iconResult = imageList.GetIcon(info.IconIndex, IldTransparent, out var iconHandle);
+            if (iconResult != 0 || iconHandle == IntPtr.Zero)
+            {
+                return null;
+            }
+
+            try
+            {
+                var image = Imaging.CreateBitmapSourceFromHIcon(
+                    iconHandle,
+                    Int32Rect.Empty,
+                    BitmapSizeOptions.FromEmptyOptions());
+                image.Freeze();
+                return image;
+            }
+            finally
+            {
+                DestroyIcon(iconHandle);
+            }
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(imageList);
+        }
+    }
+
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SHGetFileInfo(
         string path,
@@ -58,6 +112,39 @@ public sealed class IconService
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr icon);
+
+    [DllImport("shell32.dll", EntryPoint = "#727")]
+    private static extern int SHGetImageList(int imageList, ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out IImageList? ppv);
+
+    [ComImport]
+    [Guid("46EB5926-582E-4017-9FDF-E8998DAA0950")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IImageList
+    {
+        [PreserveSig]
+        int Add(IntPtr hbmImage, IntPtr hbmMask, ref int pi);
+
+        [PreserveSig]
+        int ReplaceIcon(int i, IntPtr hicon, ref int pi);
+
+        [PreserveSig]
+        int SetOverlayImage(int iImage, int iOverlay);
+
+        [PreserveSig]
+        int Replace(int i, IntPtr hbmImage, IntPtr hbmMask);
+
+        [PreserveSig]
+        int AddMasked(IntPtr hbmImage, int crMask, ref int pi);
+
+        [PreserveSig]
+        int Draw(IntPtr pimldp);
+
+        [PreserveSig]
+        int Remove(int i);
+
+        [PreserveSig]
+        int GetIcon(int i, int flags, out IntPtr picon);
+    }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct ShFileInfo
