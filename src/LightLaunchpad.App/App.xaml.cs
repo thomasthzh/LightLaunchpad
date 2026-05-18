@@ -5,6 +5,8 @@ using System.Threading;
 using System.Windows;
 using LightLaunchpad.App.Services;
 using LightLaunchpad.App.ViewModels;
+using LightLaunchpad.Core.Import;
+using LightLaunchpad.Core.Layout;
 using LightLaunchpad.Core.Settings;
 using LightLaunchpad.Core.Shortcuts;
 
@@ -16,6 +18,8 @@ public partial class App : System.Windows.Application
     private Mutex? _singleInstanceMutex;
     private AppSettings _settings = null!;
     private SettingsService _settingsService = null!;
+    private LayoutService _layoutService = null!;
+    private LaunchpadLayout _layout = null!;
     private ShortcutRepository _repository = null!;
     private IconService _iconService = null!;
     private LaunchpadViewModel _viewModel = null!;
@@ -56,7 +60,11 @@ public partial class App : System.Windows.Application
         var settingsPath = Path.Combine(appData, AppName, "settings.json");
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         _settingsService = new SettingsService(settingsPath, userProfile);
+        _layoutService = new LayoutService(Path.Combine(appData, AppName, "layout.json"));
         _settings = _settingsService.Load();
+        _layout = _layoutService.SetViewMode(
+            _layoutService.Load(),
+            Enum.TryParse<LaunchpadViewMode>(_settings.ViewMode, out var mode) ? mode : LaunchpadViewMode.InlineRegions);
     }
 
     private void BuildServices()
@@ -66,6 +74,16 @@ public partial class App : System.Windows.Application
         _launcherService = new LauncherService();
         _viewModel = new LaunchpadViewModel(_settings, item => _iconService.GetIcon(item.SourcePath));
         _launchpadWindow = new LaunchpadWindow(_viewModel, _launcherService);
+        _launchpadWindow.ViewModeRequested += ApplyViewMode;
+        _launchpadWindow.ImportStartMenuRequested += ImportStartMenuApps;
+        _launchpadWindow.ImportVuiRequested += ImportVuiFiles;
+        _launchpadWindow.OpenSettingsRequested += OpenSettings;
+        _launchpadWindow.CreateRegionRequested += CreateRegion;
+        _launchpadWindow.RenameRegionRequested += RenameRegion;
+        _launchpadWindow.DeleteRegionRequested += DeleteRegion;
+        _launchpadWindow.RenameItemRequested += RenameItem;
+        _launchpadWindow.RemoveItemRequested += RemoveItem;
+        _launchpadWindow.MoveItemRequested += MoveItem;
         _hotkeyService = new HotkeyService(_launchpadWindow);
         _hotkeyService.Pressed += (_, _) => Dispatcher.Invoke(ToggleLaunchpad);
         _trayService = new TrayService(
@@ -126,7 +144,10 @@ public partial class App : System.Windows.Application
 
         try
         {
-            _viewModel.LoadItems(_repository.LoadItems());
+            var items = _repository.LoadItems();
+            _layout = _layoutService.MergeItems(_layout, items);
+            _layoutService.Save(_layout);
+            _viewModel.LoadItems(_layout, items);
         }
         catch (Exception ex)
         {
@@ -165,9 +186,78 @@ public partial class App : System.Windows.Application
         _settingsService.Save(_settings);
         _repository = new ShortcutRepository(_settings.LaunchpadFolder);
         _viewModel.UpdateSettings(_settings);
+        _layout = _layoutService.SetViewMode(
+            _layout,
+            Enum.TryParse<LaunchpadViewMode>(_settings.ViewMode, out var mode) ? mode : _layout.ViewMode);
+        _layoutService.Save(_layout);
         StartWatcher();
         RegisterHotkey();
         StartupRegistrationService.SetEnabled(_settings.StartWithWindows);
+        RefreshItems();
+    }
+
+    private void ApplyViewMode(LaunchpadViewMode viewMode)
+    {
+        _layout = _layoutService.SetViewMode(_layout, viewMode);
+        _layoutService.Save(_layout);
+        _settings = _settings with { ViewMode = viewMode.ToString() };
+        _settingsService.Save(_settings);
+        _viewModel.UpdateSettings(_settings);
+        RefreshItems();
+    }
+
+    private void CreateRegion(string name)
+    {
+        _layout = _layoutService.CreateRegion(_layout, name);
+        _layoutService.Save(_layout);
+        RefreshItems();
+    }
+
+    private void RenameRegion(string regionId, string name)
+    {
+        _layout = _layoutService.RenameRegion(_layout, regionId, name);
+        _layoutService.Save(_layout);
+        RefreshItems();
+    }
+
+    private void DeleteRegion(string regionId)
+    {
+        _layout = _layoutService.DeleteRegion(_layout, regionId);
+        _layoutService.Save(_layout);
+        RefreshItems();
+    }
+
+    private void RenameItem(string sourcePath, string name)
+    {
+        _layout = _layoutService.RenameItem(_layout, sourcePath, name);
+        _layoutService.Save(_layout);
+        RefreshItems();
+    }
+
+    private void RemoveItem(string sourcePath)
+    {
+        _layout = _layoutService.RemoveItem(_layout, sourcePath);
+        _layoutService.Save(_layout);
+
+        try
+        {
+            if (File.Exists(sourcePath))
+            {
+                File.Delete(sourcePath);
+            }
+        }
+        catch (Exception ex)
+        {
+            _trayService.ShowMessage(AppName, $"Removed from layout but could not delete shortcut: {ex.Message}");
+        }
+
+        RefreshItems();
+    }
+
+    private void MoveItem(string sourcePath, string regionId, int order)
+    {
+        _layout = _layoutService.MoveItem(_layout, sourcePath, regionId, order);
+        _layoutService.Save(_layout);
         RefreshItems();
     }
 
@@ -193,6 +283,79 @@ public partial class App : System.Windows.Application
         {
             _trayService.ShowMessage(AppName, $"Could not import .vui files: {ex.Message}");
         }
+    }
+
+    private void ImportStartMenuApps()
+    {
+        try
+        {
+            var roots = new[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu)
+            }.Where(path => !string.IsNullOrWhiteSpace(path) && Directory.Exists(path));
+
+            var candidates = StartMenuImporter.Discover(roots);
+            var importer = new StartMenuImportService(_settings.LaunchpadFolder);
+            var summary = importer.Import(candidates);
+            EnsureNeeViewShortcut(summary);
+            _layout = _layoutService.MergeItems(_layout, _repository.LoadItems());
+            ApplyRegionHints(summary.ImportedItems);
+            RefreshItems();
+            _trayService.ShowMessage(AppName, $"Imported {summary.ImportedItems.Count} Start Menu item(s).");
+        }
+        catch (Exception ex)
+        {
+            _trayService.ShowMessage(AppName, $"Could not import Start Menu apps: {ex.Message}");
+        }
+    }
+
+    private void EnsureNeeViewShortcut(StartMenuImportSummary summary)
+    {
+        if (summary.ImportedItems.Any(item => Path.GetFileNameWithoutExtension(item.SourcePath).Contains("NeeView", StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        var neeViewPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            @"Microsoft\WindowsApps\NeeView.exe");
+        if (!File.Exists(neeViewPath))
+        {
+            return;
+        }
+
+        var shortcutPath = Path.Combine(_settings.LaunchpadFolder, "NeeView.lnk");
+        var index = 2;
+        while (File.Exists(shortcutPath))
+        {
+            shortcutPath = Path.Combine(_settings.LaunchpadFolder, $"NeeView ({index}).lnk");
+            index++;
+        }
+
+        new ShellShortcutService().CreateShortcut(shortcutPath, neeViewPath);
+        summary.ImportedItems.Add(new ImportedStartMenuItem(shortcutPath, "Apps"));
+    }
+
+    private void ApplyRegionHints(IEnumerable<ImportedStartMenuItem> importedItems)
+    {
+        foreach (var item in importedItems)
+        {
+            var regionName = string.IsNullOrWhiteSpace(item.RegionHint) ? "Uncategorized" : item.RegionHint;
+            var region = _layout.Regions.FirstOrDefault(region => string.Equals(region.Name, regionName, StringComparison.OrdinalIgnoreCase));
+            if (region is null)
+            {
+                _layout = _layoutService.CreateRegion(_layout, regionName);
+                region = _layout.Regions.FirstOrDefault(existing => string.Equals(existing.Name, regionName, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (region is not null)
+            {
+                _layout = _layoutService.MoveItem(_layout, item.SourcePath, region.Id, int.MaxValue);
+            }
+        }
+
+        _layoutService.Save(_layout);
     }
 
     private static List<string> FindVuiFiles()

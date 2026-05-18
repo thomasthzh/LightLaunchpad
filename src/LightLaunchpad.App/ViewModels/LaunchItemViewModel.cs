@@ -5,16 +5,24 @@ namespace LightLaunchpad.App.ViewModels;
 
 public sealed class LaunchItemViewModel
 {
-    public LaunchItemViewModel(LaunchItem item, ImageSource? icon, double iconSize)
+    public LaunchItemViewModel(LaunchItem item, ImageSource? icon, double iconSize, string regionId, int order)
     {
         Item = item;
         Icon = icon;
         IconSize = iconSize;
+        RegionId = regionId;
+        Order = order;
     }
 
     public LaunchItem Item { get; }
 
     public string DisplayName => Item.DisplayName;
+
+    public string SourcePath => Item.SourcePath;
+
+    public string RegionId { get; }
+
+    public int Order { get; }
 
     public ImageSource? Icon { get; }
 
