@@ -7,7 +7,12 @@ public sealed record AppSettings(
     string IconSize,
     string ViewMode,
     string IconQuality,
-    string DisplayMode = LaunchpadDisplayModes.Launchpad)
+    string DisplayMode = LaunchpadDisplayModes.Launchpad,
+    string Language = AppLanguages.English,
+    double SpotlightWidth = AppSettingLimits.DefaultSpotlightWidth,
+    double SpotlightHeight = AppSettingLimits.DefaultSpotlightHeight,
+    double AppSpacing = AppSettingLimits.DefaultAppSpacing,
+    double MouseSensitivity = AppSettingLimits.DefaultMouseSensitivity)
 {
     public static AppSettings CreateDefault(string userProfilePath)
     {
@@ -18,6 +23,11 @@ public sealed record AppSettings(
             IconSize: "Medium",
             ViewMode: "InlineRegions",
             IconQuality: "High",
-            DisplayMode: LaunchpadDisplayModes.Launchpad);
+            DisplayMode: LaunchpadDisplayModes.Launchpad,
+            Language: AppLanguages.English,
+            SpotlightWidth: AppSettingLimits.DefaultSpotlightWidth,
+            SpotlightHeight: AppSettingLimits.DefaultSpotlightHeight,
+            AppSpacing: AppSettingLimits.DefaultAppSpacing,
+            MouseSensitivity: AppSettingLimits.DefaultMouseSensitivity);
     }
 }

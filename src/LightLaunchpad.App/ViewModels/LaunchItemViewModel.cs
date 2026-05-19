@@ -1,4 +1,5 @@
 using System.Windows.Media;
+using System.Windows;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using LightLaunchpad.Core.Shortcuts;
@@ -16,6 +17,7 @@ public sealed class LaunchItemViewModel : INotifyPropertyChanged
         LaunchItem item,
         ImageSource? icon,
         double iconSize,
+        double appSpacing,
         string regionId,
         int order,
         bool iconLoadAttempted = false)
@@ -24,6 +26,7 @@ public sealed class LaunchItemViewModel : INotifyPropertyChanged
         _icon = icon;
         _iconLoadAttempted = iconLoadAttempted || icon is not null;
         IconSize = iconSize;
+        AppMargin = new Thickness(appSpacing);
         RegionId = regionId;
         Order = order;
     }
@@ -54,6 +57,8 @@ public sealed class LaunchItemViewModel : INotifyPropertyChanged
     }
 
     public double IconSize { get; }
+
+    public Thickness AppMargin { get; }
 
     public double TileSize => IconSize + 78;
 

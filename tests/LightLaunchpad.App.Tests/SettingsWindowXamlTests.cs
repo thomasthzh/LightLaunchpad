@@ -13,6 +13,19 @@ public sealed class SettingsWindowXamlTests
         TestAssert.Contains("Tag=\"Spotlight\" Content=\"聚焦\"", xaml);
     }
 
+    public static void SettingsWindow_OffersLanguageAndSpotlightTuning()
+    {
+        var xaml = File.ReadAllText(FindSettingsWindowXaml());
+
+        TestAssert.Contains("x:Name=\"LanguageComboBox\"", xaml);
+        TestAssert.Contains("Tag=\"English\" Content=\"English\"", xaml);
+        TestAssert.Contains("Tag=\"Chinese\" Content=\"中文\"", xaml);
+        TestAssert.Contains("x:Name=\"SpotlightWidthTextBox\"", xaml);
+        TestAssert.Contains("x:Name=\"SpotlightHeightTextBox\"", xaml);
+        TestAssert.Contains("x:Name=\"AppSpacingTextBox\"", xaml);
+        TestAssert.Contains("x:Name=\"MouseSensitivityTextBox\"", xaml);
+    }
+
     private static string FindSettingsWindowXaml()
     {
         var current = new DirectoryInfo(Environment.CurrentDirectory);

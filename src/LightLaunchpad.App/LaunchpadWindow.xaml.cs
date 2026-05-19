@@ -20,7 +20,8 @@ public partial class LaunchpadWindow : Window
 {
     private readonly LaunchpadViewModel _viewModel;
     private readonly LauncherService _launcherService;
-    private readonly DragService _drag = new();
+    private readonly DragService _drag;
+    private AppSettings _settings;
     private LaunchItemViewModel? _dragItem;
     private IReadOnlyList<LaunchItemViewModel> _dragItems = [];
     private bool _dragCompleted;
@@ -31,12 +32,15 @@ public partial class LaunchpadWindow : Window
     private bool _rubberBanding;
     private System.Windows.Point _rubberBandStart;
 
-    public LaunchpadWindow(LaunchpadViewModel viewModel, LauncherService launcherService)
+    public LaunchpadWindow(LaunchpadViewModel viewModel, LauncherService launcherService, AppSettings settings)
     {
         _viewModel = viewModel;
         _launcherService = launcherService;
+        _settings = settings;
+        _drag = new DragService(settings.MouseSensitivity);
         DataContext = viewModel;
         InitializeComponent();
+        ApplySettings(settings);
         PreviewMouseMove += Window_PreviewMouseMove;
         PreviewMouseLeftButtonUp += Window_PreviewMouseLeftButtonUp;
         PreviewMouseLeftButtonDown += Window_PreviewMouseLeftButtonDown;
@@ -46,8 +50,6 @@ public partial class LaunchpadWindow : Window
     public event Action<LaunchpadViewMode>? ViewModeRequested;
 
     public event Action? ImportStartMenuRequested;
-
-    public event Action? ImportVuiRequested;
 
     public event Action? OpenSettingsRequested;
 
@@ -61,6 +63,10 @@ public partial class LaunchpadWindow : Window
 
     public event Action<string>? DeleteRegionRequested;
 
+    public event Action<IReadOnlyList<string>, string>? RenameRegionsRequested;
+
+    public event Action<IReadOnlyList<string>>? DeleteRegionsRequested;
+
     public event Action<string, string>? RenameItemRequested;
 
     public event Action<string>? RemoveItemRequested;
@@ -71,13 +77,32 @@ public partial class LaunchpadWindow : Window
 
     public void ShowLaunchpad()
     {
-        ShowLaunchpad(LaunchpadDisplayModes.Launchpad);
+        ShowLaunchpad(_settings);
     }
 
     public void ShowLaunchpad(string displayMode)
     {
-        ApplyDisplayMode(displayMode);
+        ApplyDisplayMode(displayMode, new SpotlightWindowOptions(
+            AppSettingLimits.DefaultSpotlightWidth,
+            AppSettingLimits.DefaultSpotlightHeight));
+        ShowAnimated();
+    }
 
+    public void ShowLaunchpad(AppSettings settings)
+    {
+        ApplySettings(settings);
+        ApplyDisplayMode(settings.DisplayMode, new SpotlightWindowOptions(settings.SpotlightWidth, settings.SpotlightHeight));
+        ShowAnimated();
+    }
+
+    public void ApplySettings(AppSettings settings)
+    {
+        _settings = settings;
+        _drag.MouseSensitivity = settings.MouseSensitivity;
+    }
+
+    private void ShowAnimated()
+    {
         Opacity = 0;
         WindowTranslate.Y = 10;
         Show();
@@ -88,7 +113,7 @@ public partial class LaunchpadWindow : Window
         WindowTranslate.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(0, TimeSpan.FromMilliseconds(130)));
     }
 
-    private void ApplyDisplayMode(string displayMode)
+    private void ApplyDisplayMode(string displayMode, SpotlightWindowOptions spotlightOptions)
     {
         _isSpotlightMode = LaunchpadDisplayModes.IsSpotlight(displayMode);
         var workArea = SystemParameters.WorkArea;
@@ -99,7 +124,8 @@ public partial class LaunchpadWindow : Window
                 SystemParameters.VirtualScreenTop,
                 SystemParameters.VirtualScreenWidth,
                 SystemParameters.VirtualScreenHeight),
-            new ScreenBounds(workArea.Left, workArea.Top, workArea.Width, workArea.Height));
+            new ScreenBounds(workArea.Left, workArea.Top, workArea.Width, workArea.Height),
+            spotlightOptions);
 
         Left = bounds.Left;
         Top = bounds.Top;
@@ -114,6 +140,14 @@ public partial class LaunchpadWindow : Window
         FocusSurface.Background = _isSpotlightMode
             ? new SolidColorBrush(WpfColor.FromArgb(238, 16, 21, 30))
             : new SolidColorBrush(WpfColor.FromArgb(204, 16, 21, 30));
+        if (_isSpotlightMode)
+        {
+            ScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
+        }
+        else
+        {
+            ScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+        }
     }
 
     public void HideLaunchpad()
@@ -209,6 +243,22 @@ public partial class LaunchpadWindow : Window
             return;
         }
 
+        var regionVm = FindDataContext<LaunchpadRegionViewModel>(hit);
+        if (regionVm is not null && IsRegionSelectionSurface(hit))
+        {
+            if (Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                _viewModel.ToggleSelectRegion(regionVm);
+            }
+            else
+            {
+                _viewModel.SelectRegion(regionVm);
+            }
+
+            e.Handled = true;
+            return;
+        }
+
         // Click on empty space: start rubber band
         if (InteractiveElementHitTest.IsOverInteractiveElement(hit)) return;
 
@@ -279,6 +329,7 @@ public partial class LaunchpadWindow : Window
 
             var rect = new Rect(x, y, w, h);
             SelectItemsInRect(rect);
+            SelectRegionsInRect(rect);
             e.Handled = true;
         }
     }
@@ -525,6 +576,29 @@ public partial class LaunchpadWindow : Window
         }
     }
 
+    private void SelectRegionsInRect(Rect rect)
+    {
+        foreach (var region in _viewModel.Regions)
+        {
+            var panel = FindRegionPanel(region.Id);
+            if (panel is null) continue;
+
+            try
+            {
+                var pos = panel.TransformToAncestor(ContentGrid).Transform(new System.Windows.Point(0, 0));
+                var regionRect = new Rect(pos.X, pos.Y, panel.ActualWidth, panel.ActualHeight);
+                if (rect.IntersectsWith(regionRect))
+                    region.IsSelected = true;
+                else if (Keyboard.Modifiers != ModifierKeys.Control)
+                    region.IsSelected = false;
+            }
+            catch
+            {
+                // Element may not be in tree.
+            }
+        }
+    }
+
     private static FrameworkElement? FindVisualForItem(DependencyObject root, LaunchItemViewModel target)
     {
         FrameworkElement? fallback = null;
@@ -654,6 +728,19 @@ public partial class LaunchpadWindow : Window
         return null;
     }
 
+    private static bool IsRegionSelectionSurface(DependencyObject? obj)
+    {
+        while (obj is not null)
+        {
+            if (obj is TextBlock { DataContext: LaunchpadRegionViewModel })
+                return true;
+
+            obj = VisualTreeHelper.GetParent(obj);
+        }
+
+        return false;
+    }
+
     // --- Gear / menu ---
 
     private void GearButton_Click(object sender, RoutedEventArgs e)
@@ -673,14 +760,40 @@ public partial class LaunchpadWindow : Window
 
     private void ImportStartMenu_Click(object sender, RoutedEventArgs e) => ImportStartMenuRequested?.Invoke();
 
-    private void ImportVui_Click(object sender, RoutedEventArgs e) => ImportVuiRequested?.Invoke();
-
     private void OpenSettings_Click(object sender, RoutedEventArgs e) => OpenSettingsRequested?.Invoke();
 
     private void RegionTab_Click(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { Tag: string regionId })
+        {
             _viewModel.ActiveRegionId = regionId;
+            if (sender is FrameworkElement { DataContext: LaunchpadRegionViewModel region })
+            {
+                if (Keyboard.Modifiers == ModifierKeys.Control)
+                    _viewModel.ToggleSelectRegion(region);
+                else
+                    _viewModel.SelectRegion(region);
+            }
+        }
+    }
+
+    private void RegionHeader_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: LaunchpadRegionViewModel region })
+        {
+            return;
+        }
+
+        if (Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            _viewModel.ToggleSelectRegion(region);
+        }
+        else
+        {
+            _viewModel.SelectRegion(region);
+        }
+
+        e.Handled = true;
     }
 
     private void CreateRegion_Click(object sender, RoutedEventArgs e)
@@ -707,6 +820,45 @@ public partial class LaunchpadWindow : Window
         {
             DeleteRegionRequested?.Invoke(region.Id);
         }
+    }
+
+    private void BatchRenameRegions_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = ResolveSelectedRegionIds(sender);
+        if (selected.Count == 0) return;
+
+        var name = Prompt("Rename selected regions", "Region name:", selected.Count == 1 ? "Region" : "Selected Regions");
+        if (!string.IsNullOrWhiteSpace(name))
+            RenameRegionsRequested?.Invoke(selected, name);
+    }
+
+    private void BatchDeleteRegions_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = ResolveSelectedRegionIds(sender);
+        if (selected.Count == 0) return;
+
+        if (System.Windows.MessageBox.Show(
+                $"Delete {selected.Count} selected region(s)? Apps will move to Uncategorized.",
+                "LightLaunchpad", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
+        {
+            DeleteRegionsRequested?.Invoke(selected);
+        }
+    }
+
+    private IReadOnlyList<string> ResolveSelectedRegionIds(object sender)
+    {
+        var selected = _viewModel.SelectedRegions.Select(region => region.Id).ToList();
+        if (selected.Count > 0)
+        {
+            return selected;
+        }
+
+        if ((sender as MenuItem)?.CommandParameter is LaunchpadRegionViewModel region)
+        {
+            return [region.Id];
+        }
+
+        return [];
     }
 
     private void LaunchItem_DoubleClick(object sender, MouseButtonEventArgs e)

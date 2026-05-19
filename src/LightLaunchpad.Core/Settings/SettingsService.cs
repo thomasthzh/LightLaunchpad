@@ -40,7 +40,12 @@ public sealed class SettingsService
             string.IsNullOrWhiteSpace(loaded.IconSize) ? defaults.IconSize : loaded.IconSize,
             string.IsNullOrWhiteSpace(loaded.ViewMode) ? defaults.ViewMode : loaded.ViewMode,
             string.IsNullOrWhiteSpace(loaded.IconQuality) ? defaults.IconQuality : loaded.IconQuality,
-            LaunchpadDisplayModes.Normalize(loaded.DisplayMode));
+            LaunchpadDisplayModes.Normalize(loaded.DisplayMode),
+            AppLanguages.Normalize(loaded.Language),
+            AppSettingLimits.NormalizeSpotlightWidth(loaded.SpotlightWidth),
+            AppSettingLimits.NormalizeSpotlightHeight(loaded.SpotlightHeight),
+            AppSettingLimits.NormalizeAppSpacing(loaded.AppSpacing),
+            AppSettingLimits.NormalizeMouseSensitivity(loaded.MouseSensitivity));
     }
 
     public void Save(AppSettings settings)

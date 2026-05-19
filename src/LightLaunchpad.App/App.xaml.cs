@@ -86,9 +86,7 @@ public partial class App : System.Windows.Application
         _hotkeySinkWindow = new HotkeySinkWindow();
         _hotkeyService = new HotkeyService(_hotkeySinkWindow);
         _hotkeyService.Pressed += (_, _) => Dispatcher.Invoke(ToggleLaunchpad);
-        _trayService = new TrayService(
-            ToggleLaunchpad, OpenLaunchpadFolder, RefreshItems,
-            OpenSettings, ImportVuiFiles, ExitApplication);
+        _trayService = CreateTrayService();
 
         RegisterHotkey();
         StartWatcher();
@@ -153,7 +151,7 @@ public partial class App : System.Windows.Application
             RefreshItems();
         }
 
-        _launchpadWindow?.ShowLaunchpad(_settings.DisplayMode);
+        _launchpadWindow?.ShowLaunchpad(_settings);
         QueueVisibleIconLoad();
     }
 
@@ -299,6 +297,9 @@ public partial class App : System.Windows.Application
             Enum.TryParse<LaunchpadViewMode>(_settings.ViewMode, out var mode) ? mode : _layout.ViewMode);
         _layoutService.Save(_layout);
         _viewModel.UpdateSettings(_settings, _iconCache);
+        _launchpadWindow?.ApplySettings(_settings);
+        _trayService.Dispose();
+        _trayService = CreateTrayService();
         StartWatcher();
         RegisterHotkey();
         StartupRegistrationService.SetEnabled(_settings.StartWithWindows);
@@ -331,6 +332,28 @@ public partial class App : System.Windows.Application
     private void DeleteRegion(string regionId)
     {
         _layout = _layoutService.DeleteRegion(_layout, regionId);
+        _layoutService.Save(_layout);
+        RefreshItems();
+    }
+
+    private void RenameRegions(IReadOnlyList<string> regionIds, string name)
+    {
+        foreach (var regionId in regionIds.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            _layout = _layoutService.RenameRegion(_layout, regionId, name);
+        }
+
+        _layoutService.Save(_layout);
+        RefreshItems();
+    }
+
+    private void DeleteRegions(IReadOnlyList<string> regionIds)
+    {
+        foreach (var regionId in regionIds.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            _layout = _layoutService.DeleteRegion(_layout, regionId);
+        }
+
         _layoutService.Save(_layout);
         RefreshItems();
     }
@@ -382,30 +405,6 @@ public partial class App : System.Windows.Application
         _layout = _layoutService.MoveItems(_layout, sourcePaths, regionId, order);
         _layoutService.Save(_layout);
         RefreshItems();
-    }
-
-    private void ImportVuiFiles()
-    {
-        try
-        {
-            var vuiFiles = FindVuiFiles();
-            if (vuiFiles.Count == 0)
-            {
-                _trayService.ShowMessage(AppName, "No .vui files were found near the app or current directory.");
-                return;
-            }
-
-            var importer = new VuiImportService(_settings.LaunchpadFolder, new ShellShortcutService());
-            var summary = importer.Import(vuiFiles);
-            RefreshItems();
-            _trayService.ShowMessage(
-                AppName,
-                $"Imported {summary.ImportedCount} item(s). Skipped {summary.MissingCount} missing and {summary.UnsupportedCount} unsupported path(s).");
-        }
-        catch (Exception ex)
-        {
-            _trayService.ShowMessage(AppName, $"Could not import .vui files: {ex.Message}");
-        }
     }
 
     private void ImportFromDialog()
@@ -518,29 +517,6 @@ public partial class App : System.Windows.Application
         _layoutService.Save(_layout);
     }
 
-    private static List<string> FindVuiFiles()
-    {
-        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        AddDirectoryAndParents(Environment.CurrentDirectory, roots);
-        AddDirectoryAndParents(AppContext.BaseDirectory, roots);
-
-        return roots
-            .Where(Directory.Exists)
-            .SelectMany(root => Directory.EnumerateFiles(root, "*.vui", SearchOption.TopDirectoryOnly))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-    }
-
-    private static void AddDirectoryAndParents(string directory, ISet<string> roots)
-    {
-        var current = new DirectoryInfo(directory);
-        for (var depth = 0; current is not null && depth < 8; depth++)
-        {
-            roots.Add(current.FullName);
-            current = current.Parent;
-        }
-    }
-
     private static string CreateLaunchFileFilter()
     {
         var patterns = LaunchFileTypes.SupportedExtensions
@@ -568,20 +544,32 @@ public partial class App : System.Windows.Application
             return;
         }
 
-        _launchpadWindow = new LaunchpadWindow(_viewModel, _launcherService);
+        _launchpadWindow = new LaunchpadWindow(_viewModel, _launcherService, _settings);
         _launchpadWindow.ViewModeRequested += ApplyViewMode;
         _launchpadWindow.ImportStartMenuRequested += ImportStartMenuApps;
-        _launchpadWindow.ImportVuiRequested += ImportVuiFiles;
         _launchpadWindow.OpenSettingsRequested += OpenSettings;
         _launchpadWindow.CreateRegionRequested += CreateRegion;
         _launchpadWindow.RenameRegionRequested += RenameRegion;
         _launchpadWindow.DeleteRegionRequested += DeleteRegion;
+        _launchpadWindow.RenameRegionsRequested += RenameRegions;
+        _launchpadWindow.DeleteRegionsRequested += DeleteRegions;
         _launchpadWindow.RenameItemRequested += RenameItem;
         _launchpadWindow.RemoveItemRequested += RemoveItem;
         _launchpadWindow.MoveItemRequested += MoveItem;
         _launchpadWindow.MoveItemsRequested += MoveItems;
         _launchpadWindow.ImportClicked += ImportFromDialog;
         _launchpadWindow.HiddenCompleted += ScheduleIconRelease;
+    }
+
+    private TrayService CreateTrayService()
+    {
+        return new TrayService(
+            ToggleLaunchpad,
+            OpenLaunchpadFolder,
+            RefreshItems,
+            OpenSettings,
+            ExitApplication,
+            _settings.Language);
     }
 
     private static class StartupRegistrationService

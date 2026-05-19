@@ -19,6 +19,7 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
     private LaunchpadLayout _layout = new(LaunchpadViewMode.InlineRegions, [], []);
     private string _searchText = string.Empty;
     private double _iconSizePx = 56;
+    private double _appSpacing = AppSettingLimits.DefaultAppSpacing;
     private LaunchpadViewMode _viewMode = LaunchpadViewMode.InlineRegions;
     private string _activeRegionId = LayoutService.UncategorizedRegionId;
     private LaunchItemViewModel? _selectedItem;
@@ -26,6 +27,7 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
     public LaunchpadViewModel(AppSettings settings, IconCacheService iconCache)
     {
         _iconSizePx = ResolveIconSizePx(settings.IconSize);
+        _appSpacing = AppSettingLimits.NormalizeAppSpacing(settings.AppSpacing);
         _viewMode = Enum.TryParse<LaunchpadViewMode>(settings.ViewMode, out var mode)
             ? mode
             : LaunchpadViewMode.InlineRegions;
@@ -39,6 +41,9 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
     public ObservableCollection<LaunchpadRegionViewModel> Regions { get; } = [];
 
     public ObservableCollection<LaunchItemViewModel> ActiveRegionItems { get; } = [];
+
+    public IReadOnlyList<LaunchpadRegionViewModel> SelectedRegions =>
+        Regions.Where(region => region.IsSelected).ToList();
 
     public LaunchpadViewMode ViewMode
     {
@@ -99,6 +104,7 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
     public void UpdateSettings(AppSettings settings, IconCacheService iconCache)
     {
         _iconSizePx = ResolveIconSizePx(settings.IconSize);
+        _appSpacing = AppSettingLimits.NormalizeAppSpacing(settings.AppSpacing);
         _iconCache = iconCache;
         if (Enum.TryParse<LaunchpadViewMode>(settings.ViewMode, out var mode))
         {
@@ -138,6 +144,7 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
                 item with { DisplayName = layoutItem?.DisplayName ?? item.DisplayName },
                 existing?.Icon,
                 _iconSizePx,
+                _appSpacing,
                 layoutItem?.RegionId ?? LayoutService.UncategorizedRegionId,
                 layoutItem?.Order ?? 0,
                 existing?.IconLoadAttempted ?? false)
@@ -216,13 +223,19 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
 
     private void RefreshRegions()
     {
+        var selectedRegionIds = SelectedRegions
+            .Select(region => region.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         Regions.Clear();
         var filteredByRegion = FilteredItems.GroupBy(item => item.RegionId)
             .ToDictionary(g => g.Key, g => g.ToList());
 
         foreach (var region in _layout.Regions.OrderBy(region => region.Order))
         {
-            var regionViewModel = new LaunchpadRegionViewModel(region.Id, region.Name);
+            var regionViewModel = new LaunchpadRegionViewModel(region.Id, region.Name)
+            {
+                IsSelected = selectedRegionIds.Contains(region.Id)
+            };
             if (filteredByRegion.TryGetValue(region.Id, out var regionItems))
             {
                 foreach (var item in regionItems.OrderBy(item => item.Order)
@@ -319,6 +332,31 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
         foreach (var item in FilteredItems)
         {
             item.IsSelected = false;
+        }
+
+        ClearRegionSelection();
+    }
+
+    public void SelectRegion(LaunchpadRegionViewModel region, bool addToSelection = false)
+    {
+        if (!addToSelection)
+        {
+            ClearRegionSelection();
+        }
+
+        region.IsSelected = true;
+    }
+
+    public void ToggleSelectRegion(LaunchpadRegionViewModel region)
+    {
+        region.IsSelected = !region.IsSelected;
+    }
+
+    public void ClearRegionSelection()
+    {
+        foreach (var region in Regions)
+        {
+            region.IsSelected = false;
         }
     }
 

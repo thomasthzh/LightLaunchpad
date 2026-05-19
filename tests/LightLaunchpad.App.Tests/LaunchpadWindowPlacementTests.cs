@@ -30,6 +30,20 @@ public sealed class LaunchpadWindowPlacementTests
         TestAssert.Equal(90d, bounds.Top);
     }
 
+    public static void Calculate_UsesConfiguredSpotlightWindowSize()
+    {
+        var virtualScreen = new ScreenBounds(0, 0, 1920, 1080);
+        var workArea = new ScreenBounds(0, 0, 1440, 900);
+        var options = new SpotlightWindowOptions(840, 640);
+
+        var bounds = LaunchpadWindowPlacement.Calculate("Spotlight", virtualScreen, workArea, options);
+
+        TestAssert.Equal(840d, bounds.Width);
+        TestAssert.Equal(640d, bounds.Height);
+        TestAssert.Equal(300d, bounds.Left);
+        TestAssert.Equal(130d, bounds.Top);
+    }
+
     public static void Calculate_KeepsSmallSpotlightWindowWithinWorkAreaPadding()
     {
         var virtualScreen = new ScreenBounds(0, 0, 900, 700);
