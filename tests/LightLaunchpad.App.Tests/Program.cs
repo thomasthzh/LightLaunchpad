@@ -14,6 +14,12 @@ internal static class Program
                 nameof(InteractiveElementHitTestTests.IsOverInteractiveElement_IgnoresPlainLayoutSurfaces),
                 InteractiveElementHitTestTests.IsOverInteractiveElement_IgnoresPlainLayoutSurfaces),
             (
+                nameof(IconSourceResolverTests.ResolveIconSources_PrefersSteamUrlIconFile),
+                IconSourceResolverTests.ResolveIconSources_PrefersSteamUrlIconFile),
+            (
+                nameof(IconSourceResolverTests.ResolveIconSources_FallsBackToUrlFileWhenIconFileIsMissing),
+                IconSourceResolverTests.ResolveIconSources_FallsBackToUrlFileWhenIconFileIsMissing),
+            (
                 nameof(LaunchpadViewModelIconStabilityTests.LoadItems_PreservesLoadedIconForMatchingSourcePath),
                 LaunchpadViewModelIconStabilityTests.LoadItems_PreservesLoadedIconForMatchingSourcePath),
             (

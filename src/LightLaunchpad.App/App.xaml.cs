@@ -263,7 +263,7 @@ public partial class App : System.Windows.Application
             _iconCache.Cleanup(
                 items.Select(i => i.SourcePath),
                 items.Select(i => i.TargetPath),
-                items.Select(i => i.Kind == LaunchItemKind.Shortcut));
+                items.Select(i => i.Kind));
 
             _viewModel.LoadItems(_layout, items);
             _itemsDirty = false;
@@ -356,10 +356,14 @@ public partial class App : System.Windows.Application
     private void RemoveItem(string sourcePath)
     {
         var cachedItem = _viewModel.FindItemBySourcePath(sourcePath);
+        var cacheKind = cachedItem?.Kind
+            ?? (LaunchFileTypes.TryGetKind(sourcePath, out var resolvedKind)
+                ? resolvedKind
+                : LaunchItemKind.Executable);
         _iconCache.DeleteIcon(
             sourcePath,
             cachedItem?.TargetPath,
-            cachedItem?.Kind == LaunchItemKind.Shortcut);
+            cacheKind);
 
         _layout = _layoutService.RemoveItem(_layout, sourcePath);
         _layoutService.Save(_layout);
@@ -421,8 +425,8 @@ public partial class App : System.Windows.Application
         {
             var dialog = new Microsoft.Win32.OpenFileDialog
             {
-                Title = "Import shortcuts, executables, or URL files",
-                Filter = "Supported files (*.lnk;*.url;*.exe)|*.lnk;*.url;*.exe|Shortcuts (*.lnk)|*.lnk|URL files (*.url)|*.url|Executables (*.exe)|*.exe",
+                Title = "Import launchable files",
+                Filter = CreateLaunchFileFilter(),
                 Multiselect = true
             };
 
@@ -432,6 +436,8 @@ public partial class App : System.Windows.Application
             var imported = 0;
             foreach (var file in dialog.FileNames)
             {
+                if (!LaunchFileTypes.IsSupported(file)) continue;
+
                 var destPath = Path.Combine(destDir, Path.GetFileName(file));
                 if (File.Exists(destPath)) continue;
                 File.Copy(file, destPath);
@@ -541,6 +547,16 @@ public partial class App : System.Windows.Application
             roots.Add(current.FullName);
             current = current.Parent;
         }
+    }
+
+    private static string CreateLaunchFileFilter()
+    {
+        var patterns = LaunchFileTypes.SupportedExtensions
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .Select(extension => "*" + extension)
+            .ToArray();
+        var joined = string.Join(";", patterns);
+        return $"Launchable files ({joined})|{joined}|Shortcuts (*.lnk)|*.lnk|URL files (*.url)|*.url|Executable files (*.exe;*.com)|*.exe;*.com";
     }
 
     private void ExitApplication()

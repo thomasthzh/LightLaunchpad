@@ -21,6 +21,9 @@ public sealed class ShortcutRepositoryTests
         var launchpadFolder = TestPaths.CreateTempDirectory();
         File.WriteAllText(Path.Combine(launchpadFolder, "Code.lnk"), "");
         File.WriteAllText(Path.Combine(launchpadFolder, "Docs.url"), "");
+        File.WriteAllText(Path.Combine(launchpadFolder, "ClickOnce.appref-ms"), "");
+        File.WriteAllText(Path.Combine(launchpadFolder, "Control.cpl"), "");
+        File.WriteAllText(Path.Combine(launchpadFolder, "Script.cmd"), "");
         File.WriteAllText(Path.Combine(launchpadFolder, "Tool.exe"), "");
         File.WriteAllText(Path.Combine(launchpadFolder, "Notes.txt"), "");
         Directory.CreateDirectory(Path.Combine(launchpadFolder, "Nested"));
@@ -29,9 +32,17 @@ public sealed class ShortcutRepositoryTests
 
         var items = repository.LoadItems();
 
-        TestAssert.SequenceEqual(new[] { "Code", "Docs", "Tool" }, items.Select(item => item.DisplayName));
+        TestAssert.SequenceEqual(new[] { "ClickOnce", "Code", "Control", "Docs", "Script", "Tool" }, items.Select(item => item.DisplayName));
         TestAssert.SequenceEqual(
-            new[] { LaunchItemKind.Shortcut, LaunchItemKind.Url, LaunchItemKind.Executable },
+            new[]
+            {
+                LaunchItemKind.Executable,
+                LaunchItemKind.Shortcut,
+                LaunchItemKind.Executable,
+                LaunchItemKind.Url,
+                LaunchItemKind.Executable,
+                LaunchItemKind.Executable
+            },
             items.Select(item => item.Kind));
     }
 }

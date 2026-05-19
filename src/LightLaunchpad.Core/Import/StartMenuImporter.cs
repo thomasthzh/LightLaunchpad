@@ -1,13 +1,9 @@
+using LightLaunchpad.Core.Shortcuts;
+
 namespace LightLaunchpad.Core.Import;
 
 public static class StartMenuImporter
 {
-    private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".lnk",
-        ".url"
-    };
-
     public static IReadOnlyList<StartMenuImportCandidate> Discover(IEnumerable<string> roots)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -16,7 +12,7 @@ public static class StartMenuImporter
         foreach (var root in roots.Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             foreach (var file in Directory.EnumerateFiles(root, "*.*", SearchOption.AllDirectories)
-                         .Where(path => SupportedExtensions.Contains(Path.GetExtension(path))))
+                         .Where(LaunchFileTypes.IsSupported))
             {
                 var normalized = NormalizePath(file);
                 if (!seen.Add(normalized))

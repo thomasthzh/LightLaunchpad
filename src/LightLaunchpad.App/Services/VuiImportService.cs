@@ -1,17 +1,11 @@
 using System.IO;
 using LightLaunchpad.Core.Import;
+using LightLaunchpad.Core.Shortcuts;
 
 namespace LightLaunchpad.App.Services;
 
 public sealed class VuiImportService
 {
-    private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".exe",
-        ".lnk",
-        ".url"
-    };
-
     private readonly string _launchpadFolder;
     private readonly ShellShortcutService _shortcutService;
 
@@ -46,7 +40,7 @@ public sealed class VuiImportService
                 }
 
                 var extension = Path.GetExtension(candidate.Path);
-                if (!SupportedExtensions.Contains(extension))
+                if (!LaunchFileTypes.IsSupported(candidate.Path))
                 {
                     summary.UnsupportedCount++;
                     continue;
@@ -62,7 +56,8 @@ public sealed class VuiImportService
 
     private void ImportPath(string sourcePath, string extension)
     {
-        if (extension.Equals(".exe", StringComparison.OrdinalIgnoreCase))
+        if (extension.Equals(".exe", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".com", StringComparison.OrdinalIgnoreCase))
         {
             var shortcutPath = GetUniqueDestination(Path.GetFileNameWithoutExtension(sourcePath), ".lnk");
             _shortcutService.CreateShortcut(shortcutPath, sourcePath);

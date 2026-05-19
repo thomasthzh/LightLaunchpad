@@ -15,6 +15,7 @@ internal static class Program
             (nameof(HotkeyGestureTests.Parse_NormalizesWhitespaceAndCase), HotkeyGestureTests.Parse_NormalizesWhitespaceAndCase),
             (nameof(ShortcutRepositoryTests.LoadItems_CreatesFolderWhenMissing), ShortcutRepositoryTests.LoadItems_CreatesFolderWhenMissing),
             (nameof(ShortcutRepositoryTests.LoadItems_IncludesSupportedFilesAndSkipsUnsupportedFiles), ShortcutRepositoryTests.LoadItems_IncludesSupportedFilesAndSkipsUnsupportedFiles),
+            (nameof(InternetShortcutFileTests.Read_ParsesSteamUrlIconFileAndIndex), InternetShortcutFileTests.Read_ParsesSteamUrlIconFileAndIndex),
             (nameof(LaunchItemSearchTests.Filter_RanksPrefixMatchesBeforeContainsMatches), LaunchItemSearchTests.Filter_RanksPrefixMatchesBeforeContainsMatches),
             (nameof(LaunchItemSearchTests.Filter_ReturnsAllItemsWhenQueryIsBlank), LaunchItemSearchTests.Filter_ReturnsAllItemsWhenQueryIsBlank),
             (nameof(VuiImportParserTests.Parse_ExtractsDecodedPathsAndSkipsEmptyValues), VuiImportParserTests.Parse_ExtractsDecodedPathsAndSkipsEmptyValues),

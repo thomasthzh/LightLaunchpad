@@ -164,7 +164,7 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
             item.LoadIcon(launchItem => _iconCache.GetIcon(
                 launchItem.SourcePath,
                 launchItem.TargetPath,
-                launchItem.Kind == LaunchItemKind.Shortcut));
+                launchItem.Kind));
             loaded++;
         }
 
@@ -184,7 +184,7 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
         return _iconCache.GetIcon(
             item.Item.SourcePath,
             item.Item.TargetPath,
-            item.Item.Kind == LaunchItemKind.Shortcut);
+            item.Item.Kind);
     }
 
     public void ApplyLoadedIcon(LaunchItemViewModel item, ImageSource? icon)

@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using LightLaunchpad.Core.Shortcuts;
 
 namespace LightLaunchpad.App.Services;
 
@@ -21,10 +22,10 @@ public sealed class IconCacheService
         Directory.CreateDirectory(_cacheDir);
     }
 
-    public ImageSource? GetIcon(string sourcePath, string? targetPath, bool isShortcut)
+    public ImageSource? GetIcon(string sourcePath, string? targetPath, LaunchItemKind kind)
     {
-        var iconSource = ResolveSource(sourcePath, targetPath, isShortcut);
-        var cacheKey = $"{iconSource}|{_iconSize}";
+        var iconSources = IconSourceResolver.ResolveIconSources(sourcePath, targetPath, kind);
+        var cacheKey = $"{string.Join("|", iconSources)}|{_iconSize}";
 
         lock (_cacheLock)
         {
@@ -34,7 +35,7 @@ public sealed class IconCacheService
             }
         }
 
-        var fileName = HashPath($"{iconSource}|{_iconSize}|v2") + ".png";
+        var fileName = HashPath($"{cacheKey}|v3") + ".png";
         var cachedPath = Path.Combine(_cacheDir, fileName);
 
         ImageSource? icon;
@@ -44,7 +45,7 @@ public sealed class IconCacheService
         }
         else
         {
-            icon = ExtractAndCache(iconSource, cachedPath);
+            icon = ExtractAndCache(iconSources, cachedPath);
         }
 
         lock (_cacheLock)
@@ -54,10 +55,11 @@ public sealed class IconCacheService
         return icon;
     }
 
-    public void EnsureCached(string sourcePath, string? targetPath, bool isShortcut)
+    public void EnsureCached(string sourcePath, string? targetPath, LaunchItemKind kind)
     {
-        var iconSource = ResolveSource(sourcePath, targetPath, isShortcut);
-        var fileName = HashPath($"{iconSource}|{_iconSize}|v2") + ".png";
+        var iconSources = IconSourceResolver.ResolveIconSources(sourcePath, targetPath, kind);
+        var cacheKey = $"{string.Join("|", iconSources)}|{_iconSize}";
+        var fileName = HashPath($"{cacheKey}|v3") + ".png";
         var cachedPath = Path.Combine(_cacheDir, fileName);
 
         if (File.Exists(cachedPath))
@@ -65,16 +67,17 @@ public sealed class IconCacheService
             return;
         }
 
-        ExtractAndCache(iconSource, cachedPath);
+        ExtractAndCache(iconSources, cachedPath);
     }
 
-    public void Cleanup(IEnumerable<string> activeSourcePaths, IEnumerable<string?> activeTargetPaths, IEnumerable<bool> activeIsShortcuts)
+    public void Cleanup(IEnumerable<string> activeSourcePaths, IEnumerable<string?> activeTargetPaths, IEnumerable<LaunchItemKind> activeKinds)
     {
         var validFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (source, target, isLnk) in activeSourcePaths.Zip(activeTargetPaths, activeIsShortcuts))
+        foreach (var (source, target, kind) in activeSourcePaths.Zip(activeTargetPaths, activeKinds))
         {
-            var iconSource = ResolveSource(source, target, isLnk);
-            validFiles.Add(HashPath($"{iconSource}|{_iconSize}|v2") + ".png");
+            var iconSources = IconSourceResolver.ResolveIconSources(source, target, kind);
+            var cacheKey = $"{string.Join("|", iconSources)}|{_iconSize}";
+            validFiles.Add(HashPath($"{cacheKey}|v3") + ".png");
         }
 
         foreach (var file in Directory.EnumerateFiles(_cacheDir, "*.png"))
@@ -86,11 +89,11 @@ public sealed class IconCacheService
         }
     }
 
-    public void DeleteIcon(string sourcePath, string? targetPath, bool isShortcut)
+    public void DeleteIcon(string sourcePath, string? targetPath, LaunchItemKind kind)
     {
-        var iconSource = ResolveSource(sourcePath, targetPath, isShortcut);
-        var cacheKey = $"{iconSource}|{_iconSize}";
-        var cachedPath = Path.Combine(_cacheDir, HashPath($"{iconSource}|{_iconSize}|v2") + ".png");
+        var iconSources = IconSourceResolver.ResolveIconSources(sourcePath, targetPath, kind);
+        var cacheKey = $"{string.Join("|", iconSources)}|{_iconSize}";
+        var cachedPath = Path.Combine(_cacheDir, HashPath($"{cacheKey}|v3") + ".png");
 
         lock (_cacheLock)
         {
@@ -118,27 +121,22 @@ public sealed class IconCacheService
         }
     }
 
-    private ImageSource? ExtractAndCache(string iconSource, string cachedPath)
+    private ImageSource? ExtractAndCache(IReadOnlyList<string> iconSources, string cachedPath)
     {
-        var raw = ShellIconExtractor.ExtractRaw(iconSource);
-        if (raw is null) return null;
-
-        var icon = IconUpScaler.UpscaleIfNeeded(raw, _iconSize)
-            ?? ShellIconExtractor.Extract(iconSource, _iconSize);
-        if (icon is null) return null;
-
-        SavePng(icon, cachedPath);
-        return icon;
-    }
-
-    private static string ResolveSource(string sourcePath, string? targetPath, bool isShortcut)
-    {
-        if (isShortcut && !string.IsNullOrWhiteSpace(targetPath)
-            && (File.Exists(targetPath) || Directory.Exists(targetPath)))
+        foreach (var iconSource in iconSources)
         {
-            return targetPath;
+            var raw = ShellIconExtractor.ExtractRaw(iconSource);
+            if (raw is null) continue;
+
+            var icon = IconUpScaler.UpscaleIfNeeded(raw, _iconSize)
+                ?? ShellIconExtractor.Extract(iconSource, _iconSize);
+            if (icon is null) continue;
+
+            SavePng(icon, cachedPath);
+            return icon;
         }
-        return sourcePath;
+
+        return null;
     }
 
     private static string HashPath(string path)
