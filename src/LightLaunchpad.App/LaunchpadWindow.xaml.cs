@@ -10,8 +10,6 @@ using LightLaunchpad.App.ViewModels;
 using LightLaunchpad.Core.Layout;
 
 using WpfButton = System.Windows.Controls.Button;
-using WpfTextBox = System.Windows.Controls.TextBox;
-using WpfContextMenu = System.Windows.Controls.ContextMenu;
 
 namespace LightLaunchpad.App;
 
@@ -169,7 +167,7 @@ public partial class LaunchpadWindow : Window
         }
 
         // Click on empty space: start rubber band
-        if (IsOverInteractiveElement(hit)) return;
+        if (InteractiveElementHitTest.IsOverInteractiveElement(hit)) return;
 
         _rubberBandStart = e.GetPosition(ContentGrid);
         _rubberBanding = true;
@@ -611,19 +609,6 @@ public partial class LaunchpadWindow : Window
             obj = VisualTreeHelper.GetParent(obj);
         }
         return null;
-    }
-
-    private static bool IsOverInteractiveElement(DependencyObject? hit)
-    {
-        while (hit is not null)
-        {
-            if (hit is WpfTextBox or WpfButton or WpfContextMenu)
-                return true;
-            if (hit is FrameworkElement { Name: "SearchBox" })
-                return true;
-            hit = VisualTreeHelper.GetParent(hit);
-        }
-        return false;
     }
 
     // --- Gear / menu ---

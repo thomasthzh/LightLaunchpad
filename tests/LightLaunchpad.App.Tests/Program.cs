@@ -2,10 +2,17 @@ namespace LightLaunchpad.App.Tests;
 
 internal static class Program
 {
+    [STAThread]
     private static int Main()
     {
         var tests = new (string Name, Action Run)[]
         {
+            (
+                nameof(InteractiveElementHitTestTests.IsOverInteractiveElement_TreatsScrollBarChromeAsInteractive),
+                InteractiveElementHitTestTests.IsOverInteractiveElement_TreatsScrollBarChromeAsInteractive),
+            (
+                nameof(InteractiveElementHitTestTests.IsOverInteractiveElement_IgnoresPlainLayoutSurfaces),
+                InteractiveElementHitTestTests.IsOverInteractiveElement_IgnoresPlainLayoutSurfaces),
             (
                 nameof(LaunchpadViewModelIconStabilityTests.LoadItems_PreservesLoadedIconForMatchingSourcePath),
                 LaunchpadViewModelIconStabilityTests.LoadItems_PreservesLoadedIconForMatchingSourcePath),
