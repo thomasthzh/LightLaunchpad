@@ -39,7 +39,8 @@ public sealed class SettingsService
             loaded.StartWithWindows,
             string.IsNullOrWhiteSpace(loaded.IconSize) ? defaults.IconSize : loaded.IconSize,
             string.IsNullOrWhiteSpace(loaded.ViewMode) ? defaults.ViewMode : loaded.ViewMode,
-            string.IsNullOrWhiteSpace(loaded.IconQuality) ? defaults.IconQuality : loaded.IconQuality);
+            string.IsNullOrWhiteSpace(loaded.IconQuality) ? defaults.IconQuality : loaded.IconQuality,
+            LaunchpadDisplayModes.Normalize(loaded.DisplayMode));
     }
 
     public void Save(AppSettings settings)

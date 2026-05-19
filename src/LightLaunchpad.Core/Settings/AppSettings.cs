@@ -6,7 +6,8 @@ public sealed record AppSettings(
     bool StartWithWindows,
     string IconSize,
     string ViewMode,
-    string IconQuality)
+    string IconQuality,
+    string DisplayMode = LaunchpadDisplayModes.Launchpad)
 {
     public static AppSettings CreateDefault(string userProfilePath)
     {
@@ -16,6 +17,7 @@ public sealed record AppSettings(
             StartWithWindows: false,
             IconSize: "Medium",
             ViewMode: "InlineRegions",
-            IconQuality: "High");
+            IconQuality: "High",
+            DisplayMode: LaunchpadDisplayModes.Launchpad);
     }
 }

@@ -153,7 +153,7 @@ public partial class App : System.Windows.Application
             RefreshItems();
         }
 
-        _launchpadWindow?.ShowLaunchpad();
+        _launchpadWindow?.ShowLaunchpad(_settings.DisplayMode);
         QueueVisibleIconLoad();
     }
 

@@ -8,8 +8,11 @@ using System.Windows.Media.Animation;
 using LightLaunchpad.App.Services;
 using LightLaunchpad.App.ViewModels;
 using LightLaunchpad.Core.Layout;
+using LightLaunchpad.Core.Settings;
 
 using WpfButton = System.Windows.Controls.Button;
+using WpfBrushes = System.Windows.Media.Brushes;
+using WpfColor = System.Windows.Media.Color;
 
 namespace LightLaunchpad.App;
 
@@ -21,6 +24,7 @@ public partial class LaunchpadWindow : Window
     private LaunchItemViewModel? _dragItem;
     private IReadOnlyList<LaunchItemViewModel> _dragItems = [];
     private bool _dragCompleted;
+    private bool _isSpotlightMode;
     private DropTarget? _lastDropTarget;
 
     // Rubber band selection state
@@ -36,6 +40,7 @@ public partial class LaunchpadWindow : Window
         PreviewMouseMove += Window_PreviewMouseMove;
         PreviewMouseLeftButtonUp += Window_PreviewMouseLeftButtonUp;
         PreviewMouseLeftButtonDown += Window_PreviewMouseLeftButtonDown;
+        Deactivated += Window_Deactivated;
     }
 
     public event Action<LaunchpadViewMode>? ViewModeRequested;
@@ -66,10 +71,12 @@ public partial class LaunchpadWindow : Window
 
     public void ShowLaunchpad()
     {
-        Left = SystemParameters.VirtualScreenLeft;
-        Top = SystemParameters.VirtualScreenTop;
-        Width = SystemParameters.VirtualScreenWidth;
-        Height = SystemParameters.VirtualScreenHeight;
+        ShowLaunchpad(LaunchpadDisplayModes.Launchpad);
+    }
+
+    public void ShowLaunchpad(string displayMode)
+    {
+        ApplyDisplayMode(displayMode);
 
         Opacity = 0;
         WindowTranslate.Y = 10;
@@ -79,6 +86,34 @@ public partial class LaunchpadWindow : Window
 
         BeginAnimation(OpacityProperty, new DoubleAnimation(1, TimeSpan.FromMilliseconds(110)));
         WindowTranslate.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(0, TimeSpan.FromMilliseconds(130)));
+    }
+
+    private void ApplyDisplayMode(string displayMode)
+    {
+        _isSpotlightMode = LaunchpadDisplayModes.IsSpotlight(displayMode);
+        var workArea = SystemParameters.WorkArea;
+        var bounds = LaunchpadWindowPlacement.Calculate(
+            displayMode,
+            new ScreenBounds(
+                SystemParameters.VirtualScreenLeft,
+                SystemParameters.VirtualScreenTop,
+                SystemParameters.VirtualScreenWidth,
+                SystemParameters.VirtualScreenHeight),
+            new ScreenBounds(workArea.Left, workArea.Top, workArea.Width, workArea.Height));
+
+        Left = bounds.Left;
+        Top = bounds.Top;
+        Width = bounds.Width;
+        Height = bounds.Height;
+
+        FocusSurface.CornerRadius = _isSpotlightMode ? new CornerRadius(24) : new CornerRadius(0);
+        FocusSurface.BorderThickness = _isSpotlightMode ? new Thickness(1) : new Thickness(0);
+        FocusSurface.BorderBrush = _isSpotlightMode
+            ? new SolidColorBrush(WpfColor.FromArgb(92, 255, 255, 255))
+            : WpfBrushes.Transparent;
+        FocusSurface.Background = _isSpotlightMode
+            ? new SolidColorBrush(WpfColor.FromArgb(238, 16, 21, 30))
+            : new SolidColorBrush(WpfColor.FromArgb(204, 16, 21, 30));
     }
 
     public void HideLaunchpad()
@@ -95,6 +130,14 @@ public partial class LaunchpadWindow : Window
     private void Window_Loaded(object sender, RoutedEventArgs e)
     {
         FocusSearchBox();
+    }
+
+    private void Window_Deactivated(object? sender, EventArgs e)
+    {
+        if (_isSpotlightMode && IsVisible)
+        {
+            HideLaunchpad();
+        }
     }
 
     private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)

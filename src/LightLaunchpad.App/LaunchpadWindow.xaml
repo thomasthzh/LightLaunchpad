@@ -120,8 +120,13 @@
         </DataTemplate>
     </Window.Resources>
 
+    <Border x:Name="FocusSurface"
+            Background="#CC10151E"
+            BorderBrush="Transparent"
+            BorderThickness="0"
+            CornerRadius="0">
     <Grid x:Name="RootGrid"
-          Background="#CC10151E"
+          Background="Transparent"
           RenderTransformOrigin="0.5,0.5">
         <Grid.ContextMenu>
             <ContextMenu>
@@ -315,4 +320,5 @@
             </Grid>
         </ScrollViewer>
     </Grid>
+    </Border>
 </Window>

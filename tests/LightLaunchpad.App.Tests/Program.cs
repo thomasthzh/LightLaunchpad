@@ -33,7 +33,25 @@ internal static class Program
                 LaunchpadWindowXamlTests.AppTileTemplate_BindsSelectedStateToVisibleFeedback),
             (
                 nameof(LaunchpadWindowXamlTests.AppTileTemplate_LaunchesItemsOnlyFromDoubleClick),
-                LaunchpadWindowXamlTests.AppTileTemplate_LaunchesItemsOnlyFromDoubleClick)
+                LaunchpadWindowXamlTests.AppTileTemplate_LaunchesItemsOnlyFromDoubleClick),
+            (
+                nameof(LaunchpadWindowXamlTests.LaunchpadWindow_HasNamedFocusSurfaceForSpotlightSizing),
+                LaunchpadWindowXamlTests.LaunchpadWindow_HasNamedFocusSurfaceForSpotlightSizing),
+            (
+                nameof(SettingsWindowXamlTests.SettingsWindow_OffersLaunchpadAndSpotlightDisplayModes),
+                SettingsWindowXamlTests.SettingsWindow_OffersLaunchpadAndSpotlightDisplayModes),
+            (
+                nameof(LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),
+                LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),
+            (
+                nameof(LaunchpadWindowPlacementTests.Calculate_CentersSpotlightWindowInsideWorkArea),
+                LaunchpadWindowPlacementTests.Calculate_CentersSpotlightWindowInsideWorkArea),
+            (
+                nameof(LaunchpadWindowPlacementTests.Calculate_KeepsSmallSpotlightWindowWithinWorkAreaPadding),
+                LaunchpadWindowPlacementTests.Calculate_KeepsSmallSpotlightWindowWithinWorkAreaPadding),
+            (
+                nameof(LaunchpadWindowPlacementTests.Calculate_DoesNotOverflowTinyWorkArea),
+                LaunchpadWindowPlacementTests.Calculate_DoesNotOverflowTinyWorkArea)
         };
 
         var failed = 0;

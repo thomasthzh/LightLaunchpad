@@ -22,6 +22,16 @@ public sealed class LaunchpadWindowXamlTests
         TestAssert.DoesNotContain("Click=\"LaunchItem_Click\"", xaml);
     }
 
+    public static void LaunchpadWindow_HasNamedFocusSurfaceForSpotlightSizing()
+    {
+        var xaml = File.ReadAllText(FindLaunchpadWindowXaml());
+
+        TestAssert.Contains("x:Name=\"FocusSurface\"", xaml);
+        TestAssert.Contains("Background=\"Transparent\"", xaml);
+        TestAssert.Contains("HorizontalScrollBarVisibility=\"Disabled\"", xaml);
+        TestAssert.Contains("WrapPanel HorizontalAlignment=\"Center\"", xaml);
+    }
+
     private static string FindLaunchpadWindowXaml()
     {
         var current = new DirectoryInfo(Environment.CurrentDirectory);
