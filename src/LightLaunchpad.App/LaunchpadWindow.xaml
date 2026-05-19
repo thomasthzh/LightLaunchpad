@@ -19,7 +19,7 @@
         <DataTemplate x:Key="AppTileTemplate" DataType="{x:Type viewModels:LaunchItemViewModel}">
             <Button Width="{Binding TileSize}"
                     Height="{Binding TileSize}"
-                    Margin="8"
+                    Margin="{Binding AppMargin}"
                     MouseDoubleClick="LaunchItem_DoubleClick"
                     Background="Transparent"
                     BorderThickness="0"
@@ -120,12 +120,20 @@
         </DataTemplate>
     </Window.Resources>
 
+    <Border x:Name="FocusSurface"
+            Background="#CC10151E"
+            BorderBrush="Transparent"
+            BorderThickness="0"
+            CornerRadius="0">
     <Grid x:Name="RootGrid"
-          Background="#CC10151E"
+          Background="Transparent"
           RenderTransformOrigin="0.5,0.5">
         <Grid.ContextMenu>
             <ContextMenu>
                 <MenuItem Header="Create region" Click="CreateRegion_Click" />
+                <MenuItem Header="Rename selected regions" Click="BatchRenameRegions_Click" />
+                <MenuItem Header="Delete selected regions" Click="BatchDeleteRegions_Click" />
+                <Separator />
                 <MenuItem Header="Select all" Click="SelectAll_Click" />
                 <MenuItem Header="Clear selection" Click="ClearSelection_Click" />
             </ContextMenu>
@@ -172,8 +180,6 @@
                         <MenuItem Header="Region tabs" Click="SetRegionTabs_Click" />
                         <Separator />
                         <MenuItem Header="Import Start Menu apps" Click="ImportStartMenu_Click" />
-                        <MenuItem Header="Import .vui files" Click="ImportVui_Click" />
-                        <Separator />
                         <MenuItem Header="Settings" Click="OpenSettings_Click" />
                     </ContextMenu>
                 </Button.ContextMenu>
@@ -222,12 +228,25 @@
                             Foreground="#F7FAFF"
                             BorderBrush="#30FFFFFF"
                             BorderThickness="1">
+                        <Button.Style>
+                            <Style TargetType="Button">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                        <Setter Property="Background" Value="#2E5B9BD5" />
+                                        <Setter Property="BorderBrush" Value="#CC7DBEFF" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
                         <Button.ContextMenu>
                             <ContextMenu>
                                 <MenuItem Header="Rename region" Click="RenameRegion_Click"
                                           CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                                 <MenuItem Header="Delete region" Click="DeleteRegion_Click"
                                           CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                <Separator />
+                                <MenuItem Header="Rename selected regions" Click="BatchRenameRegions_Click" />
+                                <MenuItem Header="Delete selected regions" Click="BatchDeleteRegions_Click" />
                             </ContextMenu>
                         </Button.ContextMenu>
                     </Button>
@@ -244,6 +263,9 @@
                 <Grid.ContextMenu>
                     <ContextMenu>
                         <MenuItem Header="Create region" Click="CreateRegion_Click" />
+                        <MenuItem Header="Rename selected regions" Click="BatchRenameRegions_Click" />
+                        <MenuItem Header="Delete selected regions" Click="BatchDeleteRegions_Click" />
+                        <Separator />
                         <MenuItem Header="Select all" Click="SelectAll_Click" />
                         <MenuItem Header="Clear selection" Click="ClearSelection_Click" />
                     </ContextMenu>
@@ -254,19 +276,38 @@
                                   ItemsSource="{Binding Regions}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate DataType="{x:Type viewModels:LaunchpadRegionViewModel}">
-                                <StackPanel Margin="0,0,0,22"
-                                            Tag="{Binding Id}">
+                                <Border Margin="0,0,0,22"
+                                        Padding="8"
+                                        Tag="{Binding Id}"
+                                        BorderBrush="Transparent"
+                                        BorderThickness="1"
+                                        CornerRadius="8">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                                    <Setter Property="Background" Value="#185B9BD5" />
+                                                    <Setter Property="BorderBrush" Value="#AA7DBEFF" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                <StackPanel>
                                     <TextBlock Text="{Binding Name}"
                                                Margin="12,0,12,10"
                                                FontSize="15"
                                                FontWeight="SemiBold"
-                                               Foreground="#DDE7F7">
+                                               Foreground="#DDE7F7"
+                                               MouseLeftButtonDown="RegionHeader_MouseLeftButtonDown">
                                         <TextBlock.ContextMenu>
                                             <ContextMenu>
                                                 <MenuItem Header="Rename region" Click="RenameRegion_Click"
                                                           CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                                                 <MenuItem Header="Delete region" Click="DeleteRegion_Click"
                                                           CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                <Separator />
+                                                <MenuItem Header="Rename selected regions" Click="BatchRenameRegions_Click" />
+                                                <MenuItem Header="Delete selected regions" Click="BatchDeleteRegions_Click" />
                                             </ContextMenu>
                                         </TextBlock.ContextMenu>
                                     </TextBlock>
@@ -279,6 +320,7 @@
                                         </ItemsControl.ItemsPanel>
                                     </ItemsControl>
                                 </StackPanel>
+                                </Border>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
@@ -315,4 +357,5 @@
             </Grid>
         </ScrollViewer>
     </Grid>
+    </Border>
 </Window>

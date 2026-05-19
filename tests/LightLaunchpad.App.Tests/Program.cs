@@ -33,7 +33,52 @@ internal static class Program
                 LaunchpadWindowXamlTests.AppTileTemplate_BindsSelectedStateToVisibleFeedback),
             (
                 nameof(LaunchpadWindowXamlTests.AppTileTemplate_LaunchesItemsOnlyFromDoubleClick),
-                LaunchpadWindowXamlTests.AppTileTemplate_LaunchesItemsOnlyFromDoubleClick)
+                LaunchpadWindowXamlTests.AppTileTemplate_LaunchesItemsOnlyFromDoubleClick),
+            (
+                nameof(LaunchpadWindowXamlTests.LaunchpadWindow_HasNamedFocusSurfaceForSpotlightSizing),
+                LaunchpadWindowXamlTests.LaunchpadWindow_HasNamedFocusSurfaceForSpotlightSizing),
+            (
+                nameof(LaunchpadWindowXamlTests.LaunchpadWindow_RemovesVuiImportAndAddsRegionBatchMenus),
+                LaunchpadWindowXamlTests.LaunchpadWindow_RemovesVuiImportAndAddsRegionBatchMenus),
+            (
+                nameof(LaunchpadWindowXamlTests.LaunchpadWindow_BindsAppSpacingAndHidesSpotlightScrollbarInCode),
+                LaunchpadWindowXamlTests.LaunchpadWindow_BindsAppSpacingAndHidesSpotlightScrollbarInCode),
+            (
+                nameof(SettingsWindowXamlTests.SettingsWindow_OffersLaunchpadAndSpotlightDisplayModes),
+                SettingsWindowXamlTests.SettingsWindow_OffersLaunchpadAndSpotlightDisplayModes),
+            (
+                nameof(SettingsWindowXamlTests.SettingsWindow_OffersLanguageAndSpotlightTuning),
+                SettingsWindowXamlTests.SettingsWindow_OffersLanguageAndSpotlightTuning),
+            (
+                nameof(TrayServiceSourceTests.TrayMenu_DoesNotExposeVuiImport),
+                TrayServiceSourceTests.TrayMenu_DoesNotExposeVuiImport),
+            (
+                nameof(LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),
+                LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),
+            (
+                nameof(LaunchpadWindowPlacementTests.Calculate_CentersSpotlightWindowInsideWorkArea),
+                LaunchpadWindowPlacementTests.Calculate_CentersSpotlightWindowInsideWorkArea),
+            (
+                nameof(LaunchpadWindowPlacementTests.Calculate_UsesConfiguredSpotlightWindowSize),
+                LaunchpadWindowPlacementTests.Calculate_UsesConfiguredSpotlightWindowSize),
+            (
+                nameof(LaunchpadWindowPlacementTests.Calculate_KeepsSmallSpotlightWindowWithinWorkAreaPadding),
+                LaunchpadWindowPlacementTests.Calculate_KeepsSmallSpotlightWindowWithinWorkAreaPadding),
+            (
+                nameof(LaunchpadWindowPlacementTests.Calculate_DoesNotOverflowTinyWorkArea),
+                LaunchpadWindowPlacementTests.Calculate_DoesNotOverflowTinyWorkArea),
+            (
+                nameof(DragServiceSensitivityTests.HasExceededThreshold_UsesMouseSensitivity),
+                DragServiceSensitivityTests.HasExceededThreshold_UsesMouseSensitivity),
+            (
+                nameof(DragServiceSensitivityTests.HasExceededThreshold_ClampsMouseSensitivity),
+                DragServiceSensitivityTests.HasExceededThreshold_ClampsMouseSensitivity),
+            (
+                nameof(LaunchpadRegionSelectionTests.ToggleRegionSelection_TracksSelectedRegions),
+                LaunchpadRegionSelectionTests.ToggleRegionSelection_TracksSelectedRegions),
+            (
+                nameof(LaunchpadRegionSelectionTests.ClearSelection_ClearsItemsAndRegions),
+                LaunchpadRegionSelectionTests.ClearSelection_ClearsItemsAndRegions)
         };
 
         var failed = 0;

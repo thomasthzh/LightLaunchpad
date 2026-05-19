@@ -1,4 +1,5 @@
 using System.IO;
+using LightLaunchpad.Core.Settings;
 using Forms = System.Windows.Forms;
 
 namespace LightLaunchpad.App.Services;
@@ -12,15 +13,15 @@ public sealed class TrayService : IDisposable
         Action openFolder,
         Action refresh,
         Action openSettings,
-        Action importVui,
-        Action exit)
+        Action exit,
+        string language)
     {
         _notifyIcon = new Forms.NotifyIcon
         {
             Icon = LoadTrayIcon(),
             Text = "LightLaunchpad",
             Visible = true,
-            ContextMenuStrip = BuildMenu(openLaunchpad, openFolder, refresh, openSettings, importVui, exit)
+            ContextMenuStrip = BuildMenu(openLaunchpad, openFolder, refresh, openSettings, exit, language)
         };
         _notifyIcon.DoubleClick += (_, _) => openLaunchpad();
     }
@@ -51,17 +52,21 @@ public sealed class TrayService : IDisposable
         Action openFolder,
         Action refresh,
         Action openSettings,
-        Action importVui,
-        Action exit)
+        Action exit,
+        string language)
     {
         var menu = new Forms.ContextMenuStrip();
-        menu.Items.Add("Open launchpad", null, (_, _) => openLaunchpad());
-        menu.Items.Add("Open launchpad folder", null, (_, _) => openFolder());
-        menu.Items.Add("Refresh shortcuts", null, (_, _) => refresh());
-        menu.Items.Add("Import .vui files", null, (_, _) => importVui());
-        menu.Items.Add("Settings", null, (_, _) => openSettings());
+        menu.Items.Add(Text(language, "Open launchpad", "打开启动台"), null, (_, _) => openLaunchpad());
+        menu.Items.Add(Text(language, "Open launchpad folder", "打开启动台文件夹"), null, (_, _) => openFolder());
+        menu.Items.Add(Text(language, "Refresh shortcuts", "刷新快捷方式"), null, (_, _) => refresh());
+        menu.Items.Add(Text(language, "Settings", "设置"), null, (_, _) => openSettings());
         menu.Items.Add(new Forms.ToolStripSeparator());
-        menu.Items.Add("Exit", null, (_, _) => exit());
+        menu.Items.Add(Text(language, "Exit", "退出"), null, (_, _) => exit());
         return menu;
+    }
+
+    private static string Text(string language, string english, string chinese)
+    {
+        return AppLanguages.IsChinese(language) ? chinese : english;
     }
 }

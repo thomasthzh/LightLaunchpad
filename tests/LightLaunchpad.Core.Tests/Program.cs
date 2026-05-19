@@ -10,6 +10,8 @@ internal static class Program
             (nameof(AppSettingsTests.CreateDefault_UsesUserLaunchpadFolderAndAltD), AppSettingsTests.CreateDefault_UsesUserLaunchpadFolderAndAltD),
             (nameof(AppSettingsTests.SettingsService_LoadsDefaultsWhenFileDoesNotExist), AppSettingsTests.SettingsService_LoadsDefaultsWhenFileDoesNotExist),
             (nameof(AppSettingsTests.SettingsService_SavesAndLoadsCustomSettings), AppSettingsTests.SettingsService_SavesAndLoadsCustomSettings),
+            (nameof(AppSettingsTests.SettingsService_DefaultsMissingDisplayModeToLaunchpad), AppSettingsTests.SettingsService_DefaultsMissingDisplayModeToLaunchpad),
+            (nameof(AppSettingsTests.SettingsService_NormalizesLanguageAndTuningValues), AppSettingsTests.SettingsService_NormalizesLanguageAndTuningValues),
             (nameof(AppStoragePathsTests.GetIconCacheDirectory_UsesDocumentsLightLaunchpadIconsFolder), AppStoragePathsTests.GetIconCacheDirectory_UsesDocumentsLightLaunchpadIconsFolder),
             (nameof(HotkeyGestureTests.Parse_ReadsAltLetterGesture), HotkeyGestureTests.Parse_ReadsAltLetterGesture),
             (nameof(HotkeyGestureTests.Parse_NormalizesWhitespaceAndCase), HotkeyGestureTests.Parse_NormalizesWhitespaceAndCase),
