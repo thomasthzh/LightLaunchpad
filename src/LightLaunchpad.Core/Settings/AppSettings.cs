@@ -16,6 +16,6 @@ public sealed record AppSettings(
             StartWithWindows: false,
             IconSize: "Medium",
             ViewMode: "InlineRegions",
-            IconQuality: "Balanced");
+            IconQuality: "High");
     }
 }

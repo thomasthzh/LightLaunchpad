@@ -13,7 +13,7 @@ public sealed class AppSettingsTests
         TestAssert.False(settings.StartWithWindows);
         TestAssert.Equal("Medium", settings.IconSize);
         TestAssert.Equal("InlineRegions", settings.ViewMode);
-        TestAssert.Equal("Balanced", settings.IconQuality);
+        TestAssert.Equal("High", settings.IconQuality);
     }
 
     public static void SettingsService_LoadsDefaultsWhenFileDoesNotExist()

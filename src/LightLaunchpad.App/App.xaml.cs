@@ -16,19 +16,24 @@ namespace LightLaunchpad.App;
 public partial class App : System.Windows.Application
 {
     private const string AppName = "LightLaunchpad";
+    private const int IconLoadBatchSize = 16;
+    private static readonly TimeSpan IconReleaseDelay = TimeSpan.FromSeconds(90);
     private Mutex? _singleInstanceMutex;
     private AppSettings _settings = null!;
     private SettingsService _settingsService = null!;
     private LayoutService _layoutService = null!;
     private LaunchpadLayout _layout = null!;
     private ShortcutRepository _repository = null!;
-    private IconService _iconService = null!;
+    private IconCacheService _iconCache = null!;
     private LaunchpadViewModel _viewModel = null!;
     private LauncherService _launcherService = null!;
     private LaunchpadWindow _launchpadWindow = null!;
     private HotkeyService _hotkeyService = null!;
     private TrayService _trayService = null!;
     private ShortcutWatcher _shortcutWatcher = null!;
+    private DispatcherTimer? _iconReleaseTimer;
+    private CancellationTokenSource? _iconLoadCancellation;
+    private bool _iconLoadInProgress;
     private bool _itemsDirty = true;
 
     protected override void OnStartup(StartupEventArgs e)
@@ -49,6 +54,9 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _iconLoadCancellation?.Cancel();
+        _iconLoadCancellation?.Dispose();
+        _iconReleaseTimer?.Stop();
         _shortcutWatcher?.Dispose();
         _hotkeyService?.Dispose();
         _trayService?.Dispose();
@@ -70,10 +78,10 @@ public partial class App : System.Windows.Application
 
     private void BuildServices()
     {
-        _repository = new ShortcutRepository(_settings.LaunchpadFolder);
-        _iconService = new IconService(_settings.IconQuality);
+        _repository = new ShortcutRepository(_settings.LaunchpadFolder, ShellShortcutService.ResolveTarget);
+        _iconCache = CreateIconCache(_settings);
         _launcherService = new LauncherService();
-        _viewModel = new LaunchpadViewModel(_settings, item => _iconService.GetIcon(item.SourcePath));
+        _viewModel = new LaunchpadViewModel(_settings, _iconCache);
         _launchpadWindow = new LaunchpadWindow(_viewModel, _launcherService);
         _launchpadWindow.ViewModeRequested += ApplyViewMode;
         _launchpadWindow.ImportStartMenuRequested += ImportStartMenuApps;
@@ -85,19 +93,31 @@ public partial class App : System.Windows.Application
         _launchpadWindow.RenameItemRequested += RenameItem;
         _launchpadWindow.RemoveItemRequested += RemoveItem;
         _launchpadWindow.MoveItemRequested += MoveItem;
+        _launchpadWindow.MoveItemsRequested += MoveItems;
+        _launchpadWindow.ImportClicked += ImportFromDialog;
+        _launchpadWindow.HiddenCompleted += ScheduleIconRelease;
         _hotkeyService = new HotkeyService(_launchpadWindow);
         _hotkeyService.Pressed += (_, _) => Dispatcher.Invoke(ToggleLaunchpad);
         _trayService = new TrayService(
-            ToggleLaunchpad,
-            OpenLaunchpadFolder,
-            RefreshItems,
-            OpenSettings,
-            ImportVuiFiles,
-            ExitApplication);
+            ToggleLaunchpad, OpenLaunchpadFolder, RefreshItems,
+            OpenSettings, ImportVuiFiles, ExitApplication);
 
         RegisterHotkey();
         StartWatcher();
         StartupRegistrationService.SetEnabled(_settings.StartWithWindows);
+    }
+
+    private static IconCacheService CreateIconCache(AppSettings settings)
+    {
+        var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        var cacheDir = AppStoragePaths.GetIconCacheDirectory(documents);
+        var iconSize = settings.IconSize.ToUpperInvariant() switch
+        {
+            "SMALL" => 42,
+            "LARGE" => 72,
+            _ => 56
+        };
+        return new IconCacheService(cacheDir, iconSize);
     }
 
     private void RegisterHotkey()
@@ -138,13 +158,91 @@ public partial class App : System.Windows.Application
             return;
         }
 
+        StopIconReleaseTimer();
         if (_itemsDirty)
         {
             RefreshItems();
         }
 
         _launchpadWindow.ShowLaunchpad();
-        Dispatcher.BeginInvoke(() => _viewModel.LoadMissingIcons(limit: 48), DispatcherPriority.Background);
+        QueueVisibleIconLoad();
+    }
+
+    private void QueueVisibleIconLoad()
+    {
+        if (_iconLoadInProgress)
+        {
+            return;
+        }
+
+        _iconLoadCancellation?.Cancel();
+        _iconLoadCancellation?.Dispose();
+        _iconLoadCancellation = new CancellationTokenSource();
+        _iconLoadInProgress = true;
+        Dispatcher.BeginInvoke(() => LoadVisibleIconBatchesAsync(_iconLoadCancellation.Token), DispatcherPriority.Background);
+    }
+
+    private async void LoadVisibleIconBatchesAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (_launchpadWindow.IsVisible && !cancellationToken.IsCancellationRequested)
+            {
+                var pending = _viewModel.GetMissingIconItems(IconLoadBatchSize);
+                if (pending.Count == 0)
+                {
+                    return;
+                }
+
+                var loaded = await Task.Run(() => pending
+                    .Select(item => (Item: item, Icon: _viewModel.LoadIconFor(item)))
+                    .ToList(), cancellationToken);
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                foreach (var (item, icon) in loaded)
+                {
+                    _viewModel.ApplyLoadedIcon(item, icon);
+                }
+
+                await Dispatcher.Yield(DispatcherPriority.Background);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // ignore cancellation when the launchpad closes
+        }
+        finally
+        {
+            _iconLoadInProgress = false;
+        }
+    }
+
+    private void ScheduleIconRelease()
+    {
+        _iconLoadCancellation?.Cancel();
+        _iconReleaseTimer ??= new DispatcherTimer { Interval = IconReleaseDelay };
+        _iconReleaseTimer.Tick -= ReleaseIconsAfterIdle;
+        _iconReleaseTimer.Tick += ReleaseIconsAfterIdle;
+        _iconReleaseTimer.Stop();
+        _iconReleaseTimer.Start();
+    }
+
+    private void StopIconReleaseTimer()
+    {
+        _iconReleaseTimer?.Stop();
+    }
+
+    private void ReleaseIconsAfterIdle(object? sender, EventArgs e)
+    {
+        StopIconReleaseTimer();
+        if (!_launchpadWindow.IsVisible)
+        {
+            _viewModel.ClearLoadedIcons();
+        }
     }
 
     private void RefreshItems()
@@ -160,6 +258,13 @@ public partial class App : System.Windows.Application
             var items = _repository.LoadItems();
             _layout = _layoutService.MergeItems(_layout, items);
             _layoutService.Save(_layout);
+
+            // Clean up orphaned cache entries
+            _iconCache.Cleanup(
+                items.Select(i => i.SourcePath),
+                items.Select(i => i.TargetPath),
+                items.Select(i => i.Kind == LaunchItemKind.Shortcut));
+
             _viewModel.LoadItems(_layout, items);
             _itemsDirty = false;
         }
@@ -198,13 +303,13 @@ public partial class App : System.Windows.Application
     {
         _settings = settings;
         _settingsService.Save(_settings);
-        _repository = new ShortcutRepository(_settings.LaunchpadFolder);
-        _iconService = new IconService(_settings.IconQuality);
-        _viewModel.UpdateSettings(_settings);
+        _repository = new ShortcutRepository(_settings.LaunchpadFolder, ShellShortcutService.ResolveTarget);
+        _iconCache = CreateIconCache(_settings);
         _layout = _layoutService.SetViewMode(
             _layout,
             Enum.TryParse<LaunchpadViewMode>(_settings.ViewMode, out var mode) ? mode : _layout.ViewMode);
         _layoutService.Save(_layout);
+        _viewModel.UpdateSettings(_settings, _iconCache);
         StartWatcher();
         RegisterHotkey();
         StartupRegistrationService.SetEnabled(_settings.StartWithWindows);
@@ -217,7 +322,6 @@ public partial class App : System.Windows.Application
         _layoutService.Save(_layout);
         _settings = _settings with { ViewMode = viewMode.ToString() };
         _settingsService.Save(_settings);
-        _viewModel.UpdateSettings(_settings);
         RefreshItems();
     }
 
@@ -251,6 +355,12 @@ public partial class App : System.Windows.Application
 
     private void RemoveItem(string sourcePath)
     {
+        var cachedItem = _viewModel.FindItemBySourcePath(sourcePath);
+        _iconCache.DeleteIcon(
+            sourcePath,
+            cachedItem?.TargetPath,
+            cachedItem?.Kind == LaunchItemKind.Shortcut);
+
         _layout = _layoutService.RemoveItem(_layout, sourcePath);
         _layoutService.Save(_layout);
 
@@ -271,7 +381,12 @@ public partial class App : System.Windows.Application
 
     private void MoveItem(string sourcePath, string regionId, int order)
     {
-        _layout = _layoutService.MoveItem(_layout, sourcePath, regionId, order);
+        MoveItems([sourcePath], regionId, order);
+    }
+
+    private void MoveItems(IReadOnlyList<string> sourcePaths, string regionId, int order)
+    {
+        _layout = _layoutService.MoveItems(_layout, sourcePaths, regionId, order);
         _layoutService.Save(_layout);
         RefreshItems();
     }
@@ -297,6 +412,38 @@ public partial class App : System.Windows.Application
         catch (Exception ex)
         {
             _trayService.ShowMessage(AppName, $"Could not import .vui files: {ex.Message}");
+        }
+    }
+
+    private void ImportFromDialog()
+    {
+        try
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Import shortcuts, executables, or URL files",
+                Filter = "Supported files (*.lnk;*.url;*.exe)|*.lnk;*.url;*.exe|Shortcuts (*.lnk)|*.lnk|URL files (*.url)|*.url|Executables (*.exe)|*.exe",
+                Multiselect = true
+            };
+
+            if (dialog.ShowDialog(_launchpadWindow) != true) return;
+
+            var destDir = _settings.LaunchpadFolder;
+            var imported = 0;
+            foreach (var file in dialog.FileNames)
+            {
+                var destPath = Path.Combine(destDir, Path.GetFileName(file));
+                if (File.Exists(destPath)) continue;
+                File.Copy(file, destPath);
+                imported++;
+            }
+
+            if (imported > 0)
+                RefreshItems();
+        }
+        catch (Exception ex)
+        {
+            _trayService.ShowMessage(AppName, $"Could not import files: {ex.Message}");
         }
     }
 
@@ -409,10 +556,7 @@ public partial class App : System.Windows.Application
         {
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true)
                 ?? Microsoft.Win32.Registry.CurrentUser.CreateSubKey(RunKeyPath);
-            if (key is null)
-            {
-                return;
-            }
+            if (key is null) return;
 
             if (!enabled)
             {

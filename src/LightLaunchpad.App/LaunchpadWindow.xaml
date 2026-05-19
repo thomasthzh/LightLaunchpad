@@ -9,43 +9,81 @@
         Background="Transparent"
         ShowInTaskbar="False"
         Topmost="True"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
         Icon="Assets/Alice.gif"
         PreviewKeyDown="Window_PreviewKeyDown"
         Loaded="Window_Loaded">
     <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
         <DataTemplate x:Key="AppTileTemplate" DataType="{x:Type viewModels:LaunchItemViewModel}">
             <Button Width="{Binding TileSize}"
                     Height="{Binding TileSize}"
                     Margin="8"
-                    Click="LaunchItem_Click"
-                    PreviewMouseMove="LaunchItem_PreviewMouseMove"
-                    Drop="LaunchItem_Drop"
-                    AllowDrop="True"
+                    MouseDoubleClick="LaunchItem_DoubleClick"
                     Background="Transparent"
                     BorderThickness="0"
                     Foreground="{StaticResource LaunchpadTextBrush}"
                     Cursor="Hand"
                     ToolTip="{Binding DisplayName}">
+                <Button.Style>
+                    <Style TargetType="Button">
+                        <Setter Property="Opacity" Value="1" />
+                        <Setter Property="IsHitTestVisible" Value="True" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsDragPlaceholder}" Value="True">
+                                <Setter Property="Opacity" Value="0" />
+                                <Setter Property="IsHitTestVisible" Value="False" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Button.Style>
                 <Button.ContextMenu>
                     <ContextMenu>
                         <MenuItem Header="Launch" Click="LaunchMenuItem_Click"
                                   CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                         <MenuItem Header="Rename" Click="RenameItem_Click"
                                   CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
-                        <MenuItem Header="Remove from launchpad" Click="RemoveItem_Click"
+                        <MenuItem Header="Remove" Click="RemoveItem_Click"
                                   CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                         <MenuItem Header="Open file location" Click="OpenItemLocation_Click"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                        <Separator />
+                        <MenuItem Header="Remove selected" Click="BatchRemove_Click"
+                                  Visibility="{Binding DataContext.SelectedItems.Count, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVis}}"
                                   CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                     </ContextMenu>
                 </Button.ContextMenu>
                 <Button.Template>
                     <ControlTemplate TargetType="Button">
-                        <Border x:Name="Tile"
-                                CornerRadius="8"
-                                Background="{TemplateBinding Background}">
-                            <ContentPresenter HorizontalAlignment="Center"
-                                              VerticalAlignment="Center" />
-                        </Border>
+                        <Grid>
+                            <Border x:Name="Tile"
+                                    CornerRadius="8"
+                                    Background="{TemplateBinding Background}"
+                                    BorderThickness="2"
+                                    BorderBrush="Transparent">
+                                <ContentPresenter HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center" />
+                            </Border>
+                            <Border x:Name="SelectedBadge"
+                                    Width="18"
+                                    Height="18"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Top"
+                                    Margin="0,4,4,0"
+                                    Background="#E85B9BD5"
+                                    BorderBrush="#F8FFFFFF"
+                                    BorderThickness="1.5"
+                                    CornerRadius="9"
+                                    Visibility="Collapsed">
+                                <Path Data="M 4 9 L 7.5 12.5 L 14 5.5"
+                                      Stroke="#FFFFFFFF"
+                                      StrokeThickness="2"
+                                      StrokeStartLineCap="Round"
+                                      StrokeEndLineCap="Round"
+                                      StrokeLineJoin="Round" />
+                            </Border>
+                        </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Tile" Property="Background" Value="#24FFFFFF" />
@@ -53,6 +91,11 @@
                             <Trigger Property="IsKeyboardFocused" Value="True">
                                 <Setter TargetName="Tile" Property="Background" Value="#30FFFFFF" />
                             </Trigger>
+                            <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                <Setter TargetName="Tile" Property="Background" Value="#2E5B9BD5" />
+                                <Setter TargetName="Tile" Property="BorderBrush" Value="#CC7DBEFF" />
+                                <Setter TargetName="SelectedBadge" Property="Visibility" Value="Visible" />
+                            </DataTrigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Button.Template>
@@ -83,6 +126,8 @@
         <Grid.ContextMenu>
             <ContextMenu>
                 <MenuItem Header="Create region" Click="CreateRegion_Click" />
+                <MenuItem Header="Select all" Click="SelectAll_Click" />
+                <MenuItem Header="Clear selection" Click="ClearSelection_Click" />
             </ContextMenu>
         </Grid.ContextMenu>
         <Grid.RenderTransform>
@@ -95,31 +140,45 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <Button Grid.Row="0"
-                HorizontalAlignment="Right"
-                VerticalAlignment="Top"
-                Margin="0,22,26,0"
-                Width="36"
-                Height="36"
-                Content="⚙"
-                FontSize="18"
-                Foreground="#F7FAFF"
-                Background="#22FFFFFF"
-                BorderBrush="#44FFFFFF"
-                BorderThickness="1"
-                Click="GearButton_Click">
-            <Button.ContextMenu>
-                <ContextMenu x:Name="GearMenu">
-                    <MenuItem Header="Inline regions" Click="SetInlineRegions_Click" />
-                    <MenuItem Header="Region tabs" Click="SetRegionTabs_Click" />
-                    <Separator />
-                    <MenuItem Header="Import Start Menu apps" Click="ImportStartMenu_Click" />
-                    <MenuItem Header="Import .vui files" Click="ImportVui_Click" />
-                    <Separator />
-                    <MenuItem Header="Settings" Click="OpenSettings_Click" />
-                </ContextMenu>
-            </Button.ContextMenu>
-        </Button>
+        <StackPanel Grid.Row="0"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Margin="0,22,26,0"
+                    Orientation="Horizontal">
+            <Button Width="36"
+                    Height="36"
+                    Content="&#x2b;"
+                    FontSize="18"
+                    FontWeight="Bold"
+                    Foreground="#F7FAFF"
+                    Background="#22FFFFFF"
+                    BorderBrush="#44FFFFFF"
+                    BorderThickness="1"
+                    Margin="0,0,8,0"
+                    Click="ImportButton_Click"
+                    ToolTip="Import shortcuts / exe / url" />
+            <Button Width="36"
+                    Height="36"
+                    Content="&#x2699;"
+                    FontSize="18"
+                    Foreground="#F7FAFF"
+                    Background="#22FFFFFF"
+                    BorderBrush="#44FFFFFF"
+                    BorderThickness="1"
+                    Click="GearButton_Click">
+                <Button.ContextMenu>
+                    <ContextMenu x:Name="GearMenu">
+                        <MenuItem Header="Inline regions" Click="SetInlineRegions_Click" />
+                        <MenuItem Header="Region tabs" Click="SetRegionTabs_Click" />
+                        <Separator />
+                        <MenuItem Header="Import Start Menu apps" Click="ImportStartMenu_Click" />
+                        <MenuItem Header="Import .vui files" Click="ImportVui_Click" />
+                        <Separator />
+                        <MenuItem Header="Settings" Click="OpenSettings_Click" />
+                    </ContextMenu>
+                </Button.ContextMenu>
+            </Button>
+        </StackPanel>
 
         <Border Grid.Row="0"
                 Margin="0,44,0,18"
@@ -159,8 +218,6 @@
                             Margin="5,0"
                             Padding="14,7"
                             Click="RegionTab_Click"
-                            Drop="Region_Drop"
-                            AllowDrop="True"
                             Background="#24FFFFFF"
                             Foreground="#F7FAFF"
                             BorderBrush="#30FFFFFF"
@@ -179,54 +236,82 @@
         </ItemsControl>
 
         <ScrollViewer Grid.Row="2"
+                      x:Name="ScrollViewer"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled"
                       Padding="48,0,48,52">
-            <Grid>
-                <ItemsControl Visibility="{Binding InlineRegionsVisibility}"
-                              ItemsSource="{Binding Regions}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate DataType="{x:Type viewModels:LaunchpadRegionViewModel}">
-                            <StackPanel Margin="0,0,0,22"
-                                        Tag="{Binding Id}"
-                                        Drop="Region_Drop"
-                                        AllowDrop="True">
-                                <TextBlock Text="{Binding Name}"
-                                           Margin="12,0,12,10"
-                                           FontSize="15"
-                                           FontWeight="SemiBold"
-                                           Foreground="#DDE7F7">
-                                    <TextBlock.ContextMenu>
-                                        <ContextMenu>
-                                            <MenuItem Header="Rename region" Click="RenameRegion_Click"
-                                                      CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
-                                            <MenuItem Header="Delete region" Click="DeleteRegion_Click"
-                                                      CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
-                                        </ContextMenu>
-                                    </TextBlock.ContextMenu>
-                                </TextBlock>
-                                <ItemsControl ItemsSource="{Binding Items}"
-                                              ItemTemplate="{StaticResource AppTileTemplate}">
-                                    <ItemsControl.ItemsPanel>
-                                        <ItemsPanelTemplate>
-                                            <WrapPanel HorizontalAlignment="Center" />
-                                        </ItemsPanelTemplate>
-                                    </ItemsControl.ItemsPanel>
-                                </ItemsControl>
-                            </StackPanel>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
+            <Grid x:Name="ContentGrid">
+                <Grid.ContextMenu>
+                    <ContextMenu>
+                        <MenuItem Header="Create region" Click="CreateRegion_Click" />
+                        <MenuItem Header="Select all" Click="SelectAll_Click" />
+                        <MenuItem Header="Clear selection" Click="ClearSelection_Click" />
+                    </ContextMenu>
+                </Grid.ContextMenu>
 
-                <ItemsControl Visibility="{Binding RegionTabsVisibility}"
-                              ItemsSource="{Binding ActiveRegionItems}"
-                              ItemTemplate="{StaticResource AppTileTemplate}">
-                    <ItemsControl.ItemsPanel>
-                        <ItemsPanelTemplate>
-                            <WrapPanel HorizontalAlignment="Center" />
-                        </ItemsPanelTemplate>
-                    </ItemsControl.ItemsPanel>
-                </ItemsControl>
+                <Grid x:Name="ItemsPanel">
+                    <ItemsControl Visibility="{Binding InlineRegionsVisibility}"
+                                  ItemsSource="{Binding Regions}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type viewModels:LaunchpadRegionViewModel}">
+                                <StackPanel Margin="0,0,0,22"
+                                            Tag="{Binding Id}">
+                                    <TextBlock Text="{Binding Name}"
+                                               Margin="12,0,12,10"
+                                               FontSize="15"
+                                               FontWeight="SemiBold"
+                                               Foreground="#DDE7F7">
+                                        <TextBlock.ContextMenu>
+                                            <ContextMenu>
+                                                <MenuItem Header="Rename region" Click="RenameRegion_Click"
+                                                          CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                <MenuItem Header="Delete region" Click="DeleteRegion_Click"
+                                                          CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                            </ContextMenu>
+                                        </TextBlock.ContextMenu>
+                                    </TextBlock>
+                                    <ItemsControl ItemsSource="{Binding Items}"
+                                                  ItemTemplate="{StaticResource AppTileTemplate}">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <WrapPanel HorizontalAlignment="Center" />
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <ItemsControl Visibility="{Binding RegionTabsVisibility}"
+                                  Tag="{Binding ActiveRegionId}"
+                                  ItemsSource="{Binding ActiveRegionItems}"
+                                  ItemTemplate="{StaticResource AppTileTemplate}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel HorizontalAlignment="Center" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                    </ItemsControl>
+                </Grid>
+
+                <!-- Overlay canvas for selection rect and drop indicator -->
+                <Canvas x:Name="OverlayCanvas" IsHitTestVisible="False">
+                    <!-- Drop indicator line -->
+                    <Border x:Name="DropIndicator"
+                            Width="3"
+                            CornerRadius="1.5"
+                            Background="#AA5B9BD5"
+                            Visibility="Collapsed" />
+
+                    <!-- Selection rectangle -->
+                    <Border x:Name="SelectionRect"
+                            Background="#305B9BD5"
+                            BorderBrush="#805B9BD5"
+                            BorderThickness="1"
+                            CornerRadius="2"
+                            Visibility="Collapsed" />
+                </Canvas>
             </Grid>
         </ScrollViewer>
     </Grid>

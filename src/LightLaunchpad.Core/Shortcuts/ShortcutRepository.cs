@@ -10,10 +10,12 @@ public sealed class ShortcutRepository
     };
 
     private readonly string _launchpadFolder;
+    private readonly Func<string, string?>? _resolveShortcutTarget;
 
-    public ShortcutRepository(string launchpadFolder)
+    public ShortcutRepository(string launchpadFolder, Func<string, string?>? resolveShortcutTarget = null)
     {
         _launchpadFolder = launchpadFolder;
+        _resolveShortcutTarget = resolveShortcutTarget;
     }
 
     public IReadOnlyList<LaunchItem> LoadItems()
@@ -32,10 +34,37 @@ public sealed class ShortcutRepository
         return SupportedExtensions.ContainsKey(Path.GetExtension(path));
     }
 
-    private static LaunchItem CreateItem(string path)
+    private LaunchItem CreateItem(string path)
     {
         var extension = Path.GetExtension(path);
         var kind = SupportedExtensions[extension];
-        return new LaunchItem(Path.GetFileNameWithoutExtension(path), path, null, kind);
+        string? targetPath = kind switch
+        {
+            LaunchItemKind.Shortcut => _resolveShortcutTarget?.Invoke(path),
+            LaunchItemKind.Url => ParseUrlFile(path),
+            LaunchItemKind.Executable => path,
+            _ => null
+        };
+        return new LaunchItem(Path.GetFileNameWithoutExtension(path), path, targetPath, kind);
+    }
+
+    internal static string? ParseUrlFile(string path)
+    {
+        try
+        {
+            foreach (var line in File.ReadLines(path))
+            {
+                if (line.StartsWith("URL=", StringComparison.OrdinalIgnoreCase))
+                {
+                    return line.Substring(4).Trim();
+                }
+            }
+        }
+        catch
+        {
+            // ignore unreadable files
+        }
+
+        return null;
     }
 }

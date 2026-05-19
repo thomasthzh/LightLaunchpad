@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using LightLaunchpad.Core.Shortcuts;
 
 namespace LightLaunchpad.Core.Layout;
@@ -9,7 +10,8 @@ public sealed class LayoutService
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        WriteIndented = true
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter() }
     };
 
     private readonly string _layoutPath;
@@ -139,13 +141,55 @@ public sealed class LayoutService
 
     public LaunchpadLayout MoveItem(LaunchpadLayout layout, string sourcePath, string regionId, int order)
     {
+        return MoveItems(layout, [sourcePath], regionId, order);
+    }
+
+    public LaunchpadLayout MoveItems(
+        LaunchpadLayout layout,
+        IReadOnlyList<string> sourcePaths,
+        string regionId,
+        int order)
+    {
         var targetRegion = layout.Regions.Any(region => region.Id == regionId) ? regionId : UncategorizedRegionId;
-        var normalized = NormalizePath(sourcePath);
-        var items = layout.Items
-            .Select(item => NormalizePath(item.SourcePath) == normalized ? item with { RegionId = targetRegion, Order = order } : item)
+        var normalizedSources = sourcePaths
+            .Select(NormalizePath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (normalizedSources.Count == 0)
+        {
+            return layout;
+        }
+
+        var movingItems = normalizedSources
+            .Select(normalized => layout.Items.FirstOrDefault(item =>
+                string.Equals(NormalizePath(item.SourcePath), normalized, StringComparison.OrdinalIgnoreCase)))
+            .Where(item => item is not null)
+            .Select(item => item!)
+            .ToList();
+        if (movingItems.Count == 0)
+        {
+            return layout;
+        }
+
+        var movingSet = normalizedSources.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var itemsWithoutMoving = layout.Items
+            .Where(item => !movingSet.Contains(NormalizePath(item.SourcePath)))
+            .ToList();
+        var targetItems = itemsWithoutMoving
+            .Where(item => item.RegionId == targetRegion)
+            .OrderBy(item => item.Order)
+            .ThenBy(item => item.DisplayName, StringComparer.CurrentCultureIgnoreCase)
+            .ToList();
+        var insertIndex = Math.Clamp(order, 0, targetItems.Count);
+
+        targetItems.InsertRange(insertIndex, movingItems.Select(item => item with { RegionId = targetRegion }));
+
+        var reordered = itemsWithoutMoving
+            .Where(item => item.RegionId != targetRegion)
+            .Concat(targetItems.Select((item, index) => item with { Order = index }))
             .ToList();
 
-        return layout with { Items = RenumberByRegion(items) };
+        return layout with { Items = RenumberByRegion(reordered) };
     }
 
     public LaunchpadLayout RenameItem(LaunchpadLayout layout, string sourcePath, string displayName)

@@ -10,6 +10,7 @@ internal static class Program
             (nameof(AppSettingsTests.CreateDefault_UsesUserLaunchpadFolderAndAltD), AppSettingsTests.CreateDefault_UsesUserLaunchpadFolderAndAltD),
             (nameof(AppSettingsTests.SettingsService_LoadsDefaultsWhenFileDoesNotExist), AppSettingsTests.SettingsService_LoadsDefaultsWhenFileDoesNotExist),
             (nameof(AppSettingsTests.SettingsService_SavesAndLoadsCustomSettings), AppSettingsTests.SettingsService_SavesAndLoadsCustomSettings),
+            (nameof(AppStoragePathsTests.GetIconCacheDirectory_UsesDocumentsLightLaunchpadIconsFolder), AppStoragePathsTests.GetIconCacheDirectory_UsesDocumentsLightLaunchpadIconsFolder),
             (nameof(HotkeyGestureTests.Parse_ReadsAltLetterGesture), HotkeyGestureTests.Parse_ReadsAltLetterGesture),
             (nameof(HotkeyGestureTests.Parse_NormalizesWhitespaceAndCase), HotkeyGestureTests.Parse_NormalizesWhitespaceAndCase),
             (nameof(ShortcutRepositoryTests.LoadItems_CreatesFolderWhenMissing), ShortcutRepositoryTests.LoadItems_CreatesFolderWhenMissing),
@@ -22,6 +23,13 @@ internal static class Program
             (nameof(LayoutServiceTests.MergeItems_AddsNewFolderItemsToUncategorized), LayoutServiceTests.MergeItems_AddsNewFolderItemsToUncategorized),
             (nameof(LayoutServiceTests.DeleteRegion_MovesItemsToUncategorized), LayoutServiceTests.DeleteRegion_MovesItemsToUncategorized),
             (nameof(LayoutServiceTests.SaveAndLoad_RoundTripsViewMode), LayoutServiceTests.SaveAndLoad_RoundTripsViewMode),
+            (nameof(LayoutServiceTests.MoveItem_ReordersWithinRegionAtRequestedIndex), LayoutServiceTests.MoveItem_ReordersWithinRegionAtRequestedIndex),
+            (nameof(LayoutServiceTests.MoveItem_MovesBetweenRegionsAtRequestedIndex), LayoutServiceTests.MoveItem_MovesBetweenRegionsAtRequestedIndex),
+            (nameof(LayoutServiceTests.MoveItems_MovesSelectionAsContiguousGroupUsingIndexAmongRemainingItems), LayoutServiceTests.MoveItems_MovesSelectionAsContiguousGroupUsingIndexAmongRemainingItems),
+            (nameof(DragTargetSmootherTests.TryAccept_WaitsForStableCandidateBeforeAccepting), DragTargetSmootherTests.TryAccept_WaitsForStableCandidateBeforeAccepting),
+            (nameof(DragTargetSmootherTests.TryAccept_IgnoresTinyMovesAfterAcceptedTarget), DragTargetSmootherTests.TryAccept_IgnoresTinyMovesAfterAcceptedTarget),
+            (nameof(DragInsertionCalculatorTests.FindInsertionIndex_UsesTileHorizontalMidline), DragInsertionCalculatorTests.FindInsertionIndex_UsesTileHorizontalMidline),
+            (nameof(DragInsertionCalculatorTests.FindInsertionIndex_UsesMatchingRowWhenPointerIsInBlankArea), DragInsertionCalculatorTests.FindInsertionIndex_UsesMatchingRowWhenPointerIsInBlankArea),
             (nameof(StartMenuImporterTests.Discover_ReadsShortcutsRecursivelyWithRegionHints), StartMenuImporterTests.Discover_ReadsShortcutsRecursivelyWithRegionHints),
             (nameof(StartMenuImporterTests.Discover_DeduplicatesByNormalizedSourcePath), StartMenuImporterTests.Discover_DeduplicatesByNormalizedSourcePath)
         };

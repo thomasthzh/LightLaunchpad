@@ -67,4 +67,85 @@ public sealed class LayoutServiceTests
 
         TestAssert.Equal(LaunchpadViewMode.RegionTabs, loaded.ViewMode);
     }
+
+    public static void MoveItem_ReordersWithinRegionAtRequestedIndex()
+    {
+        var path = Path.Combine(TestPaths.CreateTempDirectory(), "layout.json");
+        var service = new LayoutService(path);
+        var layout = new LaunchpadLayout(
+            LaunchpadViewMode.InlineRegions,
+            new List<LaunchpadRegion>
+            {
+                new(LayoutService.UncategorizedRegionId, "Uncategorized", 0)
+            },
+            new List<LaunchpadLayoutItem>
+            {
+                new(@"C:\Launchpad\Alpha.lnk", "Alpha", LayoutService.UncategorizedRegionId, 0),
+                new(@"C:\Launchpad\Beta.lnk", "Beta", LayoutService.UncategorizedRegionId, 1),
+                new(@"C:\Launchpad\Gamma.lnk", "Gamma", LayoutService.UncategorizedRegionId, 2)
+            });
+
+        var updated = service.MoveItem(layout, @"C:\Launchpad\Gamma.lnk", LayoutService.UncategorizedRegionId, 0);
+
+        TestAssert.SequenceEqual(
+            new[] { "Gamma", "Alpha", "Beta" },
+            updated.Items.OrderBy(item => item.Order).Select(item => item.DisplayName));
+        TestAssert.SequenceEqual(new[] { 0, 1, 2 }, updated.Items.OrderBy(item => item.Order).Select(item => item.Order));
+    }
+
+    public static void MoveItem_MovesBetweenRegionsAtRequestedIndex()
+    {
+        var path = Path.Combine(TestPaths.CreateTempDirectory(), "layout.json");
+        var service = new LayoutService(path);
+        var layout = new LaunchpadLayout(
+            LaunchpadViewMode.InlineRegions,
+            new List<LaunchpadRegion>
+            {
+                new(LayoutService.UncategorizedRegionId, "Uncategorized", 0),
+                new("tools", "Tools", 1)
+            },
+            new List<LaunchpadLayoutItem>
+            {
+                new(@"C:\Launchpad\Alpha.lnk", "Alpha", LayoutService.UncategorizedRegionId, 0),
+                new(@"C:\Launchpad\Beta.lnk", "Beta", "tools", 0),
+                new(@"C:\Launchpad\Gamma.lnk", "Gamma", "tools", 1)
+            });
+
+        var updated = service.MoveItem(layout, @"C:\Launchpad\Alpha.lnk", "tools", 1);
+        var tools = updated.Items
+            .Where(item => item.RegionId == "tools")
+            .OrderBy(item => item.Order)
+            .Select(item => item.DisplayName);
+
+        TestAssert.SequenceEqual(new[] { "Beta", "Alpha", "Gamma" }, tools);
+    }
+
+    public static void MoveItems_MovesSelectionAsContiguousGroupUsingIndexAmongRemainingItems()
+    {
+        var path = Path.Combine(TestPaths.CreateTempDirectory(), "layout.json");
+        var service = new LayoutService(path);
+        var layout = new LaunchpadLayout(
+            LaunchpadViewMode.InlineRegions,
+            new List<LaunchpadRegion>
+            {
+                new(LayoutService.UncategorizedRegionId, "Uncategorized", 0)
+            },
+            new List<LaunchpadLayoutItem>
+            {
+                new(@"C:\Launchpad\Alpha.lnk", "Alpha", LayoutService.UncategorizedRegionId, 0),
+                new(@"C:\Launchpad\Beta.lnk", "Beta", LayoutService.UncategorizedRegionId, 1),
+                new(@"C:\Launchpad\Gamma.lnk", "Gamma", LayoutService.UncategorizedRegionId, 2),
+                new(@"C:\Launchpad\Delta.lnk", "Delta", LayoutService.UncategorizedRegionId, 3)
+            });
+
+        var updated = service.MoveItems(
+            layout,
+            [@"C:\Launchpad\Beta.lnk", @"C:\Launchpad\Gamma.lnk"],
+            LayoutService.UncategorizedRegionId,
+            2);
+
+        TestAssert.SequenceEqual(
+            new[] { "Alpha", "Delta", "Beta", "Gamma" },
+            updated.Items.OrderBy(item => item.Order).Select(item => item.DisplayName));
+    }
 }

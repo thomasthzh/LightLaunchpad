@@ -8,11 +8,21 @@ namespace LightLaunchpad.App.ViewModels;
 public sealed class LaunchItemViewModel : INotifyPropertyChanged
 {
     private ImageSource? _icon;
+    private bool _isSelected;
+    private bool _isDragPlaceholder;
+    private bool _iconLoadAttempted;
 
-    public LaunchItemViewModel(LaunchItem item, ImageSource? icon, double iconSize, string regionId, int order)
+    public LaunchItemViewModel(
+        LaunchItem item,
+        ImageSource? icon,
+        double iconSize,
+        string regionId,
+        int order,
+        bool iconLoadAttempted = false)
     {
         Item = item;
         _icon = icon;
+        _iconLoadAttempted = iconLoadAttempted || icon is not null;
         IconSize = iconSize;
         RegionId = regionId;
         Order = order;
@@ -26,9 +36,9 @@ public sealed class LaunchItemViewModel : INotifyPropertyChanged
 
     public string SourcePath => Item.SourcePath;
 
-    public string RegionId { get; }
+    public string RegionId { get; internal set; }
 
-    public int Order { get; }
+    public int Order { get; internal set; }
 
     public ImageSource? Icon
     {
@@ -49,9 +59,54 @@ public sealed class LaunchItemViewModel : INotifyPropertyChanged
 
     public double LabelWidth => Math.Max(82, IconSize + 34);
 
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set
+        {
+            if (_isSelected != value)
+            {
+                _isSelected = value;
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    public bool IsDragPlaceholder
+    {
+        get => _isDragPlaceholder;
+        set
+        {
+            if (_isDragPlaceholder != value)
+            {
+                _isDragPlaceholder = value;
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    public bool IconLoadAttempted => _iconLoadAttempted;
+
     public void LoadIcon(Func<LaunchItem, ImageSource?> iconFactory)
     {
-        Icon ??= iconFactory(Item);
+        if (_iconLoadAttempted)
+        {
+            return;
+        }
+
+        SetIcon(iconFactory(Item));
+    }
+
+    public void SetIcon(ImageSource? icon)
+    {
+        _iconLoadAttempted = true;
+        Icon = icon;
+    }
+
+    public void ClearIcon()
+    {
+        _iconLoadAttempted = false;
+        Icon = null;
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)

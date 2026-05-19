@@ -6,7 +6,11 @@ obj/
 .dotnet/
 .worktrees/
 .superpowers/
+artifacts/
 TestResults/
 *.user
 *.suo
 *.nupkg
+/DESIGN.md
+/LightFrame_MC_*.vui
+/爱丽丝.gif
