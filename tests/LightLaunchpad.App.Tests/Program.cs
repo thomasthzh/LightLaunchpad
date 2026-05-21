@@ -62,6 +62,18 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.AgentProject_UsesLightweightNativeShellContracts),
                 HostedAppModeSourceTests.AgentProject_UsesLightweightNativeShellContracts),
             (
+                nameof(HostedAppModeSourceTests.NativeAgentSource_UsesWin32OnlyBackgroundContracts),
+                HostedAppModeSourceTests.NativeAgentSource_UsesWin32OnlyBackgroundContracts),
+            (
+                nameof(HostedAppModeSourceTests.NativeAgentSource_LoadsTrayIconAndCleansHostedUiWithJobObject),
+                HostedAppModeSourceTests.NativeAgentSource_LoadsTrayIconAndCleansHostedUiWithJobObject),
+            (
+                nameof(HostedAppModeSourceTests.PackageReleaseScript_BundlesUiManagedAgentAndNativeAgent),
+                HostedAppModeSourceTests.PackageReleaseScript_BundlesUiManagedAgentAndNativeAgent),
+            (
+                nameof(HostedAppModeSourceTests.StartupRegistration_PrefersNativeAgentForLowMemoryRoute),
+                HostedAppModeSourceTests.StartupRegistration_PrefersNativeAgentForLowMemoryRoute),
+            (
                 nameof(LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),
                 LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),
             (

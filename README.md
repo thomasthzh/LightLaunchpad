@@ -14,6 +14,7 @@ LightLaunchpad is a lightweight Windows launchpad for shortcuts, executables, an
 - Icon cache stored under `Documents\LightLaunchpad\icons`.
 - User settings and layout stored under `%AppData%\LightLaunchpad`.
 - Optional agent mode with a small always-on host that launches the WPF UI on demand.
+- Native agent mode for true low-memory background residency.
 
 ## Download
 
@@ -59,6 +60,22 @@ dotnet publish src\LightLaunchpad.Agent\LightLaunchpad.Agent.csproj `
 ```
 
 Run `LightLaunchpad.Agent.exe` for the split-process route. The agent owns the global hotkey and tray icon, then launches `LightLaunchpad.App.exe` in hosted UI mode when needed.
+
+Create the native Win32 agent:
+
+```powershell
+.\tools\build-native-agent.ps1 -OutputDirectory artifacts\publish-win-x64
+```
+
+Run `LightLaunchpad.NativeAgent.exe` for the lowest background memory path. It owns the hotkey and tray through Win32 APIs and launches `LightLaunchpad.App.exe` only when the launchpad is opened.
+
+Create the local release package:
+
+```powershell
+.\tools\package-release.ps1
+```
+
+The package is written under `release\LightLaunchpad-native-agent-win-x64-<version>` with a matching `.zip`. Start `LightLaunchpad.NativeAgent.exe` from that folder for the current low-memory route.
 
 ## License
 

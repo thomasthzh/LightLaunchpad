@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.IO;
-using System.Reflection;
 using System.Threading;
 using System.Windows;
 using System.Windows.Threading;
@@ -677,12 +676,32 @@ public partial class App : System.Windows.Application
                 return;
             }
 
-            var assemblyPath = Assembly.GetEntryAssembly()?.Location ?? Assembly.GetExecutingAssembly().Location;
-            var appHostPath = Path.ChangeExtension(assemblyPath, ".exe");
-            var executablePath = File.Exists(appHostPath)
-                ? appHostPath
-                : Environment.ProcessPath ?? assemblyPath;
+            var executablePath = ResolveStartupExecutablePath();
             key.SetValue(AppName, $"\"{executablePath}\"");
+        }
+
+        private static string ResolveStartupExecutablePath()
+        {
+            var baseDirectory = AppContext.BaseDirectory;
+            var nativeAgentPath = Path.Combine(baseDirectory, "LightLaunchpad.NativeAgent.exe");
+            if (File.Exists(nativeAgentPath))
+            {
+                return nativeAgentPath;
+            }
+
+            var managedAgentPath = Path.Combine(baseDirectory, "LightLaunchpad.Agent.exe");
+            if (File.Exists(managedAgentPath))
+            {
+                return managedAgentPath;
+            }
+
+            var processPath = Environment.ProcessPath;
+            if (!string.IsNullOrWhiteSpace(processPath))
+            {
+                return processPath;
+            }
+
+            return Path.Combine(baseDirectory, "LightLaunchpad.App.exe");
         }
     }
 }
