@@ -21,7 +21,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 }
 
 $releaseRoot = Join-Path $repoRoot $OutputRoot
-$packageName = "LightLaunchpad-$Runtime-$Version"
+$packageName = "LightLaunchpad-nativeui-$Runtime-$Version"
 $packageRoot = Join-Path $releaseRoot $packageName
 $zipPath = Join-Path $releaseRoot "$packageName.zip"
 
@@ -47,11 +47,20 @@ if (Test-Path $zipPath) {
     -p:EnableCompressionInSingleFile=true `
     -p:IncludeNativeLibrariesForSelfExtract=true `
     -o $packageRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "dotnet publish failed with exit code $LASTEXITCODE."
+}
+
+& (Join-Path $PSScriptRoot "build-native-ui.ps1") -OutputDirectory $packageRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "Native UI build failed with exit code $LASTEXITCODE."
+}
 
 Compress-Archive -Path (Join-Path $packageRoot "*") -DestinationPath $zipPath -Force
 
 [pscustomobject]@{
     PackageDirectory = $packageRoot
     Zip = $zipPath
+    NativeUi = Join-Path $packageRoot "LightLaunchpad.NativeUi.exe"
     App = Join-Path $packageRoot "LightLaunchpad.App.exe"
 }

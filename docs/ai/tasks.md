@@ -205,3 +205,30 @@ Completion notes:
 - Search filtering now captures icon state before replacing `FilteredItems`, so clearing a no-result query restores already-loaded icons and queues missing icons again.
 - Startup registration now resolves to the app process instead of preferring agent executables.
 - Default package now contains the single-process WPF app only; agent/native-agent are retained as experiments, not as the recommended path.
+
+## N1 - Native UI M1
+
+Status: done
+
+Purpose: Start the full LightFrame-style rewrite with a real native launcher surface instead of an agent that cold-starts WPF.
+
+Likely files:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
+- `tools/build-native-ui.ps1`
+- `tools/package-release.ps1`
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs`
+- `docs/superpowers/plans/2026-05-22-native-ui-m1.md`
+
+Verification:
+
+- App source tests cover Win32-native window/tray/hotkey/search/launch contracts.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-probe`
+- `.\tools\package-release.ps1`
+
+Completion notes:
+
+- NativeUi M1 reads existing `%AppData%\LightLaunchpad\settings.json` and `layout.json`.
+- NativeUi M1 owns hotkey, tray, search input, double-buffered drawing, icon loading, mouse selection/double-click launch, Enter launch, Esc hide, and wheel scrolling.
+- NativeUi release builds statically link the MinGW C/C++ runtime and the package script now fails hard if publish/build steps fail.
+- WPF remains fallback for settings and full editing until later native milestones.
