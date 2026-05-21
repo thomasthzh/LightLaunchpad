@@ -129,9 +129,12 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("LightLaunchpad.NativeUi.exe", script);
         TestAssert.Contains("GetTempPath", script);
         TestAssert.Contains("-mwindows", script);
-        TestAssert.Contains("-static", script);
-        TestAssert.Contains("-static-libgcc", script);
-        TestAssert.Contains("-static-libstdc++", script);
+        TestAssert.Contains("objdump", script);
+        TestAssert.Contains("libgcc_s_seh-1.dll", script);
+        TestAssert.Contains("libstdc++-6.dll", script);
+        TestAssert.Contains("Native UI runtime dependency not found", script);
+        TestAssert.DoesNotContain("-static-libgcc", script);
+        TestAssert.DoesNotContain("-static-libstdc++", script);
     }
 
     public static void PackageReleaseScript_IncludesNativeUiPrimaryExecutable()

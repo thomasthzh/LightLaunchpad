@@ -32,9 +32,6 @@ try {
         -std=c++17 `
         -municode `
         -mwindows `
-        -static `
-        -static-libgcc `
-        -static-libstdc++ `
         -O2 `
         -s `
         -lshell32 `
@@ -49,6 +46,32 @@ try {
     }
 
     Copy-Item $temporaryExe (Join-Path $outputDirectoryFull "LightLaunchpad.NativeUi.exe") -Force
+
+    $toolchainDirectory = Split-Path -Parent $gpp
+    $objdump = (where.exe objdump 2>$null | Select-Object -First 1)
+    $runtimeDllNames = @()
+    if ($objdump) {
+        $runtimeDllNames = & $objdump -p $temporaryExe |
+            ForEach-Object {
+                if ($_ -match 'DLL Name:\s+(lib(?:gcc|stdc\+\+|winpthread)[^\s]+\.dll)') {
+                    $matches[1]
+                }
+            } |
+            Sort-Object -Unique
+    }
+
+    if ($runtimeDllNames.Count -eq 0) {
+        $runtimeDllNames = @("libgcc_s_seh-1.dll", "libstdc++-6.dll")
+    }
+
+    foreach ($runtimeDllName in $runtimeDllNames) {
+        $runtimeDll = Join-Path $toolchainDirectory $runtimeDllName
+        if (-not (Test-Path $runtimeDll)) {
+            throw "Native UI runtime dependency not found: $runtimeDllName."
+        }
+
+        Copy-Item $runtimeDll (Join-Path $outputDirectoryFull $runtimeDllName) -Force
+    }
 }
 finally {
     if ($pushedLocation) {

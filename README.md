@@ -20,7 +20,7 @@ LightLaunchpad is a lightweight Windows launchpad for shortcuts, executables, an
 
 Use the latest GitHub Release and download the Windows zip package. Start `LightLaunchpad.NativeUi.exe` for the native launcher, or `LightLaunchpad.App.exe` for the current WPF fallback/settings surface.
 
-The fallback app is a self-contained single-file Windows executable. The native launcher is statically linked against the MinGW C/C++ runtime so it can start from the package without requiring the developer toolchain on `PATH`.
+The fallback app is a self-contained single-file Windows executable. The native launcher bundles the small MinGW C/C++ runtime DLLs it imports so it can start from the package without requiring the developer toolchain on `PATH`.
 
 ## Build
 

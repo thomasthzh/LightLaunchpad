@@ -40,7 +40,7 @@
 - Search clear now preserves cached icon state after a no-result query.
 - Added `LightLaunchpad.NativeUi`, a C++ Win32 native launcher surface that owns hotkey, tray, search, drawing, and app launch without cold-starting WPF.
 - Added `tools/build-native-ui.ps1` and switched release packaging to native-first output with WPF fallback included.
-- Fixed NativeUi package startup by statically linking the MinGW C/C++ runtime; clean-`PATH` launch from the package now stays running at approximately 9.85 MB Working Set / 1.64 MB Private Memory.
+- Fixed NativeUi package startup by bundling the imported MinGW C/C++ runtime DLLs; clean-`PATH` launch from the package now stays running at approximately 4.71 MB Working Set / 1.25 MB Private Memory.
 - Hardened `tools/package-release.ps1` so failed `dotnet publish` or native build steps abort instead of producing a partial package.
 
 ## Changed Files
