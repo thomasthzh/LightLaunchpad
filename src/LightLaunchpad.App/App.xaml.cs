@@ -683,18 +683,6 @@ public partial class App : System.Windows.Application
         private static string ResolveStartupExecutablePath()
         {
             var baseDirectory = AppContext.BaseDirectory;
-            var nativeAgentPath = Path.Combine(baseDirectory, "LightLaunchpad.NativeAgent.exe");
-            if (File.Exists(nativeAgentPath))
-            {
-                return nativeAgentPath;
-            }
-
-            var managedAgentPath = Path.Combine(baseDirectory, "LightLaunchpad.Agent.exe");
-            if (File.Exists(managedAgentPath))
-            {
-                return managedAgentPath;
-            }
-
             var processPath = Environment.ProcessPath;
             if (!string.IsNullOrWhiteSpace(processPath))
             {

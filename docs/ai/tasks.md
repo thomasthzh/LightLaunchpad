@@ -177,3 +177,31 @@ Completion notes:
 - Hardened the native build step for this Chinese-path workspace by compiling in an ASCII temp directory and copying the result back into `release/`.
 - Startup registration now prefers `LightLaunchpad.NativeAgent.exe`, then `LightLaunchpad.Agent.exe`, then the current process path.
 - Formal packaged NativeAgent probe measured approximately 9.89 MB Working Set and 1.57 MB Private Memory while idle.
+
+## A9 - Revert Agent Default and Fix Search State
+
+Status: done
+
+Dependency: A8
+
+Purpose: Restore responsive repeated opening and fix icon disappearance after no-result search.
+
+Likely files:
+
+- `src/LightLaunchpad.App/ViewModels/LaunchpadViewModel.cs`
+- `src/LightLaunchpad.App/App.xaml.cs`
+- `tools/package-release.ps1`
+- `README.md`
+- `docs/ai/requirements-and-route.md`
+
+Verification:
+
+- App tests cover no-result search followed by clearing the search text.
+- App tests cover single-process startup/package defaults.
+- Package script creates `LightLaunchpad-win-x64-<version>.zip`.
+
+Completion notes:
+
+- Search filtering now captures icon state before replacing `FilteredItems`, so clearing a no-result query restores already-loaded icons and queues missing icons again.
+- Startup registration now resolves to the app process instead of preferring agent executables.
+- Default package now contains the single-process WPF app only; agent/native-agent are retained as experiments, not as the recommended path.

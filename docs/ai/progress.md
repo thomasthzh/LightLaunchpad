@@ -1,10 +1,10 @@
-# LightLaunchpad Agent Progress
+# LightLaunchpad Performance Progress
 
 ## Current State
 
-- Branch: `feature/launchpad-v2-polish`
+- Branch: `main`
 - Workspace: `C:\Users\thoma\Desktop\启动台`
-- Active task: complete through A8 - Formal Native Release Package
+- Active task: A9 - Revert Agent Default and Fix Search State
 
 ## Completed
 
@@ -17,6 +17,7 @@
 - A6 - Native Win32 Agent.
 - A7 - Native Agent Hardening.
 - A8 - Formal Native Release Package.
+- A9 - Revert Agent Default and Fix Search State.
 
 ## Commands Run
 
@@ -32,6 +33,10 @@
 - Fixed native packaging for the Chinese workspace path by compiling to an ASCII temp path before copying the executable into `release/`.
 - Updated startup registration to prefer the native low-memory agent when the packaged files are present.
 - Formal release package probe measured approximately 9.89 MB Working Set / 1.57 MB Private Memory while idle.
+- User rejected the agent route because cold-starting WPF is slow and stuttery in practice.
+- Default release packaging now returns to the single-process WPF app for responsive repeated opening.
+- Startup registration now stays on the app process instead of preferring agent executables.
+- Search clear now preserves cached icon state after a no-result query.
 
 ## Changed Files
 
@@ -52,12 +57,14 @@
 - `src/LightLaunchpad.NativeAgent/LightLaunchpad.NativeAgent.cpp`
 - `tools/build-native-agent.ps1`
 - `tools/package-release.ps1`
+- `src/LightLaunchpad.App/ViewModels/LaunchpadViewModel.cs`
+- `tests/LightLaunchpad.App.Tests/LaunchpadViewModelIconStabilityTests.cs`
 
 ## Next Step
 
-Update the GitHub PR branch, then continue with optional Everything query prototype.
+Verify, package the single-process release, push directly to `main`, then begin the LightFrame-style native UI plan.
 
 ## Risks
 
-- NativeAgent currently uses MinGW for local builds. A future CI/release path should standardize the C++ toolchain.
-- Hosted UI must avoid creating duplicate tray/hotkey services.
+- WPF cannot honestly provide both very low resident memory and instant repeated opening; the true route is a native UI rewrite.
+- The agent code remains in the tree for comparison but is no longer the default package/startup route.

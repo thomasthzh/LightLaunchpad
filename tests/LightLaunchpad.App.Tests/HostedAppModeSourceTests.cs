@@ -56,30 +56,39 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("lightlaunchpad-native-", script);
     }
 
-    public static void PackageReleaseScript_BundlesUiManagedAgentAndNativeAgent()
+    public static void PackageReleaseScript_DefaultsToSingleProcessAppPackage()
     {
         var script = File.ReadAllText(FindRepoFile("tools", "package-release.ps1"));
 
-        TestAssert.Contains("LightLaunchpad-native-agent-$Runtime-$Version", script);
+        TestAssert.Contains("LightLaunchpad-$Runtime-$Version", script);
         TestAssert.Contains("src\\LightLaunchpad.App\\LightLaunchpad.App.csproj", script);
-        TestAssert.Contains("src\\LightLaunchpad.Agent\\LightLaunchpad.Agent.csproj", script);
-        TestAssert.Contains("build-native-agent.ps1", script);
-        TestAssert.Contains("LightLaunchpad.NativeAgent.exe", script);
         TestAssert.Contains("Compress-Archive", script);
         TestAssert.Contains("Package output must stay under the release directory.", script);
         TestAssert.Contains("-join [Environment]::NewLine", script);
+        TestAssert.DoesNotContain("LightLaunchpad-native-agent-$Runtime-$Version", script);
+        TestAssert.DoesNotContain("build-native-agent.ps1", script);
     }
 
-    public static void StartupRegistration_PrefersNativeAgentForLowMemoryRoute()
+    public static void StartupRegistration_StaysOnSingleProcessAppForResponsiveRoute()
     {
         var code = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.App", "App.xaml.cs"));
 
         TestAssert.Contains("ResolveStartupExecutablePath", code);
         TestAssert.Contains("AppContext.BaseDirectory", code);
-        TestAssert.Contains("LightLaunchpad.NativeAgent.exe", code);
-        TestAssert.Contains("LightLaunchpad.Agent.exe", code);
         TestAssert.Contains("Environment.ProcessPath", code);
         TestAssert.DoesNotContain("Assembly.GetEntryAssembly()?.Location", code);
+        TestAssert.DoesNotContain("LightLaunchpad.NativeAgent.exe", code);
+        TestAssert.DoesNotContain("LightLaunchpad.Agent.exe", code);
+    }
+
+    public static void LaunchpadWindow_DoesNotClearSearchTextWhenShown()
+    {
+        var code = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.App", "LaunchpadWindow.xaml.cs"));
+
+        TestAssert.Contains("FocusSearchBox", code);
+        TestAssert.Contains("SearchBox.SelectAll", code);
+        TestAssert.DoesNotContain("SearchBox.Clear", code);
+        TestAssert.DoesNotContain("SearchText = string.Empty", code);
     }
 
     private static string FindRepoFile(params string[] parts)

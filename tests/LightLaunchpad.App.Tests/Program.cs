@@ -26,6 +26,12 @@ internal static class Program
                 nameof(LaunchpadViewModelIconStabilityTests.ApplyLoadedIcon_AppliesToReplacementItemAfterRefresh),
                 LaunchpadViewModelIconStabilityTests.ApplyLoadedIcon_AppliesToReplacementItemAfterRefresh),
             (
+                nameof(LaunchpadViewModelIconStabilityTests.SearchText_NoMatchesThenCleared_RestoresCachedIcons),
+                LaunchpadViewModelIconStabilityTests.SearchText_NoMatchesThenCleared_RestoresCachedIcons),
+            (
+                nameof(LaunchpadViewModelIconStabilityTests.SearchText_NoMatchesThenCleared_RequeuesMissingIcons),
+                LaunchpadViewModelIconStabilityTests.SearchText_NoMatchesThenCleared_RequeuesMissingIcons),
+            (
                 nameof(LaunchpadViewModelIconStabilityTests.DragPlaceholderMethods_DoNotMutateVisibleCollections),
                 LaunchpadViewModelIconStabilityTests.DragPlaceholderMethods_DoNotMutateVisibleCollections),
             (
@@ -68,11 +74,14 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeAgentSource_LoadsTrayIconAndCleansHostedUiWithJobObject),
                 HostedAppModeSourceTests.NativeAgentSource_LoadsTrayIconAndCleansHostedUiWithJobObject),
             (
-                nameof(HostedAppModeSourceTests.PackageReleaseScript_BundlesUiManagedAgentAndNativeAgent),
-                HostedAppModeSourceTests.PackageReleaseScript_BundlesUiManagedAgentAndNativeAgent),
+                nameof(HostedAppModeSourceTests.PackageReleaseScript_DefaultsToSingleProcessAppPackage),
+                HostedAppModeSourceTests.PackageReleaseScript_DefaultsToSingleProcessAppPackage),
             (
-                nameof(HostedAppModeSourceTests.StartupRegistration_PrefersNativeAgentForLowMemoryRoute),
-                HostedAppModeSourceTests.StartupRegistration_PrefersNativeAgentForLowMemoryRoute),
+                nameof(HostedAppModeSourceTests.StartupRegistration_StaysOnSingleProcessAppForResponsiveRoute),
+                HostedAppModeSourceTests.StartupRegistration_StaysOnSingleProcessAppForResponsiveRoute),
+            (
+                nameof(HostedAppModeSourceTests.LaunchpadWindow_DoesNotClearSearchTextWhenShown),
+                HostedAppModeSourceTests.LaunchpadWindow_DoesNotClearSearchTextWhenShown),
             (
                 nameof(LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),
                 LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),

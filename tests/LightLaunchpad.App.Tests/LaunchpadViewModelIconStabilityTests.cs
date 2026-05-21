@@ -37,6 +37,35 @@ public sealed class LaunchpadViewModelIconStabilityTests
         TestAssert.Same(icon, current.Icon!);
     }
 
+    public static void SearchText_NoMatchesThenCleared_RestoresCachedIcons()
+    {
+        var (viewModel, _, _) = CreateViewModel();
+        var source = FindItem(viewModel, "Beta");
+        var icon = CreateIcon();
+        source.SetIcon(icon);
+
+        viewModel.SearchText = "Adasdasd";
+        TestAssert.Equal(0, viewModel.FilteredItems.Count);
+
+        viewModel.SearchText = string.Empty;
+
+        var restored = FindItem(viewModel, "Beta");
+        TestAssert.Same(icon, restored.Icon!);
+        TestAssert.True(restored.IconLoadAttempted);
+    }
+
+    public static void SearchText_NoMatchesThenCleared_RequeuesMissingIcons()
+    {
+        var (viewModel, _, _) = CreateViewModel();
+
+        viewModel.SearchText = "Adasdasd";
+        TestAssert.Equal(0, viewModel.FilteredItems.Count);
+
+        viewModel.SearchText = string.Empty;
+
+        TestAssert.Equal(3, viewModel.GetMissingIconItems(10).Count);
+    }
+
     public static void DragPlaceholderMethods_DoNotMutateVisibleCollections()
     {
         var (viewModel, _, _) = CreateViewModel();

@@ -1,64 +1,53 @@
-# LightLaunchpad Agent Route
+# LightLaunchpad Performance Route
 
 ## Requirements
 
-1. Must reduce background residency by moving hotkey and tray ownership out of the WPF launchpad process.
-2. Must keep the current launchpad and spotlight UI behavior available through an on-demand UI process.
-3. Must follow the PowerToys Quick Access pattern where a small host controls a separate UI executable through process launch and lightweight activation signals.
-4. Must keep the current standalone app path working during the transition unless a release explicitly switches the startup target.
-5. Must preserve current layout, settings, icon cache, region editing, and launch behavior.
-6. Must make later Everything integration possible without putting indexing or search work into the always-on process.
+1. Must keep repeated launchpad opening fast and fluid.
+2. Must preserve search text and icon state while the app remains running.
+3. Must keep layout, settings, icon cache, region editing, and launch behavior stable.
+4. Must not present the split-process agent as the primary performance route because WPF cold startup is visibly slower.
+5. Must pursue true low-memory and high-fluidity through a LightFrame-style native UI route, not through a resident mini-host that cold-launches WPF.
+6. Must make later Everything integration possible without putting indexing work into a hot UI path.
 
 ## Chosen Route
 
-Use a split-process architecture:
+Use the WPF app as the default package and startup target for the current release:
 
-- `LightLaunchpad.Agent`: always-on host for hotkey, tray, settings load, and UI process launch.
-- `LightLaunchpad.NativeAgent`: native Win32 always-on host for the strict sub-10MB background route.
-- `LightLaunchpad.App`: WPF UI process. In normal mode it remains compatible with the current app. In hosted mode it is shown by the agent and exits when hidden.
-- `LightLaunchpad.Core`: shared contracts for activation arguments, settings, hotkeys, layout, and pure logic.
+- `LightLaunchpad.App`: single-process WPF UI with hotkey, tray, cached icon state, and fast repeated show/hide.
+- `LightLaunchpad.Core`: shared contracts for settings, layout, search, and pure logic.
+- `LightLaunchpad.Agent` / `LightLaunchpad.NativeAgent`: retained only as experimental code for historical comparison, not packaged or selected by startup registration.
 
-The agent launches the WPF UI with hosted arguments:
+The next real low-memory route is a native UI runtime:
 
-```text
-LightLaunchpad.App.exe --hosted-ui --show-event=<event> --exit-event=<event> --show-immediately --exit-on-hide
-```
-
-The UI listens to named events for future keep-warm activation. In the first phase, it also exits after hide so the WPF memory footprint does not remain in the background.
+- C++ Win32 process owns hotkey, tray, window, input, rendering, and launch actions.
+- Direct2D/DirectWrite or a compact DirectUI layer renders the launchpad directly.
+- Core layout/search/settings contracts remain reusable, while WPF becomes an optional compatibility shell or is removed after the native UI is complete.
 
 ## Reference Notes
 
-- adopt: PowerToys Quick Access host starts the UI process from Runner and signals show/exit with named events.
-- adopt: PowerToys uses a job object to clean up the UI if the host dies. LightLaunchpad should add this after the initial C# agent skeleton.
-- adapt: PowerToys named pipe IPC is useful later for settings sync and query messages, but the first phase only needs activation arguments and named events.
-- adapt: UI memory trim after hide can help perceived memory, but the durable memory reduction comes from exiting the UI process.
-- reject: PowerToys module management, GPO, telemetry, and settings platform are not part of this app route.
-- adopt: LightFrame's native C/C++ Win32 style for the true-low-memory host. Its published repository identifies the architecture as C/C++ native Windows API and DirectUI; the full source is private, so only the architectural pattern is borrowed.
-- adapt: Local LightFrame process evidence shows native does not automatically mean low memory when the full UI/runtime is resident. LightLaunchpad keeps the native host minimal and pushes WPF/UI/icon work into the on-demand process.
+- reject: The agent route reduces idle memory numbers but cold-starts WPF, so it hurts the real interaction target.
+- adopt: LightFrame's public repository describes its architecture as C/C++ native Windows API, DirectUI, and VertexUI. Its full source is private, so only the architecture direction is usable.
+- adapt: Local LightFrame process evidence shows native does not automatically mean low memory when the full runtime is resident. The native rewrite must keep startup, icon loading, and search work incremental.
+- keep: Current WPF app remains the responsive default until the native UI can replace it honestly.
 
 ## Architecture Sketch
 
 ```mermaid
 flowchart LR
-    Agent["LightLaunchpad.NativeAgent\nhotkey + tray + launch"] -->|"CreateProcess + args"| UI["LightLaunchpad.App\nhosted WPF UI"]
-    Agent -->|"SetEvent show"| UI
-    Agent -->|"SetEvent exit"| UI
-    UI --> Core["LightLaunchpad.Core\nsettings/layout/hotkeys/contracts"]
-    Agent --> Core
+    App["LightLaunchpad.App\nsingle-process WPF"] --> Core["LightLaunchpad.Core\nsettings/layout/search"]
+    Native["Future native UI\nWin32 + Direct2D/DirectUI"] --> Core
+    Native --> Shell["Shell launch + icon cache"]
 ```
 
 ## Success Criteria
 
-- Solution builds with a new `LightLaunchpad.Agent` project.
-- Core tests cover activation argument parsing.
-- App tests cover hosted UI source wiring.
-- Agent can launch the WPF UI with hosted arguments.
-- WPF UI can exit on hide in hosted mode.
-- Release packaging includes both executables.
-- NativeAgent package probe stays under 10 MB idle Working Set on the local machine.
-- Startup registration prefers the native agent when it is present in the package.
+- App tests cover search clear restoring icon state.
+- App tests cover package defaulting to the single-process app.
+- Startup registration points to the app process, not agent executables.
+- Release packaging creates `LightLaunchpad-win-x64-<version>.zip`.
+- Native UI plan is tracked as the real route for low memory plus fluid repeated opens.
 
 ## Open Questions
 
 - Whether Everything integration should use `es.exe` first for validation or go straight to the SDK IPC.
-- Whether a future release should remove the managed agent fallback after the native route has enough user testing.
+- Whether the native UI should start with a read-only launcher surface first, then add editing, or port the full region editing model immediately.

@@ -15,6 +15,7 @@ namespace LightLaunchpad.App.ViewModels;
 public sealed class LaunchpadViewModel : INotifyPropertyChanged
 {
     private readonly List<LaunchItem> _items = [];
+    private readonly Dictionary<string, IconState> _iconStateBySource = new(StringComparer.OrdinalIgnoreCase);
     private IconCacheService _iconCache;
     private LaunchpadLayout _layout = new(LaunchpadViewMode.InlineRegions, [], []);
     private string _searchText = string.Empty;
@@ -129,6 +130,7 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
 
     private void RefreshFilter()
     {
+        CaptureIconState(FilteredItems);
         var existingBySource = FilteredItems
             .GroupBy(item => Normalize(item.SourcePath), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
@@ -139,15 +141,17 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
         foreach (var item in LaunchItemSearch.Filter(_items, SearchText))
         {
             var layoutItem = FindLayoutItem(item);
-            existingBySource.TryGetValue(Normalize(item.SourcePath), out var existing);
+            var normalizedSource = Normalize(item.SourcePath);
+            existingBySource.TryGetValue(normalizedSource, out var existing);
+            _iconStateBySource.TryGetValue(normalizedSource, out var iconState);
             var itemViewModel = new LaunchItemViewModel(
                 item with { DisplayName = layoutItem?.DisplayName ?? item.DisplayName },
-                existing?.Icon,
+                existing?.Icon ?? iconState?.Icon,
                 _iconSizePx,
                 _appSpacing,
                 layoutItem?.RegionId ?? LayoutService.UncategorizedRegionId,
                 layoutItem?.Order ?? 0,
-                existing?.IconLoadAttempted ?? false)
+                existing?.IconLoadAttempted ?? iconState?.IconLoadAttempted ?? false)
             {
                 IsSelected = existing?.IsSelected ?? false
             };
@@ -201,7 +205,13 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
             : FilteredItems.FirstOrDefault(current =>
                 string.Equals(Normalize(current.SourcePath), Normalize(item.SourcePath), StringComparison.OrdinalIgnoreCase));
 
-        target?.SetIcon(icon);
+        if (target is null)
+        {
+            return;
+        }
+
+        target.SetIcon(icon);
+        _iconStateBySource[Normalize(target.SourcePath)] = new IconState(icon, IconLoadAttempted: true);
     }
 
     public LaunchItem? FindItemBySourcePath(string sourcePath)
@@ -218,7 +228,16 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
             item.ClearIcon();
         }
 
+        _iconStateBySource.Clear();
         _iconCache.ClearMemoryCache();
+    }
+
+    private void CaptureIconState(IEnumerable<LaunchItemViewModel> items)
+    {
+        foreach (var item in items)
+        {
+            _iconStateBySource[Normalize(item.SourcePath)] = new IconState(item.Icon, item.IconLoadAttempted);
+        }
     }
 
     private void RefreshRegions()
@@ -310,6 +329,8 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
+
+    private sealed record IconState(ImageSource? Icon, bool IconLoadAttempted);
 
     // --- Selection ---
 

@@ -21,7 +21,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 }
 
 $releaseRoot = Join-Path $repoRoot $OutputRoot
-$packageName = "LightLaunchpad-native-agent-$Runtime-$Version"
+$packageName = "LightLaunchpad-$Runtime-$Version"
 $packageRoot = Join-Path $releaseRoot $packageName
 $zipPath = Join-Path $releaseRoot "$packageName.zip"
 
@@ -48,18 +48,10 @@ if (Test-Path $zipPath) {
     -p:IncludeNativeLibrariesForSelfExtract=true `
     -o $packageRoot
 
-& $dotnet publish (Join-Path $repoRoot "src\LightLaunchpad.Agent\LightLaunchpad.Agent.csproj") `
-    -c Release `
-    -r $Runtime `
-    --self-contained false `
-    -o $packageRoot
-
-& (Join-Path $PSScriptRoot "build-native-agent.ps1") -OutputDirectory $packageRoot
-
 Compress-Archive -Path (Join-Path $packageRoot "*") -DestinationPath $zipPath -Force
 
 [pscustomobject]@{
     PackageDirectory = $packageRoot
     Zip = $zipPath
-    NativeAgent = Join-Path $packageRoot "LightLaunchpad.NativeAgent.exe"
+    App = Join-Path $packageRoot "LightLaunchpad.App.exe"
 }
