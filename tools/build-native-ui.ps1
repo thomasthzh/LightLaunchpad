@@ -20,6 +20,48 @@ if (-not $gpp) {
     throw "g++ was not found. Install MinGW-w64 or build the native UI with a C++ toolchain."
 }
 
+function Get-NativeRuntimeDllNames {
+    param(
+        [string]$BinaryPath,
+        [string]$ToolchainDirectory,
+        [string]$Objdump
+    )
+
+    $pending = [System.Collections.Generic.Queue[string]]::new()
+    $seen = @{}
+
+    function Add-RuntimeImport {
+        param([string]$Name)
+
+        if (-not $seen.ContainsKey($Name)) {
+            $seen[$Name] = $true
+            $pending.Enqueue($Name)
+        }
+    }
+
+    function Read-RuntimeImports {
+        param([string]$Path)
+
+        & $Objdump -p $Path |
+            ForEach-Object {
+                if ($_ -match 'DLL Name:\s+(lib(?:gcc|stdc\+\+|winpthread)[^\s]+\.dll)') {
+                    Add-RuntimeImport $matches[1]
+                }
+            }
+    }
+
+    Read-RuntimeImports $BinaryPath
+    while ($pending.Count -gt 0) {
+        $runtimeDllName = $pending.Dequeue()
+        $runtimeDll = Join-Path $ToolchainDirectory $runtimeDllName
+        if (Test-Path $runtimeDll) {
+            Read-RuntimeImports $runtimeDll
+        }
+    }
+
+    $seen.Keys | Sort-Object
+}
+
 New-Item -ItemType Directory -Force -Path $outputDirectoryFull | Out-Null
 New-Item -ItemType Directory -Force -Path $temporaryDirectory | Out-Null
 
@@ -32,6 +74,8 @@ try {
         -std=c++17 `
         -municode `
         -mwindows `
+        -static-libgcc `
+        -static-libstdc++ `
         -O2 `
         -s `
         -lshell32 `
@@ -51,17 +95,11 @@ try {
     $objdump = (where.exe objdump 2>$null | Select-Object -First 1)
     $runtimeDllNames = @()
     if ($objdump) {
-        $runtimeDllNames = & $objdump -p $temporaryExe |
-            ForEach-Object {
-                if ($_ -match 'DLL Name:\s+(lib(?:gcc|stdc\+\+|winpthread)[^\s]+\.dll)') {
-                    $matches[1]
-                }
-            } |
-            Sort-Object -Unique
+        $runtimeDllNames = @(Get-NativeRuntimeDllNames $temporaryExe $toolchainDirectory $objdump)
     }
 
     if ($runtimeDllNames.Count -eq 0) {
-        $runtimeDllNames = @("libgcc_s_seh-1.dll", "libstdc++-6.dll")
+        $runtimeDllNames = @("libgcc_s_seh-1.dll", "libstdc++-6.dll", "libwinpthread-1.dll")
     }
 
     foreach ($runtimeDllName in $runtimeDllNames) {

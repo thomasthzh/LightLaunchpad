@@ -230,5 +230,5 @@ Completion notes:
 
 - NativeUi M1 reads existing `%AppData%\LightLaunchpad\settings.json` and `layout.json`.
 - NativeUi M1 owns hotkey, tray, search input, double-buffered drawing, icon loading, mouse selection/double-click launch, Enter launch, Esc hide, and wheel scrolling.
-- NativeUi release builds bundle the imported MinGW C/C++ runtime DLLs and the package script now fails hard if publish/build steps fail.
+- NativeUi release builds statically link the larger MinGW C/C++ runtime pieces, bundle transitive `libwinpthread-1.dll`, and the package script now fails hard if publish/build steps fail.
 - WPF remains fallback for settings and full editing until later native milestones.
