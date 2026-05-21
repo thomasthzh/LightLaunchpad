@@ -13,6 +13,7 @@ LightLaunchpad is a lightweight Windows launchpad for shortcuts, executables, an
 - Drag one or more selected icons with a blue insertion indicator.
 - Icon cache stored under `Documents\LightLaunchpad\icons`.
 - User settings and layout stored under `%AppData%\LightLaunchpad`.
+- Optional agent mode with a small always-on host that launches the WPF UI on demand.
 
 ## Download
 
@@ -34,7 +35,7 @@ dotnet run --project tests\LightLaunchpad.Core.Tests\LightLaunchpad.Core.Tests.c
 dotnet run --project tests\LightLaunchpad.App.Tests\LightLaunchpad.App.Tests.csproj
 ```
 
-Create a self-contained single-file executable:
+Create the WPF UI executable:
 
 ```powershell
 dotnet publish src\LightLaunchpad.App\LightLaunchpad.App.csproj `
@@ -46,6 +47,18 @@ dotnet publish src\LightLaunchpad.App\LightLaunchpad.App.csproj `
   -p:IncludeNativeLibrariesForSelfExtract=true `
   -o artifacts\publish-win-x64
 ```
+
+Create the lightweight agent executable:
+
+```powershell
+dotnet publish src\LightLaunchpad.Agent\LightLaunchpad.Agent.csproj `
+  -c Release `
+  -r win-x64 `
+  --self-contained false `
+  -o artifacts\publish-win-x64
+```
+
+Run `LightLaunchpad.Agent.exe` for the split-process route. The agent owns the global hotkey and tray icon, then launches `LightLaunchpad.App.exe` in hosted UI mode when needed.
 
 ## License
 

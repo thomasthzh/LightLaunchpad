@@ -6,6 +6,7 @@ using System.Windows;
 using System.Windows.Threading;
 using LightLaunchpad.App.Services;
 using LightLaunchpad.App.ViewModels;
+using LightLaunchpad.Core.Activation;
 using LightLaunchpad.Core.Import;
 using LightLaunchpad.Core.Layout;
 using LightLaunchpad.Core.Settings;
@@ -27,15 +28,18 @@ public partial class App : System.Windows.Application
     private IconCacheService _iconCache = null!;
     private LaunchpadViewModel _viewModel = null!;
     private LauncherService _launcherService = null!;
-    private HotkeySinkWindow _hotkeySinkWindow = null!;
+    private HotkeySinkWindow? _hotkeySinkWindow;
     private LaunchpadWindow? _launchpadWindow;
-    private HotkeyService _hotkeyService = null!;
-    private TrayService _trayService = null!;
-    private ShortcutWatcher _shortcutWatcher = null!;
+    private HotkeyService? _hotkeyService;
+    private TrayService? _trayService;
+    private ShortcutWatcher? _shortcutWatcher;
+    private HostedActivationService? _hostedActivationService;
+    private LaunchpadActivationContext _activationContext = LaunchpadActivationContext.Standalone;
     private DispatcherTimer? _iconReleaseTimer;
     private CancellationTokenSource? _iconLoadCancellation;
     private bool _iconLoadInProgress;
     private bool _itemsDirty = true;
+    private bool _isHostedUi;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -48,8 +52,17 @@ public partial class App : System.Windows.Application
         }
 
         base.OnStartup(e);
+        _activationContext = LaunchpadActivationContext.Parse(e.Args);
+        _isHostedUi = _activationContext.IsHostedUi;
         LoadSettings();
-        BuildServices();
+        if (_isHostedUi)
+        {
+            BuildHostedServices();
+        }
+        else
+        {
+            BuildStandaloneServices();
+        }
     }
 
     protected override void OnExit(ExitEventArgs e)
@@ -58,6 +71,7 @@ public partial class App : System.Windows.Application
         _iconLoadCancellation?.Dispose();
         _iconReleaseTimer?.Stop();
         _shortcutWatcher?.Dispose();
+        _hostedActivationService?.Dispose();
         _hotkeyService?.Dispose();
         _hotkeySinkWindow?.Close();
         _trayService?.Dispose();
@@ -77,12 +91,17 @@ public partial class App : System.Windows.Application
         _settings = _settings with { ViewMode = _layout.ViewMode.ToString() };
     }
 
-    private void BuildServices()
+    private void BuildSharedServices()
     {
         _repository = new ShortcutRepository(_settings.LaunchpadFolder, ShellShortcutService.ResolveTarget);
         _iconCache = CreateIconCache(_settings);
         _launcherService = new LauncherService();
         _viewModel = new LaunchpadViewModel(_settings, _iconCache);
+    }
+
+    private void BuildStandaloneServices()
+    {
+        BuildSharedServices();
         _hotkeySinkWindow = new HotkeySinkWindow();
         _hotkeyService = new HotkeyService(_hotkeySinkWindow);
         _hotkeyService.Pressed += (_, _) => Dispatcher.Invoke(ToggleLaunchpad);
@@ -91,6 +110,30 @@ public partial class App : System.Windows.Application
         RegisterHotkey();
         StartWatcher();
         StartupRegistrationService.SetEnabled(_settings.StartWithWindows);
+    }
+
+    private void BuildHostedServices()
+    {
+        BuildSharedServices();
+        StartWatcher();
+        EnsureLaunchpadWindow();
+        StartHostedActivation();
+
+        if (_activationContext.ShowImmediately)
+        {
+            Dispatcher.BeginInvoke(ShowLaunchpadFromHost, DispatcherPriority.ApplicationIdle);
+        }
+    }
+
+    private void StartHostedActivation()
+    {
+        _hostedActivationService?.Dispose();
+        _hostedActivationService = new HostedActivationService(
+            _activationContext,
+            Dispatcher,
+            ShowLaunchpadFromHost,
+            Shutdown);
+        _hostedActivationService.Start();
     }
 
     private static IconCacheService CreateIconCache(AppSettings settings)
@@ -108,16 +151,21 @@ public partial class App : System.Windows.Application
 
     private void RegisterHotkey()
     {
+        if (_hotkeyService is null)
+        {
+            return;
+        }
+
         try
         {
             if (!_hotkeyService.Register(_settings.Hotkey))
             {
-                _trayService.ShowMessage(AppName, $"Could not register hotkey {_settings.Hotkey}. You can change it in Settings.");
+                ShowMessage(AppName, $"Could not register hotkey {_settings.Hotkey}. You can change it in Settings.");
             }
         }
         catch (Exception ex)
         {
-            _trayService.ShowMessage(AppName, $"Invalid hotkey {_settings.Hotkey}: {ex.Message}");
+            ShowMessage(AppName, $"Invalid hotkey {_settings.Hotkey}: {ex.Message}");
         }
     }
 
@@ -144,6 +192,11 @@ public partial class App : System.Windows.Application
             return;
         }
 
+        ShowLaunchpadFromHost();
+    }
+
+    private void ShowLaunchpadFromHost()
+    {
         StopIconReleaseTimer();
         EnsureLaunchpadWindow();
         if (_itemsDirty)
@@ -257,7 +310,7 @@ public partial class App : System.Windows.Application
         }
         catch (Exception ex)
         {
-            _trayService.ShowMessage(AppName, $"Could not refresh shortcuts: {ex.Message}");
+            ShowMessage(AppName, $"Could not refresh shortcuts: {ex.Message}");
         }
     }
 
@@ -298,11 +351,17 @@ public partial class App : System.Windows.Application
         _layoutService.Save(_layout);
         _viewModel.UpdateSettings(_settings, _iconCache);
         _launchpadWindow?.ApplySettings(_settings);
-        _trayService.Dispose();
-        _trayService = CreateTrayService();
+        if (!_isHostedUi)
+        {
+            _trayService?.Dispose();
+            _trayService = CreateTrayService();
+        }
         StartWatcher();
-        RegisterHotkey();
-        StartupRegistrationService.SetEnabled(_settings.StartWithWindows);
+        if (!_isHostedUi)
+        {
+            RegisterHotkey();
+            StartupRegistrationService.SetEnabled(_settings.StartWithWindows);
+        }
         RefreshItems();
     }
 
@@ -396,7 +455,7 @@ public partial class App : System.Windows.Application
         }
         catch (Exception ex)
         {
-            _trayService.ShowMessage(AppName, $"Removed from layout but could not delete shortcut: {ex.Message}");
+            ShowMessage(AppName, $"Removed from layout but could not delete shortcut: {ex.Message}");
         }
 
         RefreshItems();
@@ -447,7 +506,7 @@ public partial class App : System.Windows.Application
         }
         catch (Exception ex)
         {
-            _trayService.ShowMessage(AppName, $"Could not import files: {ex.Message}");
+            ShowMessage(AppName, $"Could not import files: {ex.Message}");
         }
     }
 
@@ -468,11 +527,11 @@ public partial class App : System.Windows.Application
             _layout = _layoutService.MergeItems(_layout, _repository.LoadItems());
             ApplyRegionHints(summary.ImportedItems);
             RefreshItems();
-            _trayService.ShowMessage(AppName, $"Imported {summary.ImportedItems.Count} Start Menu item(s).");
+            ShowMessage(AppName, $"Imported {summary.ImportedItems.Count} Start Menu item(s).");
         }
         catch (Exception ex)
         {
-            _trayService.ShowMessage(AppName, $"Could not import Start Menu apps: {ex.Message}");
+            ShowMessage(AppName, $"Could not import Start Menu apps: {ex.Message}");
         }
     }
 
@@ -566,7 +625,18 @@ public partial class App : System.Windows.Application
         _launchpadWindow.MoveItemsRequested += MoveItems;
         _launchpadWindow.MoveRegionRequested += MoveRegion;
         _launchpadWindow.ImportClicked += ImportFromDialog;
-        _launchpadWindow.HiddenCompleted += ScheduleIconRelease;
+        _launchpadWindow.HiddenCompleted += HandleLaunchpadHidden;
+    }
+
+    private void HandleLaunchpadHidden()
+    {
+        if (_activationContext.ExitOnHide)
+        {
+            Dispatcher.BeginInvoke(Shutdown, DispatcherPriority.Background);
+            return;
+        }
+
+        ScheduleIconRelease();
     }
 
     private TrayService CreateTrayService()
@@ -578,6 +648,17 @@ public partial class App : System.Windows.Application
             OpenSettings,
             ExitApplication,
             _settings.Language);
+    }
+
+    private void ShowMessage(string title, string message)
+    {
+        if (_trayService is not null)
+        {
+            _trayService.ShowMessage(title, message);
+            return;
+        }
+
+        System.Windows.MessageBox.Show(message, title, MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private static class StartupRegistrationService

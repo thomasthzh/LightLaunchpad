@@ -56,6 +56,12 @@ internal static class Program
                 nameof(TrayServiceSourceTests.TrayMenu_DoesNotExposeVuiImport),
                 TrayServiceSourceTests.TrayMenu_DoesNotExposeVuiImport),
             (
+                nameof(HostedAppModeSourceTests.AppSource_SupportsHostedUiModeWithoutStandaloneTrayOrHotkey),
+                HostedAppModeSourceTests.AppSource_SupportsHostedUiModeWithoutStandaloneTrayOrHotkey),
+            (
+                nameof(HostedAppModeSourceTests.AgentProject_UsesLightweightNativeShellContracts),
+                HostedAppModeSourceTests.AgentProject_UsesLightweightNativeShellContracts),
+            (
                 nameof(LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),
                 LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),
             (
