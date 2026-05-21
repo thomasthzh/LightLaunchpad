@@ -64,8 +64,8 @@
         <TextBlock x:Name="AppSpacingLabel" Grid.Row="6" Text="App spacing" VerticalAlignment="Center" />
         <TextBox x:Name="AppSpacingTextBox" Grid.Row="6" Grid.Column="1" Margin="0,0,0,10" />
 
-        <TextBlock x:Name="MouseSensitivityLabel" Grid.Row="7" Text="Mouse sensitivity" VerticalAlignment="Center" />
-        <TextBox x:Name="MouseSensitivityTextBox" Grid.Row="7" Grid.Column="1" Margin="0,0,0,10" />
+        <TextBlock x:Name="WheelSensitivityLabel" Grid.Row="7" Text="Wheel sensitivity" VerticalAlignment="Center" />
+        <TextBox x:Name="WheelSensitivityTextBox" Grid.Row="7" Grid.Column="1" Margin="0,0,0,10" />
 
         <CheckBox x:Name="StartWithWindowsCheckBox"
                   Grid.Row="8"

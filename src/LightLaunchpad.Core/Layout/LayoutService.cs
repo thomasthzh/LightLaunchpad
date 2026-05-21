@@ -192,6 +192,45 @@ public sealed class LayoutService
         return layout with { Items = RenumberByRegion(reordered) };
     }
 
+    public LaunchpadLayout MoveRegion(
+        LaunchpadLayout layout,
+        string sourceRegionId,
+        string targetRegionId,
+        bool insertAfterTarget)
+    {
+        if (string.IsNullOrWhiteSpace(sourceRegionId)
+            || string.IsNullOrWhiteSpace(targetRegionId)
+            || string.Equals(sourceRegionId, targetRegionId, StringComparison.OrdinalIgnoreCase))
+        {
+            return EnsureDefaultRegion(layout);
+        }
+
+        var ordered = EnsureDefaultRegion(layout).Regions
+            .OrderBy(region => region.Order)
+            .ToList();
+        var source = ordered.FirstOrDefault(region => string.Equals(region.Id, sourceRegionId, StringComparison.OrdinalIgnoreCase));
+        var target = ordered.FirstOrDefault(region => string.Equals(region.Id, targetRegionId, StringComparison.OrdinalIgnoreCase));
+        if (source is null || target is null)
+        {
+            return EnsureDefaultRegion(layout);
+        }
+
+        ordered.Remove(source);
+        var targetIndex = ordered.FindIndex(region => string.Equals(region.Id, target.Id, StringComparison.OrdinalIgnoreCase));
+        if (targetIndex < 0)
+        {
+            return EnsureDefaultRegion(layout);
+        }
+
+        var insertIndex = insertAfterTarget ? targetIndex + 1 : targetIndex;
+        ordered.Insert(Math.Clamp(insertIndex, 0, ordered.Count), source);
+
+        return layout with
+        {
+            Regions = ordered.Select((region, index) => region with { Order = index }).ToList()
+        };
+    }
+
     public LaunchpadLayout RenameItem(LaunchpadLayout layout, string sourcePath, string displayName)
     {
         if (string.IsNullOrWhiteSpace(displayName))

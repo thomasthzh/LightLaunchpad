@@ -148,4 +148,27 @@ public sealed class LayoutServiceTests
             new[] { "Alpha", "Delta", "Beta", "Gamma" },
             updated.Items.OrderBy(item => item.Order).Select(item => item.DisplayName));
     }
+
+    public static void MoveRegion_ReordersRegionsAroundTarget()
+    {
+        var path = Path.Combine(TestPaths.CreateTempDirectory(), "layout.json");
+        var service = new LayoutService(path);
+        var layout = new LaunchpadLayout(
+            LaunchpadViewMode.InlineRegions,
+            new List<LaunchpadRegion>
+            {
+                new(LayoutService.UncategorizedRegionId, "Uncategorized", 0),
+                new("tools", "Tools", 1),
+                new("games", "Games", 2),
+                new("media", "Media", 3)
+            },
+            []);
+
+        var updated = service.MoveRegion(layout, "media", "tools", insertAfterTarget: false);
+
+        TestAssert.SequenceEqual(
+            new[] { LayoutService.UncategorizedRegionId, "media", "tools", "games" },
+            updated.Regions.OrderBy(region => region.Order).Select(region => region.Id));
+        TestAssert.SequenceEqual(new[] { 0, 1, 2, 3 }, updated.Regions.OrderBy(region => region.Order).Select(region => region.Order));
+    }
 }

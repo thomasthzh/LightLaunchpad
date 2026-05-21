@@ -44,6 +44,9 @@ internal static class Program
                 nameof(LaunchpadWindowXamlTests.LaunchpadWindow_BindsAppSpacingAndHidesSpotlightScrollbarInCode),
                 LaunchpadWindowXamlTests.LaunchpadWindow_BindsAppSpacingAndHidesSpotlightScrollbarInCode),
             (
+                nameof(LaunchpadWindowXamlTests.LaunchpadWindow_SupportsRegionDragAndWheelSensitivity),
+                LaunchpadWindowXamlTests.LaunchpadWindow_SupportsRegionDragAndWheelSensitivity),
+            (
                 nameof(SettingsWindowXamlTests.SettingsWindow_OffersLaunchpadAndSpotlightDisplayModes),
                 SettingsWindowXamlTests.SettingsWindow_OffersLaunchpadAndSpotlightDisplayModes),
             (
@@ -52,6 +55,24 @@ internal static class Program
             (
                 nameof(TrayServiceSourceTests.TrayMenu_DoesNotExposeVuiImport),
                 TrayServiceSourceTests.TrayMenu_DoesNotExposeVuiImport),
+            (
+                nameof(HostedAppModeSourceTests.AppSource_SupportsHostedUiModeWithoutStandaloneTrayOrHotkey),
+                HostedAppModeSourceTests.AppSource_SupportsHostedUiModeWithoutStandaloneTrayOrHotkey),
+            (
+                nameof(HostedAppModeSourceTests.AgentProject_UsesLightweightNativeShellContracts),
+                HostedAppModeSourceTests.AgentProject_UsesLightweightNativeShellContracts),
+            (
+                nameof(HostedAppModeSourceTests.NativeAgentSource_UsesWin32OnlyBackgroundContracts),
+                HostedAppModeSourceTests.NativeAgentSource_UsesWin32OnlyBackgroundContracts),
+            (
+                nameof(HostedAppModeSourceTests.NativeAgentSource_LoadsTrayIconAndCleansHostedUiWithJobObject),
+                HostedAppModeSourceTests.NativeAgentSource_LoadsTrayIconAndCleansHostedUiWithJobObject),
+            (
+                nameof(HostedAppModeSourceTests.PackageReleaseScript_BundlesUiManagedAgentAndNativeAgent),
+                HostedAppModeSourceTests.PackageReleaseScript_BundlesUiManagedAgentAndNativeAgent),
+            (
+                nameof(HostedAppModeSourceTests.StartupRegistration_PrefersNativeAgentForLowMemoryRoute),
+                HostedAppModeSourceTests.StartupRegistration_PrefersNativeAgentForLowMemoryRoute),
             (
                 nameof(LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),
                 LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),
@@ -68,17 +89,20 @@ internal static class Program
                 nameof(LaunchpadWindowPlacementTests.Calculate_DoesNotOverflowTinyWorkArea),
                 LaunchpadWindowPlacementTests.Calculate_DoesNotOverflowTinyWorkArea),
             (
-                nameof(DragServiceSensitivityTests.HasExceededThreshold_UsesMouseSensitivity),
-                DragServiceSensitivityTests.HasExceededThreshold_UsesMouseSensitivity),
+                nameof(WheelScrollCalculatorTests.CalculateOffset_UsesWheelSensitivity),
+                WheelScrollCalculatorTests.CalculateOffset_UsesWheelSensitivity),
             (
-                nameof(DragServiceSensitivityTests.HasExceededThreshold_ClampsMouseSensitivity),
-                DragServiceSensitivityTests.HasExceededThreshold_ClampsMouseSensitivity),
+                nameof(WheelScrollCalculatorTests.CalculateOffset_ClampsToScrollableRange),
+                WheelScrollCalculatorTests.CalculateOffset_ClampsToScrollableRange),
             (
                 nameof(LaunchpadRegionSelectionTests.ToggleRegionSelection_TracksSelectedRegions),
                 LaunchpadRegionSelectionTests.ToggleRegionSelection_TracksSelectedRegions),
             (
                 nameof(LaunchpadRegionSelectionTests.ClearSelection_ClearsItemsAndRegions),
-                LaunchpadRegionSelectionTests.ClearSelection_ClearsItemsAndRegions)
+                LaunchpadRegionSelectionTests.ClearSelection_ClearsItemsAndRegions),
+            (
+                nameof(LaunchpadRegionSelectionTests.LoadItems_HidesEmptyUncategorizedWhenAllAppsAreCategorized),
+                LaunchpadRegionSelectionTests.LoadItems_HidesEmptyUncategorizedWhenAllAppsAreCategorized)
         };
 
         var failed = 0;

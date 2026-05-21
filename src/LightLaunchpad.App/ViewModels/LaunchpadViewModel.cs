@@ -244,11 +244,33 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
                     regionViewModel.Items.Add(item);
                 }
             }
-            if (regionViewModel.Items.Count > 0 || string.IsNullOrWhiteSpace(SearchText))
+            if (ShouldShowRegion(regionViewModel))
             {
                 Regions.Add(regionViewModel);
             }
         }
+    }
+
+    private bool ShouldShowRegion(LaunchpadRegionViewModel region)
+    {
+        if (region.Items.Count > 0)
+        {
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(SearchText))
+        {
+            return false;
+        }
+
+        if (region.Id == LayoutService.UncategorizedRegionId
+            && FilteredItems.Count > 0
+            && FilteredItems.All(item => item.RegionId != LayoutService.UncategorizedRegionId))
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private void RefreshActiveRegion()

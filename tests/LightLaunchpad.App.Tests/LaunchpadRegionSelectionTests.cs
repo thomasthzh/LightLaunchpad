@@ -34,6 +34,34 @@ public sealed class LaunchpadRegionSelectionTests
         TestAssert.Equal(0, viewModel.SelectedRegions.Count);
     }
 
+    public static void LoadItems_HidesEmptyUncategorizedWhenAllAppsAreCategorized()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "LightLaunchpadAppTests", Guid.NewGuid().ToString("N"));
+        var settings = new AppSettings(tempDir, "Alt+D", false, "Medium", "InlineRegions", "High");
+        var viewModel = new LaunchpadViewModel(settings, new IconCacheService(Path.Combine(tempDir, "icons"), 56));
+        var layout = new LaunchpadLayout(
+            LaunchpadViewMode.InlineRegions,
+            [
+                new LaunchpadRegion(LayoutService.UncategorizedRegionId, "Uncategorized", 0),
+                new LaunchpadRegion("tools", "Tools", 1)
+            ],
+            [
+                new LaunchpadLayoutItem(@"C:\Launchpad\Code.lnk", "Code", "tools", 0)
+            ]);
+        var items = new[]
+        {
+            new LightLaunchpad.Core.Shortcuts.LaunchItem(
+                "Code",
+                @"C:\Launchpad\Code.lnk",
+                null,
+                LightLaunchpad.Core.Shortcuts.LaunchItemKind.Shortcut)
+        };
+
+        viewModel.LoadItems(layout, items);
+
+        TestAssert.SequenceEqual(new[] { "tools" }, viewModel.Regions.Select(region => region.Id));
+    }
+
     private static LaunchpadViewModel CreateViewModel()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "LightLaunchpadAppTests", Guid.NewGuid().ToString("N"));

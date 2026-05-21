@@ -45,7 +45,7 @@ public sealed class SettingsService
             AppSettingLimits.NormalizeSpotlightWidth(loaded.SpotlightWidth),
             AppSettingLimits.NormalizeSpotlightHeight(loaded.SpotlightHeight),
             AppSettingLimits.NormalizeAppSpacing(loaded.AppSpacing),
-            AppSettingLimits.NormalizeMouseSensitivity(loaded.MouseSensitivity));
+            AppSettingLimits.NormalizeWheelSensitivity(loaded.WheelSensitivity));
     }
 
     public void Save(AppSettings settings)

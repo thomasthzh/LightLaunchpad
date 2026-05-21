@@ -22,20 +22,8 @@ public sealed class DragService
     private WpfPoint _clickOffset;
     private WpfPoint _screenOrigin;
     private Window? _adornerWindow;
-    private double _mouseSensitivity = 1;
-
-    public DragService(double mouseSensitivity = 1)
-    {
-        MouseSensitivity = mouseSensitivity;
-    }
 
     public bool IsActive { get; private set; }
-
-    public double MouseSensitivity
-    {
-        get => _mouseSensitivity;
-        set => _mouseSensitivity = Math.Min(3, Math.Max(0.5, value <= 0 ? 1 : value));
-    }
 
     public void BeginTrack(WpfPoint pos, WpfPoint clickOffset, WpfPoint screenOrigin)
     {
@@ -49,8 +37,7 @@ public sealed class DragService
     {
         var dx = pos.X - _startPos.X;
         var dy = pos.Y - _startPos.Y;
-        var threshold = Threshold / MouseSensitivity;
-        return dx * dx + dy * dy >= threshold * threshold;
+        return dx * dx + dy * dy >= Threshold * Threshold;
     }
 
     public void TryStart(

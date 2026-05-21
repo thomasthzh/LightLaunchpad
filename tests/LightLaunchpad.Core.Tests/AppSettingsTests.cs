@@ -19,7 +19,7 @@ public sealed class AppSettingsTests
         TestAssert.Equal(980d, settings.SpotlightWidth);
         TestAssert.Equal(720d, settings.SpotlightHeight);
         TestAssert.Equal(8d, settings.AppSpacing);
-        TestAssert.Equal(1d, settings.MouseSensitivity);
+        TestAssert.Equal(1d, settings.WheelSensitivity);
     }
 
     public static void SettingsService_LoadsDefaultsWhenFileDoesNotExist()
@@ -84,7 +84,7 @@ public sealed class AppSettingsTests
         TestAssert.Equal(980d, settings.SpotlightWidth);
         TestAssert.Equal(720d, settings.SpotlightHeight);
         TestAssert.Equal(8d, settings.AppSpacing);
-        TestAssert.Equal(1d, settings.MouseSensitivity);
+        TestAssert.Equal(1d, settings.WheelSensitivity);
     }
 
     public static void SettingsService_NormalizesLanguageAndTuningValues()
@@ -106,7 +106,7 @@ public sealed class AppSettingsTests
               "SpotlightWidth": 200,
               "SpotlightHeight": 1600,
               "AppSpacing": -4,
-              "MouseSensitivity": 9
+              "WheelSensitivity": 9
             }
             """);
         var service = new SettingsService(settingsPath, @"C:\Users\me");
@@ -118,6 +118,6 @@ public sealed class AppSettingsTests
         TestAssert.Equal(520d, settings.SpotlightWidth);
         TestAssert.Equal(1000d, settings.SpotlightHeight);
         TestAssert.Equal(0d, settings.AppSpacing);
-        TestAssert.Equal(3d, settings.MouseSensitivity);
+        TestAssert.Equal(3d, settings.WheelSensitivity);
     }
 }

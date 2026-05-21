@@ -28,7 +28,7 @@ public partial class SettingsWindow : Window
         SpotlightWidthTextBox.Text = FormatNumber(settings.SpotlightWidth);
         SpotlightHeightTextBox.Text = FormatNumber(settings.SpotlightHeight);
         AppSpacingTextBox.Text = FormatNumber(settings.AppSpacing);
-        MouseSensitivityTextBox.Text = FormatNumber(settings.MouseSensitivity);
+        WheelSensitivityTextBox.Text = FormatNumber(settings.WheelSensitivity);
         ApplyLanguage(SelectedLanguage);
     }
 
@@ -48,7 +48,7 @@ public partial class SettingsWindow : Window
             AppSettingLimits.NormalizeSpotlightWidth(ParseDouble(SpotlightWidthTextBox.Text, _settings.SpotlightWidth)),
             AppSettingLimits.NormalizeSpotlightHeight(ParseDouble(SpotlightHeightTextBox.Text, _settings.SpotlightHeight)),
             AppSettingLimits.NormalizeAppSpacing(ParseDouble(AppSpacingTextBox.Text, _settings.AppSpacing)),
-            AppSettingLimits.NormalizeMouseSensitivity(ParseDouble(MouseSensitivityTextBox.Text, _settings.MouseSensitivity)));
+            AppSettingLimits.NormalizeWheelSensitivity(ParseDouble(WheelSensitivityTextBox.Text, _settings.WheelSensitivity)));
         DialogResult = true;
     }
 
@@ -75,7 +75,7 @@ public partial class SettingsWindow : Window
         LanguageLabel.Text = UiText.Pick(language, "Language", "语言");
         SpotlightSizeLabel.Text = UiText.Pick(language, "Spotlight size", "聚焦窗口大小");
         AppSpacingLabel.Text = UiText.Pick(language, "App spacing", "APP 间距");
-        MouseSensitivityLabel.Text = UiText.Pick(language, "Mouse sensitivity", "鼠标灵敏度");
+        WheelSensitivityLabel.Text = UiText.Pick(language, "Wheel sensitivity", "滚轮灵敏度");
         StartWithWindowsCheckBox.Content = UiText.Pick(language, "Start with Windows", "随 Windows 启动");
         CancelButton.Content = UiText.Pick(language, "Cancel", "取消");
         SaveButton.Content = UiText.Pick(language, "Save", "保存");
