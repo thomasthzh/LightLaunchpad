@@ -23,7 +23,8 @@ public sealed class SettingsWindowXamlTests
         TestAssert.Contains("x:Name=\"SpotlightWidthTextBox\"", xaml);
         TestAssert.Contains("x:Name=\"SpotlightHeightTextBox\"", xaml);
         TestAssert.Contains("x:Name=\"AppSpacingTextBox\"", xaml);
-        TestAssert.Contains("x:Name=\"MouseSensitivityTextBox\"", xaml);
+        TestAssert.Contains("x:Name=\"WheelSensitivityTextBox\"", xaml);
+        TestAssert.DoesNotContain("MouseSensitivityTextBox", xaml);
     }
 
     private static string FindSettingsWindowXaml()

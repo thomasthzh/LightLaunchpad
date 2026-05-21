@@ -25,6 +25,10 @@ public partial class LaunchpadWindow : Window
     private LaunchItemViewModel? _dragItem;
     private IReadOnlyList<LaunchItemViewModel> _dragItems = [];
     private bool _dragCompleted;
+    private LaunchpadRegionViewModel? _dragRegion;
+    private bool _regionDragActive;
+    private System.Windows.Point _regionDragStart;
+    private RegionDropTarget? _lastRegionDropTarget;
     private bool _isSpotlightMode;
     private DropTarget? _lastDropTarget;
 
@@ -37,7 +41,7 @@ public partial class LaunchpadWindow : Window
         _viewModel = viewModel;
         _launcherService = launcherService;
         _settings = settings;
-        _drag = new DragService(settings.MouseSensitivity);
+        _drag = new DragService();
         DataContext = viewModel;
         InitializeComponent();
         ApplySettings(settings);
@@ -75,6 +79,8 @@ public partial class LaunchpadWindow : Window
 
     public event Action<IReadOnlyList<string>, string, int>? MoveItemsRequested;
 
+    public event Action<string, string, bool>? MoveRegionRequested;
+
     public void ShowLaunchpad()
     {
         ShowLaunchpad(_settings);
@@ -98,7 +104,6 @@ public partial class LaunchpadWindow : Window
     public void ApplySettings(AppSettings settings)
     {
         _settings = settings;
-        _drag.MouseSensitivity = settings.MouseSensitivity;
     }
 
     private void ShowAnimated()
@@ -174,10 +179,28 @@ public partial class LaunchpadWindow : Window
         }
     }
 
+    private void Window_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        var nextOffset = WheelScrollCalculator.CalculateOffset(
+            ScrollViewer.VerticalOffset,
+            e.Delta,
+            _settings.WheelSensitivity,
+            ScrollViewer.ScrollableHeight);
+        ScrollViewer.ScrollToVerticalOffset(nextOffset);
+        e.Handled = true;
+    }
+
     private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         if (e.Key == Key.Escape)
         {
+            if (_regionDragActive || _dragRegion is not null)
+            {
+                CancelRegionDrag();
+                e.Handled = true;
+                return;
+            }
+
             if (_drag.IsActive)
             {
                 CancelDrag();
@@ -246,6 +269,11 @@ public partial class LaunchpadWindow : Window
         var regionVm = FindDataContext<LaunchpadRegionViewModel>(hit);
         if (regionVm is not null && IsRegionSelectionSurface(hit))
         {
+            _dragRegion = regionVm;
+            _regionDragStart = e.GetPosition(this);
+            _regionDragActive = false;
+            _lastRegionDropTarget = null;
+
             if (Keyboard.Modifiers == ModifierKeys.Control)
             {
                 _viewModel.ToggleSelectRegion(regionVm);
@@ -285,6 +313,25 @@ public partial class LaunchpadWindow : Window
 
         var windowPos = e.GetPosition(this);
         var contentPos = e.GetPosition(ContentGrid);
+
+        if (_dragRegion is not null)
+        {
+            if (!_regionDragActive)
+            {
+                if (!HasExceededRegionDragThreshold(windowPos))
+                {
+                    return;
+                }
+
+                if (_rubberBanding) CancelRubberBand();
+                _regionDragActive = true;
+                Mouse.Capture(ContentGrid, CaptureMode.SubTree);
+            }
+
+            UpdateRegionDragTarget(windowPos, contentPos);
+            e.Handled = true;
+            return;
+        }
 
         // Drag logic
         if (_dragItem is not null)
@@ -338,6 +385,32 @@ public partial class LaunchpadWindow : Window
 
     private void Window_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
+        if (_dragRegion is not null)
+        {
+            var windowPos = e.GetPosition(this);
+            var contentPos = e.GetPosition(ContentGrid);
+            var dropTarget = ResolveRegionDropTarget(windowPos, contentPos) ?? _lastRegionDropTarget;
+            var sourceRegion = _dragRegion;
+
+            if (_regionDragActive
+                && dropTarget is { } acceptedTarget
+                && !string.Equals(sourceRegion.Id, acceptedTarget.RegionId, StringComparison.OrdinalIgnoreCase))
+            {
+                MoveRegionRequested?.Invoke(
+                    sourceRegion.Id,
+                    acceptedTarget.RegionId,
+                    acceptedTarget.InsertAfterTarget);
+            }
+
+            _dragRegion = null;
+            _regionDragActive = false;
+            _lastRegionDropTarget = null;
+            HideDropIndicator();
+            Mouse.Capture(null);
+            e.Handled = true;
+            return;
+        }
+
         // End drag
         if (_drag.IsActive)
         {
@@ -395,7 +468,130 @@ public partial class LaunchpadWindow : Window
         HideDropIndicator();
     }
 
+    private void CancelRegionDrag()
+    {
+        _dragRegion = null;
+        _regionDragActive = false;
+        _lastRegionDropTarget = null;
+        HideDropIndicator();
+        Mouse.Capture(null);
+    }
+
     // --- Drop indicator ---
+
+    private bool HasExceededRegionDragThreshold(System.Windows.Point windowPos)
+    {
+        var dx = windowPos.X - _regionDragStart.X;
+        var dy = windowPos.Y - _regionDragStart.Y;
+        return dx * dx + dy * dy >= 64;
+    }
+
+    private void UpdateRegionDragTarget(System.Windows.Point windowPos, System.Windows.Point contentPos)
+    {
+        var dropTarget = ResolveRegionDropTarget(windowPos, contentPos);
+        if (dropTarget is null)
+        {
+            HideDropIndicator();
+            _lastRegionDropTarget = null;
+            return;
+        }
+
+        _lastRegionDropTarget = dropTarget;
+        var targetRegion = _viewModel.Regions.FirstOrDefault(region => region.Id == dropTarget.Value.RegionId);
+        if (targetRegion is not null)
+        {
+            UpdateRegionDropIndicator(targetRegion, dropTarget.Value.InsertAfterTarget);
+        }
+    }
+
+    private RegionDropTarget? ResolveRegionDropTarget(System.Windows.Point windowPos, System.Windows.Point contentPos)
+    {
+        if (_dragRegion is null || Content is not UIElement content)
+        {
+            return null;
+        }
+
+        var regionId = DragService.FindRegionId(content, windowPos);
+        var targetRegion = !string.IsNullOrWhiteSpace(regionId)
+            ? _viewModel.Regions.FirstOrDefault(region => region.Id == regionId)
+            : ResolveNearestRegion(contentPos);
+        if (targetRegion is null)
+        {
+            return null;
+        }
+
+        var targetVisual = FindVisualForRegion(RootGrid, targetRegion);
+        if (targetVisual is null)
+        {
+            return new RegionDropTarget(targetRegion.Id, false);
+        }
+
+        try
+        {
+            var position = Mouse.GetPosition(targetVisual);
+            var insertAfter = ViewModeIsTabs()
+                ? position.X > targetVisual.ActualWidth / 2
+                : position.Y > targetVisual.ActualHeight / 2;
+            return new RegionDropTarget(targetRegion.Id, insertAfter);
+        }
+        catch
+        {
+            return new RegionDropTarget(targetRegion.Id, false);
+        }
+    }
+
+    private LaunchpadRegionViewModel? ResolveNearestRegion(System.Windows.Point contentPos)
+    {
+        foreach (var region in _viewModel.Regions)
+        {
+            var panel = FindRegionPanel(region.Id);
+            if (panel is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                var pos = panel.TransformToAncestor(ContentGrid).Transform(new System.Windows.Point(0, 0));
+                var top = pos.Y - 16;
+                var bottom = pos.Y + panel.ActualHeight + 16;
+                if (contentPos.Y >= top && contentPos.Y <= bottom)
+                {
+                    return region;
+                }
+            }
+            catch
+            {
+                // Ignore transient layout misses during first arrange.
+            }
+        }
+
+        return null;
+    }
+
+    private void UpdateRegionDropIndicator(LaunchpadRegionViewModel targetRegion, bool insertAfter)
+    {
+        var regionPanel = FindRegionPanel(targetRegion.Id);
+        if (regionPanel is null)
+        {
+            HideDropIndicator();
+            return;
+        }
+
+        try
+        {
+            var pos = regionPanel.TransformToAncestor(ContentGrid).Transform(new System.Windows.Point(0, 0));
+            DropIndicator.Visibility = Visibility.Visible;
+            DropIndicator.Width = Math.Max(regionPanel.ActualWidth, 120);
+            DropIndicator.Height = 3;
+            Canvas.SetLeft(DropIndicator, pos.X);
+            Canvas.SetTop(DropIndicator, insertAfter ? pos.Y + regionPanel.ActualHeight + 4 : pos.Y - 7);
+        }
+        catch
+        {
+            HideDropIndicator();
+        }
+    }
 
     private void UpdateDragTarget(System.Windows.Point windowPos, System.Windows.Point contentPos)
     {
@@ -537,6 +733,7 @@ public partial class LaunchpadWindow : Window
         }
 
         DropIndicator.Visibility = Visibility.Visible;
+        DropIndicator.Width = 3;
         Canvas.SetLeft(DropIndicator, indicatorPos.X);
         Canvas.SetTop(DropIndicator, indicatorPos.Y);
         DropIndicator.Height = Math.Max(indicatorHeight, 20);
@@ -614,6 +811,30 @@ public partial class LaunchpadWindow : Window
             if (found is WpfButton) return found;
             fallback ??= found;
         }
+        return fallback;
+    }
+
+    private static FrameworkElement? FindVisualForRegion(DependencyObject root, LaunchpadRegionViewModel target)
+    {
+        FrameworkElement? fallback = null;
+        var count = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is FrameworkElement fe && ReferenceEquals(fe.DataContext, target))
+            {
+                fallback ??= fe;
+                if (fe is Border || fe is WpfButton)
+                {
+                    return fe;
+                }
+            }
+
+            var found = FindVisualForRegion(child, target);
+            if (found is Border || found is WpfButton) return found;
+            fallback ??= found;
+        }
+
         return fallback;
     }
 
@@ -925,4 +1146,6 @@ public partial class LaunchpadWindow : Window
     }
 
     private readonly record struct DropTarget(string RegionId, int InsertIndex);
+
+    private readonly record struct RegionDropTarget(string RegionId, bool InsertAfterTarget);
 }

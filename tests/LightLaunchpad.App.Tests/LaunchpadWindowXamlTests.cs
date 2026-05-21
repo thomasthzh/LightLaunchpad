@@ -51,6 +51,17 @@ public sealed class LaunchpadWindowXamlTests
         TestAssert.Contains("ScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Auto", code);
     }
 
+    public static void LaunchpadWindow_SupportsRegionDragAndWheelSensitivity()
+    {
+        var xaml = File.ReadAllText(FindLaunchpadWindowXaml());
+        var code = File.ReadAllText(FindLaunchpadWindowCode());
+
+        TestAssert.Contains("Cursor=\"SizeAll\"", xaml);
+        TestAssert.Contains("PreviewMouseWheel=\"Window_PreviewMouseWheel\"", xaml);
+        TestAssert.Contains("MoveRegionRequested", code);
+        TestAssert.Contains("WheelScrollCalculator.CalculateOffset", code);
+    }
+
     private static string FindLaunchpadWindowXaml()
     {
         var current = new DirectoryInfo(Environment.CurrentDirectory);

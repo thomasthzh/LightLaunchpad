@@ -29,6 +29,7 @@ internal static class Program
             (nameof(LayoutServiceTests.MoveItem_ReordersWithinRegionAtRequestedIndex), LayoutServiceTests.MoveItem_ReordersWithinRegionAtRequestedIndex),
             (nameof(LayoutServiceTests.MoveItem_MovesBetweenRegionsAtRequestedIndex), LayoutServiceTests.MoveItem_MovesBetweenRegionsAtRequestedIndex),
             (nameof(LayoutServiceTests.MoveItems_MovesSelectionAsContiguousGroupUsingIndexAmongRemainingItems), LayoutServiceTests.MoveItems_MovesSelectionAsContiguousGroupUsingIndexAmongRemainingItems),
+            (nameof(LayoutServiceTests.MoveRegion_ReordersRegionsAroundTarget), LayoutServiceTests.MoveRegion_ReordersRegionsAroundTarget),
             (nameof(DragTargetSmootherTests.TryAccept_WaitsForStableCandidateBeforeAccepting), DragTargetSmootherTests.TryAccept_WaitsForStableCandidateBeforeAccepting),
             (nameof(DragTargetSmootherTests.TryAccept_IgnoresTinyMovesAfterAcceptedTarget), DragTargetSmootherTests.TryAccept_IgnoresTinyMovesAfterAcceptedTarget),
             (nameof(DragInsertionCalculatorTests.FindInsertionIndex_UsesTileHorizontalMidline), DragInsertionCalculatorTests.FindInsertionIndex_UsesTileHorizontalMidline),

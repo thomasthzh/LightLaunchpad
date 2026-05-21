@@ -13,6 +13,7 @@
         SnapsToDevicePixels="True"
         Icon="Assets/Alice.gif"
         PreviewKeyDown="Window_PreviewKeyDown"
+        PreviewMouseWheel="Window_PreviewMouseWheel"
         Loaded="Window_Loaded">
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
@@ -298,6 +299,7 @@
                                                FontSize="15"
                                                FontWeight="SemiBold"
                                                Foreground="#DDE7F7"
+                                               Cursor="SizeAll"
                                                MouseLeftButtonDown="RegionHeader_MouseLeftButtonDown">
                                         <TextBlock.ContextMenu>
                                             <ContextMenu>

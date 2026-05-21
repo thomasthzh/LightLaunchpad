@@ -5,7 +5,7 @@ public static class AppSettingLimits
     public const double DefaultSpotlightWidth = 980;
     public const double DefaultSpotlightHeight = 720;
     public const double DefaultAppSpacing = 8;
-    public const double DefaultMouseSensitivity = 1;
+    public const double DefaultWheelSensitivity = 1;
     public const double MinSpotlightWidth = 520;
     public const double MinSpotlightHeight = 420;
     public const double MaxSpotlightWidth = 1600;
@@ -31,9 +31,9 @@ public static class AppSettingLimits
         return Math.Min(28, Math.Max(0, value));
     }
 
-    public static double NormalizeMouseSensitivity(double value)
+    public static double NormalizeWheelSensitivity(double value)
     {
-        return ClampOrDefault(value, 0.5, 3, DefaultMouseSensitivity);
+        return ClampOrDefault(value, 0.5, 3, DefaultWheelSensitivity);
     }
 
     private static double ClampOrDefault(double value, double min, double max, double fallback)

@@ -44,6 +44,9 @@ internal static class Program
                 nameof(LaunchpadWindowXamlTests.LaunchpadWindow_BindsAppSpacingAndHidesSpotlightScrollbarInCode),
                 LaunchpadWindowXamlTests.LaunchpadWindow_BindsAppSpacingAndHidesSpotlightScrollbarInCode),
             (
+                nameof(LaunchpadWindowXamlTests.LaunchpadWindow_SupportsRegionDragAndWheelSensitivity),
+                LaunchpadWindowXamlTests.LaunchpadWindow_SupportsRegionDragAndWheelSensitivity),
+            (
                 nameof(SettingsWindowXamlTests.SettingsWindow_OffersLaunchpadAndSpotlightDisplayModes),
                 SettingsWindowXamlTests.SettingsWindow_OffersLaunchpadAndSpotlightDisplayModes),
             (
@@ -68,17 +71,20 @@ internal static class Program
                 nameof(LaunchpadWindowPlacementTests.Calculate_DoesNotOverflowTinyWorkArea),
                 LaunchpadWindowPlacementTests.Calculate_DoesNotOverflowTinyWorkArea),
             (
-                nameof(DragServiceSensitivityTests.HasExceededThreshold_UsesMouseSensitivity),
-                DragServiceSensitivityTests.HasExceededThreshold_UsesMouseSensitivity),
+                nameof(WheelScrollCalculatorTests.CalculateOffset_UsesWheelSensitivity),
+                WheelScrollCalculatorTests.CalculateOffset_UsesWheelSensitivity),
             (
-                nameof(DragServiceSensitivityTests.HasExceededThreshold_ClampsMouseSensitivity),
-                DragServiceSensitivityTests.HasExceededThreshold_ClampsMouseSensitivity),
+                nameof(WheelScrollCalculatorTests.CalculateOffset_ClampsToScrollableRange),
+                WheelScrollCalculatorTests.CalculateOffset_ClampsToScrollableRange),
             (
                 nameof(LaunchpadRegionSelectionTests.ToggleRegionSelection_TracksSelectedRegions),
                 LaunchpadRegionSelectionTests.ToggleRegionSelection_TracksSelectedRegions),
             (
                 nameof(LaunchpadRegionSelectionTests.ClearSelection_ClearsItemsAndRegions),
-                LaunchpadRegionSelectionTests.ClearSelection_ClearsItemsAndRegions)
+                LaunchpadRegionSelectionTests.ClearSelection_ClearsItemsAndRegions),
+            (
+                nameof(LaunchpadRegionSelectionTests.LoadItems_HidesEmptyUncategorizedWhenAllAppsAreCategorized),
+                LaunchpadRegionSelectionTests.LoadItems_HidesEmptyUncategorizedWhenAllAppsAreCategorized)
         };
 
         var failed = 0;

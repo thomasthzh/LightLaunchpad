@@ -12,7 +12,7 @@ public sealed record AppSettings(
     double SpotlightWidth = AppSettingLimits.DefaultSpotlightWidth,
     double SpotlightHeight = AppSettingLimits.DefaultSpotlightHeight,
     double AppSpacing = AppSettingLimits.DefaultAppSpacing,
-    double MouseSensitivity = AppSettingLimits.DefaultMouseSensitivity)
+    double WheelSensitivity = AppSettingLimits.DefaultWheelSensitivity)
 {
     public static AppSettings CreateDefault(string userProfilePath)
     {
@@ -28,6 +28,6 @@ public sealed record AppSettings(
             SpotlightWidth: AppSettingLimits.DefaultSpotlightWidth,
             SpotlightHeight: AppSettingLimits.DefaultSpotlightHeight,
             AppSpacing: AppSettingLimits.DefaultAppSpacing,
-            MouseSensitivity: AppSettingLimits.DefaultMouseSensitivity);
+            WheelSensitivity: AppSettingLimits.DefaultWheelSensitivity);
     }
 }

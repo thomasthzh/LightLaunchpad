@@ -7,6 +7,7 @@ obj/
 .worktrees/
 .superpowers/
 artifacts/
+release/
 TestResults/
 *.user
 *.suo

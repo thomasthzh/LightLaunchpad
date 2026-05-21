@@ -306,6 +306,13 @@ public partial class App : System.Windows.Application
         RefreshItems();
     }
 
+    private void MoveRegion(string sourceRegionId, string targetRegionId, bool insertAfterTarget)
+    {
+        _layout = _layoutService.MoveRegion(_layout, sourceRegionId, targetRegionId, insertAfterTarget);
+        _layoutService.Save(_layout);
+        RefreshItems();
+    }
+
     private void ApplyViewMode(LaunchpadViewMode viewMode)
     {
         _layout = _layoutService.SetViewMode(_layout, viewMode);
@@ -557,6 +564,7 @@ public partial class App : System.Windows.Application
         _launchpadWindow.RemoveItemRequested += RemoveItem;
         _launchpadWindow.MoveItemRequested += MoveItem;
         _launchpadWindow.MoveItemsRequested += MoveItems;
+        _launchpadWindow.MoveRegionRequested += MoveRegion;
         _launchpadWindow.ImportClicked += ImportFromDialog;
         _launchpadWindow.HiddenCompleted += ScheduleIconRelease;
     }
