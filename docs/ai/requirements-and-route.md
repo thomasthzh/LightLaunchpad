@@ -11,16 +11,17 @@
 
 ## Chosen Route
 
-Use the WPF app as the default package and startup target for the current release:
+Use a native-first package while keeping WPF as fallback during the rewrite:
 
-- `LightLaunchpad.App`: single-process WPF UI with hotkey, tray, cached icon state, and fast repeated show/hide.
+- `LightLaunchpad.NativeUi`: C++ Win32 native launcher surface for the low-memory, high-fluidity route.
+- `LightLaunchpad.App`: WPF fallback for settings and full editing while native UI catches up.
 - `LightLaunchpad.Core`: shared contracts for settings, layout, search, and pure logic.
 - `LightLaunchpad.Agent` / `LightLaunchpad.NativeAgent`: retained only as experimental code for historical comparison, not packaged or selected by startup registration.
 
-The next real low-memory route is a native UI runtime:
+The real low-memory route is a native UI runtime:
 
 - C++ Win32 process owns hotkey, tray, window, input, rendering, and launch actions.
-- Direct2D/DirectWrite or a compact DirectUI layer renders the launchpad directly.
+- M1 uses GDI double-buffered drawing to prove the architecture quickly; the renderer can move to Direct2D/DirectWrite after behavior is stable.
 - Core layout/search/settings contracts remain reusable, while WPF becomes an optional compatibility shell or is removed after the native UI is complete.
 
 ## Reference Notes
@@ -44,8 +45,9 @@ flowchart LR
 - App tests cover search clear restoring icon state.
 - App tests cover package defaulting to the single-process app.
 - Startup registration points to the app process, not agent executables.
-- Release packaging creates `LightLaunchpad-win-x64-<version>.zip`.
-- Native UI plan is tracked as the real route for low memory plus fluid repeated opens.
+- Release packaging creates `LightLaunchpad-nativeui-win-x64-<version>.zip`.
+- Native UI M1 reads existing settings/layout, draws natively, supports search, hotkey, tray, and launching.
+- Native UI release builds do not depend on MinGW runtime DLLs being available on the user's `PATH`.
 
 ## Open Questions
 

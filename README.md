@@ -14,12 +14,13 @@ LightLaunchpad is a lightweight Windows launchpad for shortcuts, executables, an
 - Icon cache stored under `Documents\LightLaunchpad\icons`.
 - User settings and layout stored under `%AppData%\LightLaunchpad`.
 - Single-process hotkey and tray mode for responsive repeated opening.
+- Experimental native UI executable for the low-memory, high-fluidity rewrite path.
 
 ## Download
 
-Use the latest GitHub Release and download `LightLaunchpad.exe`.
+Use the latest GitHub Release and download the Windows zip package. Start `LightLaunchpad.NativeUi.exe` for the native launcher, or `LightLaunchpad.App.exe` for the current WPF fallback/settings surface.
 
-The release build is a self-contained single-file Windows executable. It does not require a separate .NET installation.
+The fallback app is a self-contained single-file Windows executable. The native launcher is statically linked against the MinGW C/C++ runtime so it can start from the package without requiring the developer toolchain on `PATH`.
 
 ## Build
 
@@ -54,7 +55,15 @@ Create the local release package:
 .\tools\package-release.ps1
 ```
 
-The package is written under `release\LightLaunchpad-win-x64-<version>` with a matching `.zip`. Start `LightLaunchpad.App.exe` from that folder.
+The package is written under `release\LightLaunchpad-nativeui-win-x64-<version>` with a matching `.zip`. Start `LightLaunchpad.NativeUi.exe` for the native M1 launcher, or `LightLaunchpad.App.exe` for the current WPF fallback/settings surface.
+
+Build only the native UI:
+
+```powershell
+.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-probe
+```
+
+Native UI M1 is a read-only launcher surface: hotkey, tray, search, native drawing, and app launch are implemented; WPF remains the fallback for settings and full region editing while the native rewrite continues.
 
 ## License
 

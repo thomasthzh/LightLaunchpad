@@ -56,17 +56,20 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("lightlaunchpad-native-", script);
     }
 
-    public static void PackageReleaseScript_DefaultsToSingleProcessAppPackage()
+    public static void PackageReleaseScript_ExcludesAgentColdStartPackage()
     {
         var script = File.ReadAllText(FindRepoFile("tools", "package-release.ps1"));
 
-        TestAssert.Contains("LightLaunchpad-$Runtime-$Version", script);
+        TestAssert.Contains("LightLaunchpad-nativeui-$Runtime-$Version", script);
         TestAssert.Contains("src\\LightLaunchpad.App\\LightLaunchpad.App.csproj", script);
         TestAssert.Contains("Compress-Archive", script);
         TestAssert.Contains("Package output must stay under the release directory.", script);
         TestAssert.Contains("-join [Environment]::NewLine", script);
+        TestAssert.Contains("dotnet publish failed", script);
+        TestAssert.Contains("Native UI build failed", script);
         TestAssert.DoesNotContain("LightLaunchpad-native-agent-$Runtime-$Version", script);
         TestAssert.DoesNotContain("build-native-agent.ps1", script);
+        TestAssert.DoesNotContain("LightLaunchpad.Agent.csproj", script);
     }
 
     public static void StartupRegistration_StaysOnSingleProcessAppForResponsiveRoute()
@@ -89,6 +92,56 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("SearchBox.SelectAll", code);
         TestAssert.DoesNotContain("SearchBox.Clear", code);
         TestAssert.DoesNotContain("SearchText = string.Empty", code);
+    }
+
+    public static void NativeUiSource_UsesWin32WindowNotWpfColdStart()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("wWinMain", source);
+        TestAssert.Contains("RegisterHotKey", source);
+        TestAssert.Contains("Shell_NotifyIconW", source);
+        TestAssert.Contains("WM_PAINT", source);
+        TestAssert.Contains("CreateCompatibleDC", source);
+        TestAssert.Contains("ShellExecuteW", source);
+        TestAssert.DoesNotContain("LightLaunchpad.App.exe", source);
+        TestAssert.DoesNotContain("CreateProcessW", source);
+    }
+
+    public static void NativeUiSource_ReadsExistingSettingsLayoutAndSearches()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("settings.json", source);
+        TestAssert.Contains("layout.json", source);
+        TestAssert.Contains("LaunchpadFolder", source);
+        TestAssert.Contains("DisplayName", source);
+        TestAssert.Contains("SourcePath", source);
+        TestAssert.Contains("RegionId", source);
+        TestAssert.Contains("Search", source);
+    }
+
+    public static void NativeUiBuildScript_ProducesNativeUiExecutable()
+    {
+        var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
+
+        TestAssert.Contains("LightLaunchpad.NativeUi.cpp", script);
+        TestAssert.Contains("LightLaunchpad.NativeUi.exe", script);
+        TestAssert.Contains("GetTempPath", script);
+        TestAssert.Contains("-mwindows", script);
+        TestAssert.Contains("-static", script);
+        TestAssert.Contains("-static-libgcc", script);
+        TestAssert.Contains("-static-libstdc++", script);
+    }
+
+    public static void PackageReleaseScript_IncludesNativeUiPrimaryExecutable()
+    {
+        var script = File.ReadAllText(FindRepoFile("tools", "package-release.ps1"));
+
+        TestAssert.Contains("LightLaunchpad-nativeui-$Runtime-$Version", script);
+        TestAssert.Contains("build-native-ui.ps1", script);
+        TestAssert.Contains("LightLaunchpad.NativeUi.exe", script);
+        TestAssert.Contains("LightLaunchpad.App.exe", script);
     }
 
     private static string FindRepoFile(params string[] parts)

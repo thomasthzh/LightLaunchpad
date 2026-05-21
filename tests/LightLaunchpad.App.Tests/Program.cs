@@ -74,14 +74,26 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeAgentSource_LoadsTrayIconAndCleansHostedUiWithJobObject),
                 HostedAppModeSourceTests.NativeAgentSource_LoadsTrayIconAndCleansHostedUiWithJobObject),
             (
-                nameof(HostedAppModeSourceTests.PackageReleaseScript_DefaultsToSingleProcessAppPackage),
-                HostedAppModeSourceTests.PackageReleaseScript_DefaultsToSingleProcessAppPackage),
+                nameof(HostedAppModeSourceTests.PackageReleaseScript_ExcludesAgentColdStartPackage),
+                HostedAppModeSourceTests.PackageReleaseScript_ExcludesAgentColdStartPackage),
             (
                 nameof(HostedAppModeSourceTests.StartupRegistration_StaysOnSingleProcessAppForResponsiveRoute),
                 HostedAppModeSourceTests.StartupRegistration_StaysOnSingleProcessAppForResponsiveRoute),
             (
                 nameof(HostedAppModeSourceTests.LaunchpadWindow_DoesNotClearSearchTextWhenShown),
                 HostedAppModeSourceTests.LaunchpadWindow_DoesNotClearSearchTextWhenShown),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_UsesWin32WindowNotWpfColdStart),
+                HostedAppModeSourceTests.NativeUiSource_UsesWin32WindowNotWpfColdStart),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_ReadsExistingSettingsLayoutAndSearches),
+                HostedAppModeSourceTests.NativeUiSource_ReadsExistingSettingsLayoutAndSearches),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
+                HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
+            (
+                nameof(HostedAppModeSourceTests.PackageReleaseScript_IncludesNativeUiPrimaryExecutable),
+                HostedAppModeSourceTests.PackageReleaseScript_IncludesNativeUiPrimaryExecutable),
             (
                 nameof(LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),
                 LaunchpadWindowPlacementTests.Calculate_UsesFullVirtualScreenForLaunchpadMode),

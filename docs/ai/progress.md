@@ -4,7 +4,7 @@
 
 - Branch: `main`
 - Workspace: `C:\Users\thoma\Desktop\启动台`
-- Active task: A9 - Revert Agent Default and Fix Search State
+- Active task: N1 - Native UI M1
 
 ## Completed
 
@@ -18,6 +18,7 @@
 - A7 - Native Agent Hardening.
 - A8 - Formal Native Release Package.
 - A9 - Revert Agent Default and Fix Search State.
+- N1 - Native UI M1 source/build/package skeleton.
 
 ## Commands Run
 
@@ -37,6 +38,10 @@
 - Default release packaging now returns to the single-process WPF app for responsive repeated opening.
 - Startup registration now stays on the app process instead of preferring agent executables.
 - Search clear now preserves cached icon state after a no-result query.
+- Added `LightLaunchpad.NativeUi`, a C++ Win32 native launcher surface that owns hotkey, tray, search, drawing, and app launch without cold-starting WPF.
+- Added `tools/build-native-ui.ps1` and switched release packaging to native-first output with WPF fallback included.
+- Fixed NativeUi package startup by statically linking the MinGW C/C++ runtime; clean-`PATH` launch from the package now stays running at approximately 9.85 MB Working Set / 1.64 MB Private Memory.
+- Hardened `tools/package-release.ps1` so failed `dotnet publish` or native build steps abort instead of producing a partial package.
 
 ## Changed Files
 
@@ -59,10 +64,12 @@
 - `tools/package-release.ps1`
 - `src/LightLaunchpad.App/ViewModels/LaunchpadViewModel.cs`
 - `tests/LightLaunchpad.App.Tests/LaunchpadViewModelIconStabilityTests.cs`
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
+- `tools/build-native-ui.ps1`
 
 ## Next Step
 
-Verify, package the single-process release, push directly to `main`, then begin the LightFrame-style native UI plan.
+Continue with native region editing and Direct2D/DirectWrite renderer migration.
 
 ## Risks
 
