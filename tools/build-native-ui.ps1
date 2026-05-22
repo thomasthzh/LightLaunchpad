@@ -48,6 +48,7 @@ try {
         -lcomdlg32 `
         -luser32 `
         -lgdi32 `
+        -lmsimg32 `
         -ld2d1 `
         -ldwrite `
         -lole32 `

@@ -4,7 +4,7 @@
 
 - Branch: `main`
 - Workspace: `C:\Users\thoma\Desktop\启动台`
-- Active task: N7 - Native UI Tile Frame And Drag Target Stability
+- Active task: N8 - Native UI Rubber Band Selection And Icon Fit
 
 ## Completed
 
@@ -49,6 +49,14 @@
 - Added NativeUi N5 UX polish: true rounded Spotlight window region, content clipping below the search bar, exact-sized shortcut/target icon extraction before shell fallback, grid arrow-key selection, stronger app-spacing/wheel-sensitivity mapping, and themed Segoe UI settings controls.
 - Added NativeUi N6 settings/search cleanup: removed the visible empty-search placeholder, added APP size selection to native settings, added an Apply button, and enlarged the settings window so the action buttons remain visible.
 - Added NativeUi N7 visual/drag polish: app tiles now only draw frames when selected, and inter-tile drag gaps use row-aware insertion logic instead of falling through to the region tail.
+- Added NativeUi N8 selection/icon polish: empty-space drag now supports rubber-band multi-selection, and transparent-padded HICONs are cropped to cached alpha bounds before fitted `AlphaBlend` drawing so small-looking icons fill the configured APP size better without rescanning every frame.
+- `git diff --check` - passed with line-ending warnings only.
+- `.\.dotnet\dotnet.exe run --project tests\LightLaunchpad.Core.Tests\LightLaunchpad.Core.Tests.csproj` - 32/32 passed.
+- `.\.dotnet\dotnet.exe run --project tests\LightLaunchpad.App.Tests\LightLaunchpad.App.Tests.csproj` - 57/57 passed.
+- `.\.dotnet\dotnet.exe build LightLaunchpad.sln` - passed with 0 warnings and 0 errors.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-n8-probe` - passed.
+- `.\tools\package-release.ps1` - produced the committed NativeUi package under `release\LightLaunchpad-nativeui-win-x64-<commit>.zip`.
+- N8 packaged probe measured approximately 11.35 MB Working Set / 1.93 MB Private Memory while idle from a clean `PATH`.
 
 ## Changed Files
 
@@ -78,7 +86,7 @@
 
 ## Next Step
 
-Verify N7 package memory and continue with any hands-on polish found in the native UI.
+Push `main`, then continue with any hands-on polish found in the native UI.
 
 ## Risks
 

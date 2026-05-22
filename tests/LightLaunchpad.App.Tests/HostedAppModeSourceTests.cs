@@ -356,6 +356,37 @@ public sealed class HostedAppModeSourceTests
         TestAssert.DoesNotContain("return { regionHit.regionId, CountItemsInRegion(regionHit.regionId, g_dragSourcePaths), true };", source);
     }
 
+    public static void NativeUiSource_SupportsRubberBandSelection()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("g_selectionBoxActive", source);
+        TestAssert.Contains("BeginSelectionBox", source);
+        TestAssert.Contains("UpdateSelectionBox", source);
+        TestAssert.Contains("CompleteSelectionBox", source);
+        TestAssert.Contains("CancelSelectionBox", source);
+        TestAssert.Contains("DrawSelectionBox", source);
+        TestAssert.Contains("RectsIntersect", source);
+        TestAssert.Contains("g_selectionBoxAdditive = (wParam & MK_CONTROL) != 0", source);
+        TestAssert.Contains("SetCapture(hwnd)", source);
+        TestAssert.Contains("ReleaseCapture()", source);
+    }
+
+    public static void NativeUiSource_FitsTransparentPaddedIcons()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
+
+        TestAssert.Contains("GetIconOpaqueBounds", source);
+        TestAssert.Contains("DrawFittedIcon", source);
+        TestAssert.Contains("GetDIBits", source);
+        TestAssert.Contains("AlphaBlend", source);
+        TestAssert.Contains("AC_SRC_ALPHA", source);
+        TestAssert.Contains("DrawFittedIcon(dc, icon.x", source);
+        TestAssert.Contains("DrawFittedIcon(dc, iconX", source);
+        TestAssert.Contains("-lmsimg32", script);
+    }
+
     public static void NativeUiBuildScript_ProducesNativeUiExecutable()
     {
         var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));

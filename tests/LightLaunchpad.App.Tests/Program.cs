@@ -137,6 +137,12 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_UsesStableInterTileDropTargets),
                 HostedAppModeSourceTests.NativeUiSource_UsesStableInterTileDropTargets),
             (
+                nameof(HostedAppModeSourceTests.NativeUiSource_SupportsRubberBandSelection),
+                HostedAppModeSourceTests.NativeUiSource_SupportsRubberBandSelection),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_FitsTransparentPaddedIcons),
+                HostedAppModeSourceTests.NativeUiSource_FitsTransparentPaddedIcons),
+            (
                 nameof(HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
                 HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
             (

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cwctype>
 #include <cwchar>
 #include <cstdio>
@@ -121,6 +122,15 @@ struct HitTile
     int itemIndex = -1;
 };
 
+struct IconOpaqueBoundsCacheEntry
+{
+    HICON icon = nullptr;
+    bool hasBounds = false;
+    RECT bounds = {};
+    int width = 0;
+    int height = 0;
+};
+
 struct RegionHit
 {
     RECT bounds;
@@ -157,6 +167,7 @@ std::vector<Region> g_regions;
 std::vector<LaunchItem> g_items;
 std::vector<int> g_filtered;
 std::vector<HitTile> g_hits;
+std::vector<IconOpaqueBoundsCacheEntry> g_iconBoundsCache;
 std::vector<RegionHit> g_regionHits;
 std::vector<std::wstring> g_selectedSourcePaths;
 std::vector<std::wstring> g_selectedRegionIds;
@@ -176,6 +187,10 @@ POINT g_dragStart = {};
 POINT g_dragCurrent = {};
 DropTarget g_dropTarget;
 RegionDropTarget g_regionDropTarget;
+bool g_selectionBoxActive = false;
+bool g_selectionBoxAdditive = false;
+POINT g_selectionBoxStart = {};
+POINT g_selectionBoxCurrent = {};
 std::vector<std::wstring> g_contextItemPaths;
 std::wstring g_contextRegionId;
 std::vector<std::wstring> g_contextRegionIds;
@@ -1296,8 +1311,100 @@ void ClearAllSelection()
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
+RECT NormalizeRect(POINT start, POINT current)
+{
+    RECT rect = {
+        std::min(start.x, current.x),
+        std::min(start.y, current.y),
+        std::max(start.x, current.x),
+        std::max(start.y, current.y)
+    };
+    return rect;
+}
+
+bool RectsIntersect(const RECT& left, const RECT& right)
+{
+    RECT intersection = {};
+    return IntersectRect(&intersection, &left, &right) != FALSE
+        && intersection.right > intersection.left
+        && intersection.bottom > intersection.top;
+}
+
+void BeginSelectionBox(HWND hwnd, POINT point, bool additive)
+{
+    g_selectionBoxActive = true;
+    g_selectionBoxAdditive = additive;
+    g_selectionBoxStart = point;
+    g_selectionBoxCurrent = point;
+    g_mouseDown = false;
+    g_dragActive = false;
+    g_dragMode = DragMode::None;
+    g_dragFilteredIndex = -1;
+    g_pendingRegionDragId.clear();
+    if (!additive)
+    {
+        ClearAllSelection();
+        g_selectedFilteredIndex = -1;
+    }
+    SetCapture(hwnd);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+void UpdateSelectionBox(POINT point)
+{
+    if (!g_selectionBoxActive) return;
+    g_selectionBoxCurrent = point;
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+void CompleteSelectionBox(HWND hwnd)
+{
+    if (!g_selectionBoxActive) return;
+
+    const RECT selectionRect = NormalizeRect(g_selectionBoxStart, g_selectionBoxCurrent);
+    int firstSelected = -1;
+    for (const auto& hit : g_hits)
+    {
+        if (!RectsIntersect(selectionRect, hit.bounds)) continue;
+        if (hit.itemIndex < 0 || hit.itemIndex >= static_cast<int>(g_filtered.size())) continue;
+        const auto& item = g_items[g_filtered[hit.itemIndex]];
+        if (!ContainsPath(g_selectedSourcePaths, item.sourcePath))
+        {
+            g_selectedSourcePaths.push_back(item.sourcePath);
+        }
+        if (firstSelected < 0)
+        {
+            firstSelected = hit.itemIndex;
+        }
+    }
+
+    if (firstSelected >= 0)
+    {
+        g_selectedFilteredIndex = firstSelected;
+    }
+
+    g_selectionBoxActive = false;
+    if (GetCapture() == hwnd)
+    {
+        ReleaseCapture();
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+void CancelSelectionBox(HWND hwnd)
+{
+    if (!g_selectionBoxActive) return;
+    g_selectionBoxActive = false;
+    if (GetCapture() == hwnd)
+    {
+        ReleaseCapture();
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 void ReloadData()
 {
+    g_iconBoundsCache.clear();
     for (auto& item : g_items)
     {
         if (item.icon) DestroyIcon(item.icon);
@@ -2000,6 +2107,164 @@ struct PendingIconDraw
     int size = 0;
 };
 
+bool GetIconOpaqueBounds(HICON icon, RECT& bounds, int& width, int& height)
+{
+    ICONINFO iconInfo = {};
+    if (!icon || !GetIconInfo(icon, &iconInfo)) return false;
+
+    bool foundBounds = false;
+    BITMAP bitmap = {};
+    HBITMAP colorBitmap = iconInfo.hbmColor;
+    if (colorBitmap && GetObject(colorBitmap, sizeof(bitmap), &bitmap) == sizeof(bitmap))
+    {
+        width = bitmap.bmWidth;
+        height = bitmap.bmHeight;
+        if (width > 0 && height > 0)
+        {
+            BITMAPINFO info = {};
+            info.bmiHeader.biSize = sizeof(info.bmiHeader);
+            info.bmiHeader.biWidth = width;
+            info.bmiHeader.biHeight = -height;
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            info.bmiHeader.biCompression = BI_RGB;
+
+            std::vector<DWORD> pixels(static_cast<size_t>(width) * static_cast<size_t>(height));
+            HDC scanDc = CreateCompatibleDC(nullptr);
+            if (scanDc && GetDIBits(scanDc, colorBitmap, 0, height, pixels.data(), &info, DIB_RGB_COLORS) == height)
+            {
+                int minX = width;
+                int minY = height;
+                int maxX = -1;
+                int maxY = -1;
+                for (int y = 0; y < height; ++y)
+                {
+                    for (int x = 0; x < width; ++x)
+                    {
+                        const DWORD pixel = pixels[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)];
+                        const BYTE alpha = static_cast<BYTE>((pixel >> 24) & 0xFF);
+                        if (alpha <= 12) continue;
+                        minX = std::min(minX, x);
+                        minY = std::min(minY, y);
+                        maxX = std::max(maxX, x);
+                        maxY = std::max(maxY, y);
+                    }
+                }
+
+                if (maxX >= minX && maxY >= minY)
+                {
+                    bounds.left = std::max(0, minX - 2);
+                    bounds.top = std::max(0, minY - 2);
+                    bounds.right = std::min(width, maxX + 3);
+                    bounds.bottom = std::min(height, maxY + 3);
+                    foundBounds = true;
+                }
+            }
+            if (scanDc) DeleteDC(scanDc);
+        }
+    }
+
+    if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
+    if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
+    return foundBounds;
+}
+
+bool GetCachedIconOpaqueBounds(HICON icon, RECT& bounds, int& width, int& height)
+{
+    auto found = std::find_if(g_iconBoundsCache.begin(), g_iconBoundsCache.end(), [&](const IconOpaqueBoundsCacheEntry& entry) {
+        return entry.icon == icon;
+    });
+    if (found != g_iconBoundsCache.end())
+    {
+        bounds = found->bounds;
+        width = found->width;
+        height = found->height;
+        return found->hasBounds;
+    }
+
+    const bool hasBounds = GetIconOpaqueBounds(icon, bounds, width, height);
+    g_iconBoundsCache.push_back({ icon, hasBounds, bounds, width, height });
+    return hasBounds;
+}
+
+void DrawFittedIcon(HDC dc, int x, int y, HICON icon, int size)
+{
+    RECT opaqueBounds = {};
+    int sourceWidth = 0;
+    int sourceHeight = 0;
+    if (!GetCachedIconOpaqueBounds(icon, opaqueBounds, sourceWidth, sourceHeight))
+    {
+        DrawIconEx(dc, x, y, icon, size, size, 0, nullptr, DI_NORMAL);
+        return;
+    }
+
+    const int cropWidth = opaqueBounds.right - opaqueBounds.left;
+    const int cropHeight = opaqueBounds.bottom - opaqueBounds.top;
+    if (cropWidth <= 0 || cropHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0)
+    {
+        DrawIconEx(dc, x, y, icon, size, size, 0, nullptr, DI_NORMAL);
+        return;
+    }
+
+    const bool hasMeaningfulPadding = cropWidth < static_cast<int>(sourceWidth * 0.86)
+        || cropHeight < static_cast<int>(sourceHeight * 0.86);
+    if (!hasMeaningfulPadding)
+    {
+        DrawIconEx(dc, x, y, icon, size, size, 0, nullptr, DI_NORMAL);
+        return;
+    }
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = sourceWidth;
+    info.bmiHeader.biHeight = -sourceHeight;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HDC sourceDc = CreateCompatibleDC(dc);
+    bool drawn = false;
+    if (bitmap && sourceDc && bits)
+    {
+        std::memset(bits, 0, static_cast<size_t>(sourceWidth) * static_cast<size_t>(sourceHeight) * sizeof(DWORD));
+        HGDIOBJ oldBitmap = SelectObject(sourceDc, bitmap);
+        DrawIconEx(sourceDc, 0, 0, icon, sourceWidth, sourceHeight, 0, nullptr, DI_NORMAL);
+
+        const double scale = std::min(size / static_cast<double>(cropWidth), size / static_cast<double>(cropHeight));
+        const int targetWidth = std::max(1, static_cast<int>(std::round(cropWidth * scale)));
+        const int targetHeight = std::max(1, static_cast<int>(std::round(cropHeight * scale)));
+        const int targetX = x + (size - targetWidth) / 2;
+        const int targetY = y + (size - targetHeight) / 2;
+        const int previousMode = SetStretchBltMode(dc, HALFTONE);
+        SetBrushOrgEx(dc, 0, 0, nullptr);
+        BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        drawn = AlphaBlend(
+            dc,
+            targetX,
+            targetY,
+            targetWidth,
+            targetHeight,
+            sourceDc,
+            opaqueBounds.left,
+            opaqueBounds.top,
+            cropWidth,
+            cropHeight,
+            blend) != FALSE;
+        SetStretchBltMode(dc, previousMode);
+        SelectObject(sourceDc, oldBitmap);
+    }
+
+    if (bitmap) DeleteObject(bitmap);
+    if (sourceDc) DeleteDC(sourceDc);
+
+    if (!drawn)
+    {
+        DrawIconEx(dc, x, y, icon, size, size, 0, nullptr, DI_NORMAL);
+    }
+}
+
 void DrawDragFeedback(HDC dc)
 {
     if (!g_dragActive) return;
@@ -2070,6 +2335,47 @@ void DrawDragFeedback(HDC dc)
             : g_items[g_filtered[g_dragFilteredIndex]].displayName;
         DrawTextClipped(dc, label, text, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(242, 248, 255));
     }
+}
+
+void DrawSelectionBox(HDC dc)
+{
+    if (!g_selectionBoxActive) return;
+
+    RECT rect = NormalizeRect(g_selectionBoxStart, g_selectionBoxCurrent);
+    const int width = rect.right - rect.left;
+    const int height = rect.bottom - rect.top;
+    if (width < 2 || height < 2) return;
+
+    HDC overlayDc = CreateCompatibleDC(dc);
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (overlayDc && bitmap && bits)
+    {
+        HGDIOBJ oldBitmap = SelectObject(overlayDc, bitmap);
+        std::fill_n(static_cast<DWORD*>(bits), width * height, 0x30489BFF);
+        BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        AlphaBlend(dc, rect.left, rect.top, width, height, overlayDc, 0, 0, width, height, blend);
+        SelectObject(overlayDc, oldBitmap);
+    }
+
+    if (bitmap) DeleteObject(bitmap);
+    if (overlayDc) DeleteDC(overlayDc);
+
+    HPEN pen = CreatePen(PS_SOLID, 2, RGB(98, 186, 255));
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+    Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(pen);
 }
 
 bool PaintContentDirect2D(HDC dc, const RECT& client)
@@ -2192,9 +2498,10 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
     SelectClipRgn(dc, clip);
     for (const auto& icon : pendingIcons)
     {
-        DrawIconEx(dc, icon.x, icon.y, icon.icon, icon.size, icon.size, 0, nullptr, DI_NORMAL);
+        DrawFittedIcon(dc, icon.x, icon.y, icon.icon, icon.size);
     }
     DrawDragFeedback(dc);
+    DrawSelectionBox(dc);
     SelectClipRgn(dc, nullptr);
     DeleteObject(clip);
     RestoreDC(dc, savedDc);
@@ -2276,7 +2583,7 @@ void PaintContent(HDC dc, const RECT& client)
                     const int icon = g_settings.iconSize;
                     const int iconX = tileRect.left + (tileSize - icon) / 2;
                     const int iconY = tileRect.top + 14;
-                    DrawIconEx(dc, iconX, iconY, item.icon, icon, icon, 0, nullptr, DI_NORMAL);
+                    DrawFittedIcon(dc, iconX, iconY, item.icon, icon);
                 }
 
                 SelectObject(dc, tileFont);
@@ -2300,6 +2607,7 @@ void PaintContent(HDC dc, const RECT& client)
     }
 
     DrawDragFeedback(dc);
+    DrawSelectionBox(dc);
     SelectClipRgn(dc, nullptr);
     DeleteObject(contentClip);
     RestoreDC(dc, savedDc);
@@ -3213,6 +3521,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 return 0;
             }
         }
+        if (point.y >= ContentClipTop())
+        {
+            g_selectionBoxAdditive = (wParam & MK_CONTROL) != 0;
+            BeginSelectionBox(hwnd, point, g_selectionBoxAdditive);
+            return 0;
+        }
         ClearAllSelection();
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -3220,6 +3534,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_MOUSEMOVE:
     {
         POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (g_selectionBoxActive)
+        {
+            UpdateSelectionBox(point);
+            return 0;
+        }
         if (g_mouseDown && !g_dragActive && HasExceededDragThreshold(point))
         {
             if (g_dragFilteredIndex >= 0)
@@ -3239,6 +3558,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     case WM_LBUTTONUP:
+        if (g_selectionBoxActive)
+        {
+            CompleteSelectionBox(hwnd);
+            return 0;
+        }
         if (g_dragActive)
         {
             if (g_dragMode == DragMode::Region)
@@ -3293,7 +3617,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE)
         {
-            if (g_dragActive) CancelDrag(hwnd);
+            if (g_selectionBoxActive) CancelSelectionBox(hwnd);
+            else if (g_dragActive) CancelDrag(hwnd);
             else HideNativeUi();
             return 0;
         }
@@ -3347,6 +3672,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     case WM_CAPTURECHANGED:
+        if (reinterpret_cast<HWND>(lParam) != hwnd && g_selectionBoxActive)
+        {
+            CancelSelectionBox(hwnd);
+        }
         if (reinterpret_cast<HWND>(lParam) != hwnd && g_dragActive)
         {
             ResetDragState();
@@ -3366,6 +3695,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (item.icon) DestroyIcon(item.icon);
             item.icon = nullptr;
         }
+        g_iconBoundsCache.clear();
         PostQuitMessage(0);
         return 0;
     default:

@@ -404,3 +404,31 @@ Completion notes:
 - NativeUi no longer draws a background or border around unselected app tiles.
 - Selected tiles still draw a visible selected surface and border.
 - NativeUi drag insertion now computes a row-aware insertion order for pointer gaps inside a region instead of jumping to the region tail.
+
+## N8 - Native UI Rubber Band Selection And Icon Fit
+
+Status: done
+
+Dependency: N7
+
+Purpose: Fix hands-on NativeUi regressions where empty-space drag could not select many icons and transparent-padded app icons appeared too small.
+
+Likely files:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
+- `tools/build-native-ui.ps1`
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs`
+- `tests/LightLaunchpad.App.Tests/Program.cs`
+- `docs/ai/progress.md`
+
+Verification:
+
+- App source tests cover native rubber-band selection and transparent-padded icon fitting.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-n8-probe`
+- `.\tools\package-release.ps1`
+
+Completion notes:
+
+- NativeUi now supports rubber-band selection from empty content space, including Ctrl additive selection and Escape/capture cleanup.
+- NativeUi draws a translucent selection rectangle clipped under the search surface.
+- NativeUi now caches HICON alpha bounds and draws transparent-padded icons through a fitted `AlphaBlend` path so icons like `卡片魔王` fill the configured APP size more naturally.
