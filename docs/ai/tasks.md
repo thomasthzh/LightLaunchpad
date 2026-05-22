@@ -377,3 +377,30 @@ Completion notes:
 - Native settings now exposes APP size with small, medium, and large options.
 - Native settings now has Save, Apply, and Cancel buttons; Apply persists settings without closing.
 - Native settings window height was increased so the bottom action buttons remain visible.
+
+## N7 - Native UI Tile Frame And Drag Target Stability
+
+Status: done
+
+Dependency: N6
+
+Purpose: Fix app tile visual noise and unstable drag insertion feedback.
+
+Likely files:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs`
+- `tests/LightLaunchpad.App.Tests/Program.cs`
+- `docs/ai/progress.md`
+
+Verification:
+
+- App source tests cover selected-only tile frames and stable inter-tile drop target calculation.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-n7-probe`
+- `.\tools\package-release.ps1`
+
+Completion notes:
+
+- NativeUi no longer draws a background or border around unselected app tiles.
+- Selected tiles still draw a visible selected surface and border.
+- NativeUi drag insertion now computes a row-aware insertion order for pointer gaps inside a region instead of jumping to the region tail.

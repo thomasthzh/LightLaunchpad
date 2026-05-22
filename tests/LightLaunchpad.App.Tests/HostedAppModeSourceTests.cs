@@ -333,6 +333,29 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("IconSizeName", source);
     }
 
+    public static void NativeUiSource_DrawsAppTileFrameOnlyWhenSelected()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("DrawAppTileSurface", source);
+        TestAssert.Contains("if (!selected) return;", source);
+        TestAssert.Contains("DrawAppTileSurface(target, tileRect, selected)", source);
+        TestAssert.Contains("DrawAppTileSurface(dc, tileRect, selected)", source);
+        TestAssert.DoesNotContain("DrawRoundedRectDirect(target, tileRect, selected ?", source);
+        TestAssert.DoesNotContain("DrawRoundedRect(dc, tileRect, selected ?", source);
+    }
+
+    public static void NativeUiSource_UsesStableInterTileDropTargets()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("FindDropTargetWithinRegion", source);
+        TestAssert.Contains("InsertionOrderFromRegionHits", source);
+        TestAssert.Contains("if (PtInRect(&regionHit.bounds, point))", source);
+        TestAssert.Contains("return FindDropTargetWithinRegion(regionHit.regionId, point)", source);
+        TestAssert.DoesNotContain("return { regionHit.regionId, CountItemsInRegion(regionHit.regionId, g_dragSourcePaths), true };", source);
+    }
+
     public static void NativeUiBuildScript_ProducesNativeUiExecutable()
     {
         var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));

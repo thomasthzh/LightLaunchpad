@@ -131,6 +131,12 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_ExposesAppSizeSetting),
                 HostedAppModeSourceTests.NativeUiSource_ExposesAppSizeSetting),
             (
+                nameof(HostedAppModeSourceTests.NativeUiSource_DrawsAppTileFrameOnlyWhenSelected),
+                HostedAppModeSourceTests.NativeUiSource_DrawsAppTileFrameOnlyWhenSelected),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_UsesStableInterTileDropTargets),
+                HostedAppModeSourceTests.NativeUiSource_UsesStableInterTileDropTargets),
+            (
                 nameof(HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
                 HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
             (

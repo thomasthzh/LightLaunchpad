@@ -1610,6 +1610,88 @@ bool HasExceededDragThreshold(POINT point)
         || std::abs(point.y - g_dragStart.y) >= GetSystemMetrics(SM_CYDRAG);
 }
 
+struct RegionDropCandidate
+{
+    RECT bounds;
+    const LaunchItem* item = nullptr;
+};
+
+DropTarget InsertionOrderFromRegionHits(const std::wstring& regionId, POINT point)
+{
+    std::vector<RegionDropCandidate> candidates;
+    for (const auto& hit : g_hits)
+    {
+        if (hit.itemIndex < 0 || hit.itemIndex >= static_cast<int>(g_filtered.size())) continue;
+        const auto& item = g_items[g_filtered[hit.itemIndex]];
+        if (CompareStringOrdinal(item.regionId.c_str(), -1, regionId.c_str(), -1, TRUE) != CSTR_EQUAL) continue;
+        if (ContainsPath(g_dragSourcePaths, item.sourcePath)) continue;
+        candidates.push_back({ hit.bounds, &item });
+    }
+
+    if (candidates.empty())
+    {
+        return { regionId, CountItemsInRegion(regionId, g_dragSourcePaths), true };
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const RegionDropCandidate& left, const RegionDropCandidate& right) {
+        const int leftMid = left.bounds.top + (left.bounds.bottom - left.bounds.top) / 2;
+        const int rightMid = right.bounds.top + (right.bounds.bottom - right.bounds.top) / 2;
+        if (std::abs(leftMid - rightMid) > 8) return leftMid < rightMid;
+        return left.bounds.left < right.bounds.left;
+    });
+
+    const int rowSlack = std::max(8, TileGap() / 2);
+    int lastSameRow = -1;
+    for (int i = 0; i < static_cast<int>(candidates.size()); ++i)
+    {
+        const auto& candidate = candidates[i];
+        if (point.y < candidate.bounds.top - rowSlack)
+        {
+            if (lastSameRow >= 0)
+            {
+                return {
+                    regionId,
+                    InsertionOrderForTargetItem(*candidates[lastSameRow].item, true, g_dragSourcePaths),
+                    true
+                };
+            }
+
+            return {
+                regionId,
+                InsertionOrderForTargetItem(*candidate.item, false, g_dragSourcePaths),
+                true
+            };
+        }
+
+        const bool sameRow = point.y >= candidate.bounds.top - rowSlack
+            && point.y <= candidate.bounds.bottom + rowSlack;
+        if (sameRow)
+        {
+            lastSameRow = i;
+            const int midpoint = candidate.bounds.left + (candidate.bounds.right - candidate.bounds.left) / 2;
+            if (point.x < midpoint)
+            {
+                return {
+                    regionId,
+                    InsertionOrderForTargetItem(*candidate.item, false, g_dragSourcePaths),
+                    true
+                };
+            }
+        }
+    }
+
+    return {
+        regionId,
+        InsertionOrderForTargetItem(*candidates.back().item, true, g_dragSourcePaths),
+        true
+    };
+}
+
+DropTarget FindDropTargetWithinRegion(const std::wstring& regionId, POINT point)
+{
+    return InsertionOrderFromRegionHits(regionId, point);
+}
+
 DropTarget FindDropTarget(POINT point)
 {
     if (!g_searchText.empty()) return {};
@@ -1627,7 +1709,7 @@ DropTarget FindDropTarget(POINT point)
     {
         if (PtInRect(&regionHit.bounds, point))
         {
-            return { regionHit.regionId, CountItemsInRegion(regionHit.regionId, g_dragSourcePaths), true };
+            return FindDropTargetWithinRegion(regionHit.regionId, point);
         }
     }
 
@@ -1641,7 +1723,7 @@ DropTarget FindDropTarget(POINT point)
                 target = &regionHit;
             }
         }
-        return { target->regionId, CountItemsInRegion(target->regionId, g_dragSourcePaths), true };
+        return FindDropTargetWithinRegion(target->regionId, point);
     }
 
     return {};
@@ -1852,6 +1934,18 @@ void DrawRoundedRectDirect(ID2D1DCRenderTarget* target, const RECT& rect, COLORR
     SafeRelease(strokeBrush);
 }
 
+void DrawAppTileSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool selected)
+{
+    if (!selected) return;
+    DrawRoundedRectDirect(target, rect, RGB(42, 82, 118), RGB(130, 190, 255), 12.0f);
+}
+
+void DrawAppTileSurface(HDC dc, const RECT& rect, bool selected)
+{
+    if (!selected) return;
+    DrawRoundedRect(dc, rect, RGB(42, 82, 118), RGB(130, 190, 255), 12);
+}
+
 void DrawTextDirect(
     ID2D1DCRenderTarget* target,
     IDWriteTextFormat* format,
@@ -2058,7 +2152,7 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
             if (tileRect.bottom >= ContentClipTop() && tileRect.top <= client.bottom)
             {
                 const bool selected = filteredIndex == g_selectedFilteredIndex || IsSelected(item.sourcePath);
-                DrawRoundedRectDirect(target, tileRect, selected ? RGB(42, 82, 118) : RGB(28, 35, 48), selected ? RGB(130, 190, 255) : RGB(50, 62, 82), 12.0f);
+                DrawAppTileSurface(target, tileRect, selected);
                 LoadItemIcon(item);
                 if (item.icon)
                 {
@@ -2175,7 +2269,7 @@ void PaintContent(HDC dc, const RECT& client)
             if (tileRect.bottom >= ContentClipTop() && tileRect.top <= client.bottom)
             {
                 const bool selected = filteredIndex == g_selectedFilteredIndex || IsSelected(item.sourcePath);
-                DrawRoundedRect(dc, tileRect, selected ? RGB(42, 82, 118) : RGB(28, 35, 48), selected ? RGB(130, 190, 255) : RGB(50, 62, 82), 12);
+                DrawAppTileSurface(dc, tileRect, selected);
                 LoadItemIcon(item);
                 if (item.icon)
                 {
