@@ -1,13 +1,24 @@
 #include <windows.h>
 #include <windowsx.h>
+#include <commctrl.h>
+#include <commoncontrols.h>
 #include <shellapi.h>
 #include <shlwapi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cwctype>
 #include <cstdio>
 #include <string>
 #include <vector>
+
+#ifndef SHIL_EXTRALARGE
+#define SHIL_EXTRALARGE 0x2
+#endif
+
+#ifndef SHIL_JUMBO
+#define SHIL_JUMBO 0x4
+#endif
 
 namespace
 {
@@ -17,6 +28,7 @@ constexpr int TrayRefreshCommand = 1002;
 constexpr int TrayExitCommand = 1003;
 constexpr UINT WmTray = WM_APP + 72;
 constexpr wchar_t WindowClassName[] = L"LightLaunchpadNativeUiWindow";
+const GUID NativeIID_IImageList = { 0x46eb5926, 0x582e, 0x4017, { 0x9f, 0xdf, 0xe8, 0x99, 0x8d, 0xaa, 0x09, 0x50 } };
 
 struct Settings
 {
@@ -51,6 +63,19 @@ struct HitTile
     int itemIndex = -1;
 };
 
+struct RegionHit
+{
+    RECT bounds;
+    std::wstring regionId;
+};
+
+struct DropTarget
+{
+    std::wstring regionId;
+    int order = 0;
+    bool valid = false;
+};
+
 HINSTANCE g_instance = nullptr;
 HWND g_hwnd = nullptr;
 Settings g_settings;
@@ -58,10 +83,19 @@ std::vector<Region> g_regions;
 std::vector<LaunchItem> g_items;
 std::vector<int> g_filtered;
 std::vector<HitTile> g_hits;
+std::vector<RegionHit> g_regionHits;
 std::wstring g_searchText;
 int g_selectedFilteredIndex = -1;
 int g_scrollOffset = 0;
 int g_contentHeight = 0;
+std::wstring g_layoutViewMode = L"InlineRegions";
+bool g_mouseDown = false;
+bool g_dragActive = false;
+int g_dragFilteredIndex = -1;
+std::wstring g_dragSourcePath;
+POINT g_dragStart = {};
+POINT g_dragCurrent = {};
+DropTarget g_dropTarget;
 
 void CopyText(wchar_t* dest, size_t count, const wchar_t* source)
 {
@@ -169,6 +203,16 @@ std::wstring Utf8ToWide(const std::string& value)
     std::wstring wide(count, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), wide.data(), count);
     return wide;
+}
+
+std::string WideToUtf8(const std::wstring& value)
+{
+    if (value.empty()) return {};
+    int count = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    if (count <= 0) return {};
+    std::string utf8(count, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), utf8.data(), count, nullptr, nullptr);
+    return utf8;
 }
 
 int HexValue(char ch)
@@ -280,6 +324,74 @@ int FindJsonNumberValue(const std::string& text, const char* key, int fallback, 
     return fallback;
 }
 
+std::string EscapeJson(const std::wstring& value)
+{
+    std::string result;
+    for (wchar_t ch : value)
+    {
+        switch (ch)
+        {
+        case L'"': result += "\\\""; break;
+        case L'\\': result += "\\\\"; break;
+        case L'\b': result += "\\b"; break;
+        case L'\f': result += "\\f"; break;
+        case L'\n': result += "\\n"; break;
+        case L'\r': result += "\\r"; break;
+        case L'\t': result += "\\t"; break;
+        default:
+            if (ch < 0x20)
+            {
+                char buffer[8] = {};
+                std::snprintf(buffer, sizeof(buffer), "\\u%04x", static_cast<unsigned>(ch));
+                result += buffer;
+            }
+            else
+            {
+                result += WideToUtf8(std::wstring(1, ch));
+            }
+            break;
+        }
+    }
+    return result;
+}
+
+std::wstring GetLightLaunchpadDataPath()
+{
+    const auto appData = GetAppDataPath();
+    return appData.empty() ? L"" : JoinPath(appData, L"LightLaunchpad");
+}
+
+std::wstring GetLayoutPath()
+{
+    const auto dataPath = GetLightLaunchpadDataPath();
+    return dataPath.empty() ? L"" : JoinPath(dataPath, L"layout.json");
+}
+
+bool WriteFileUtf8(const std::wstring& path, const std::string& content)
+{
+    if (path.empty()) return false;
+    wchar_t directory[MAX_PATH] = L"";
+    CopyText(directory, ARRAYSIZE(directory), path.c_str());
+    PathRemoveFileSpecW(directory);
+    if (directory[0] != L'\0') CreateDirectoryW(directory, nullptr);
+
+    const auto temporaryPath = path + L".tmp";
+    HANDLE file = CreateFileW(temporaryPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+
+    DWORD written = 0;
+    const bool ok = WriteFile(file, content.data(), static_cast<DWORD>(content.size()), &written, nullptr)
+        && written == content.size();
+    CloseHandle(file);
+    if (!ok)
+    {
+        DeleteFileW(temporaryPath.c_str());
+        return false;
+    }
+
+    return MoveFileExW(temporaryPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+}
+
 void LoadSettings()
 {
     const auto appData = GetAppDataPath();
@@ -351,13 +463,16 @@ void LoadLayout()
         return;
     }
 
-    const auto layoutPath = JoinPath(JoinPath(appData, L"LightLaunchpad"), L"layout.json");
+    const auto layoutPath = GetLayoutPath();
     const auto json = ReadFileUtf8(layoutPath);
     if (json.empty())
     {
         AddDefaultRegion();
         return;
     }
+
+    const auto viewMode = FindJsonStringValue(json, "ViewMode");
+    if (!viewMode.empty()) g_layoutViewMode = viewMode;
 
     size_t pos = 0;
     while ((pos = json.find("\"Id\"", pos)) != std::string::npos)
@@ -431,6 +546,131 @@ void SortItems()
     });
 }
 
+std::vector<Region> OrderedRegions()
+{
+    auto regions = g_regions;
+    std::sort(regions.begin(), regions.end(), [](const Region& left, const Region& right) {
+        if (left.order != right.order) return left.order < right.order;
+        return CompareStringOrdinal(left.name.c_str(), -1, right.name.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+    });
+    return regions;
+}
+
+int CountItemsInRegion(const std::wstring& regionId, const std::wstring& excludeSourcePath = L"")
+{
+    int count = 0;
+    for (const auto& item : g_items)
+    {
+        if (!excludeSourcePath.empty() && SamePath(item.sourcePath, excludeSourcePath)) continue;
+        if (CompareStringOrdinal(item.regionId.c_str(), -1, regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
+        {
+            count++;
+        }
+    }
+    return count;
+}
+
+void RenumberItemsByRegion()
+{
+    for (const auto& region : OrderedRegions())
+    {
+        int order = 0;
+        for (auto& item : g_items)
+        {
+            if (CompareStringOrdinal(item.regionId.c_str(), -1, region.id.c_str(), -1, TRUE) == CSTR_EQUAL)
+            {
+                item.order = order++;
+            }
+        }
+    }
+}
+
+bool SaveLayout()
+{
+    RenumberItemsByRegion();
+    std::string json;
+    json += "{\r\n";
+    json += "  \"ViewMode\": \"" + EscapeJson(g_layoutViewMode) + "\",\r\n";
+    json += "  \"Regions\": [\r\n";
+    const auto regions = OrderedRegions();
+    for (size_t i = 0; i < regions.size(); ++i)
+    {
+        const auto& region = regions[i];
+        json += "    {\r\n";
+        json += "      \"Id\": \"" + EscapeJson(region.id) + "\",\r\n";
+        json += "      \"Name\": \"" + EscapeJson(region.name) + "\",\r\n";
+        json += "      \"Order\": " + std::to_string(region.order) + "\r\n";
+        json += "    }";
+        json += i + 1 < regions.size() ? ",\r\n" : "\r\n";
+    }
+    json += "  ],\r\n";
+    json += "  \"Items\": [\r\n";
+    for (size_t i = 0; i < g_items.size(); ++i)
+    {
+        const auto& item = g_items[i];
+        json += "    {\r\n";
+        json += "      \"SourcePath\": \"" + EscapeJson(item.sourcePath) + "\",\r\n";
+        json += "      \"DisplayName\": \"" + EscapeJson(item.displayName) + "\",\r\n";
+        json += "      \"RegionId\": \"" + EscapeJson(item.regionId) + "\",\r\n";
+        json += "      \"Order\": " + std::to_string(item.order) + "\r\n";
+        json += "    }";
+        json += i + 1 < g_items.size() ? ",\r\n" : "\r\n";
+    }
+    json += "  ]\r\n";
+    json += "}\r\n";
+    return WriteFileUtf8(GetLayoutPath(), json);
+}
+
+void MoveItemToTarget(const std::wstring& sourcePath, const DropTarget& target)
+{
+    if (!target.valid || !RegionExists(target.regionId)) return;
+
+    LaunchItem moving = {};
+    bool found = false;
+    std::vector<LaunchItem> remaining;
+    remaining.reserve(g_items.size());
+    for (const auto& item : g_items)
+    {
+        if (!found && SamePath(item.sourcePath, sourcePath))
+        {
+            moving = item;
+            found = true;
+        }
+        else
+        {
+            remaining.push_back(item);
+        }
+    }
+
+    if (!found) return;
+    moving.regionId = target.regionId;
+
+    std::vector<LaunchItem> reordered;
+    reordered.reserve(g_items.size());
+    for (const auto& region : OrderedRegions())
+    {
+        std::vector<LaunchItem> regionItems;
+        for (const auto& item : remaining)
+        {
+            if (CompareStringOrdinal(item.regionId.c_str(), -1, region.id.c_str(), -1, TRUE) == CSTR_EQUAL)
+            {
+                regionItems.push_back(item);
+            }
+        }
+
+        if (CompareStringOrdinal(region.id.c_str(), -1, target.regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
+        {
+            const int insertAt = std::clamp(target.order, 0, static_cast<int>(regionItems.size()));
+            regionItems.insert(regionItems.begin() + insertAt, moving);
+        }
+
+        reordered.insert(reordered.end(), regionItems.begin(), regionItems.end());
+    }
+
+    g_items = std::move(reordered);
+    RenumberItemsByRegion();
+}
+
 void ReloadData()
 {
     for (auto& item : g_items)
@@ -464,16 +704,46 @@ void RebuildFiltered()
     }
 }
 
+HICON LoadShellImageListIcon(const std::wstring& path, int imageListSize)
+{
+    SHFILEINFOW info = {};
+    if (!SHGetFileInfoW(
+        path.c_str(),
+        0,
+        &info,
+        sizeof(info),
+        SHGFI_SYSICONINDEX | SHGFI_LARGEICON))
+    {
+        return nullptr;
+    }
+
+    IImageList* imageList = nullptr;
+    HRESULT hr = SHGetImageList(imageListSize, NativeIID_IImageList, reinterpret_cast<void**>(&imageList));
+    if (FAILED(hr) || !imageList)
+    {
+        return nullptr;
+    }
+
+    HICON icon = nullptr;
+    hr = imageList->GetIcon(info.iIcon, ILD_TRANSPARENT, &icon);
+    imageList->Release();
+    return SUCCEEDED(hr) ? icon : nullptr;
+}
+
 void LoadItemIcon(LaunchItem& item)
 {
     if (item.icon) return;
+    item.icon = LoadShellImageListIcon(item.sourcePath, SHIL_JUMBO);
+    if (!item.icon) item.icon = LoadShellImageListIcon(item.sourcePath, SHIL_EXTRALARGE);
+    if (item.icon) return;
+
     SHFILEINFOW info = {};
     if (SHGetFileInfoW(
         item.sourcePath.c_str(),
         0,
         &info,
         sizeof(info),
-        SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES))
+        SHGFI_ICON | SHGFI_LARGEICON))
     {
         item.icon = info.hIcon;
     }
@@ -481,18 +751,6 @@ void LoadItemIcon(LaunchItem& item)
 
 HICON LoadTrayIcon()
 {
-    wchar_t base[MAX_PATH] = L"";
-    if (GetModuleFileNameW(nullptr, base, MAX_PATH))
-    {
-        PathRemoveFileSpecW(base);
-        auto iconPath = JoinPath(base, L"Assets\\Alice.ico");
-        if (GetFileAttributesW(iconPath.c_str()) != INVALID_FILE_ATTRIBUTES)
-        {
-            HICON icon = reinterpret_cast<HICON>(
-                LoadImageW(nullptr, iconPath.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE | LR_SHARED));
-            if (icon) return icon;
-        }
-    }
     return LoadIconW(nullptr, IDI_APPLICATION);
 }
 
@@ -607,6 +865,103 @@ void LaunchItemAtFilteredIndex(int filteredIndex)
     HideNativeUi();
 }
 
+bool HasExceededDragThreshold(POINT point)
+{
+    return std::abs(point.x - g_dragStart.x) >= GetSystemMetrics(SM_CXDRAG)
+        || std::abs(point.y - g_dragStart.y) >= GetSystemMetrics(SM_CYDRAG);
+}
+
+DropTarget FindDropTarget(POINT point)
+{
+    if (!g_searchText.empty()) return {};
+
+    for (const auto& hit : g_hits)
+    {
+        if (!PtInRect(&hit.bounds, point)) continue;
+        if (hit.itemIndex < 0 || hit.itemIndex >= static_cast<int>(g_filtered.size())) continue;
+        const auto& item = g_items[g_filtered[hit.itemIndex]];
+        const int midpoint = hit.bounds.left + (hit.bounds.right - hit.bounds.left) / 2;
+        return { item.regionId, item.order + (point.x >= midpoint ? 1 : 0), true };
+    }
+
+    for (const auto& regionHit : g_regionHits)
+    {
+        if (PtInRect(&regionHit.bounds, point))
+        {
+            return { regionHit.regionId, CountItemsInRegion(regionHit.regionId, g_dragSourcePath), true };
+        }
+    }
+
+    if (!g_regionHits.empty())
+    {
+        const auto* target = &g_regionHits.front();
+        for (const auto& regionHit : g_regionHits)
+        {
+            if (point.y >= regionHit.bounds.top)
+            {
+                target = &regionHit;
+            }
+        }
+        return { target->regionId, CountItemsInRegion(target->regionId, g_dragSourcePath), true };
+    }
+
+    return {};
+}
+
+void ResetDragState()
+{
+    g_mouseDown = false;
+    g_dragActive = false;
+    g_dragFilteredIndex = -1;
+    g_dragSourcePath.clear();
+    g_dropTarget = {};
+}
+
+void BeginDrag(HWND hwnd, POINT point)
+{
+    if (g_dragFilteredIndex < 0 || g_dragFilteredIndex >= static_cast<int>(g_filtered.size())) return;
+    g_dragActive = true;
+    g_dragCurrent = point;
+    g_dragSourcePath = g_items[g_filtered[g_dragFilteredIndex]].sourcePath;
+    g_dropTarget = FindDropTarget(point);
+    SetCapture(hwnd);
+}
+
+void UpdateDrag(POINT point)
+{
+    if (!g_dragActive) return;
+    g_dragCurrent = point;
+    g_dropTarget = FindDropTarget(point);
+}
+
+void CompleteDrag(HWND hwnd)
+{
+    if (g_dragActive && g_dropTarget.valid && !g_dragSourcePath.empty())
+    {
+        MoveItemToTarget(g_dragSourcePath, g_dropTarget);
+        SortItems();
+        SaveLayout();
+        RebuildFiltered();
+    }
+
+    if (GetCapture() == hwnd)
+    {
+        ReleaseCapture();
+    }
+    ResetDragState();
+    InvalidateRect(hwnd, nullptr, TRUE);
+}
+
+void CancelDrag(HWND hwnd)
+{
+    if (GetCapture() == hwnd)
+    {
+        ReleaseCapture();
+    }
+    ResetDragState();
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 void DrawRoundedRect(HDC dc, const RECT& rect, COLORREF fill, COLORREF stroke, int radius)
 {
     HBRUSH brush = CreateSolidBrush(fill);
@@ -627,9 +982,59 @@ void DrawTextClipped(HDC dc, const std::wstring& text, RECT rect, UINT format, C
     DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &rect, format);
 }
 
+void DrawDragFeedback(HDC dc)
+{
+    if (!g_dragActive || !g_dropTarget.valid) return;
+
+    RECT marker = {};
+    bool hasMarker = false;
+    for (const auto& hit : g_hits)
+    {
+        if (hit.itemIndex < 0 || hit.itemIndex >= static_cast<int>(g_filtered.size())) continue;
+        const auto& item = g_items[g_filtered[hit.itemIndex]];
+        if (CompareStringOrdinal(item.regionId.c_str(), -1, g_dropTarget.regionId.c_str(), -1, TRUE) != CSTR_EQUAL) continue;
+        if (item.order >= g_dropTarget.order)
+        {
+            marker = { hit.bounds.left - 3, hit.bounds.top + 8, hit.bounds.left + 3, hit.bounds.bottom - 8 };
+            hasMarker = true;
+            break;
+        }
+
+        marker = { hit.bounds.right + 4, hit.bounds.top + 8, hit.bounds.right + 10, hit.bounds.bottom - 8 };
+        hasMarker = true;
+    }
+
+    if (!hasMarker)
+    {
+        for (const auto& regionHit : g_regionHits)
+        {
+            if (CompareStringOrdinal(regionHit.regionId.c_str(), -1, g_dropTarget.regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
+            {
+                marker = { regionHit.bounds.left + 10, regionHit.bounds.top + 34, regionHit.bounds.right - 10, regionHit.bounds.top + 40 };
+                hasMarker = true;
+                break;
+            }
+        }
+    }
+
+    if (hasMarker)
+    {
+        DrawRoundedRect(dc, marker, RGB(80, 190, 255), RGB(160, 225, 255), 4);
+    }
+
+    RECT ghost = { g_dragCurrent.x + 16, g_dragCurrent.y + 16, g_dragCurrent.x + 162, g_dragCurrent.y + 58 };
+    DrawRoundedRect(dc, ghost, RGB(42, 56, 76), RGB(120, 185, 255), 12);
+    if (g_dragFilteredIndex >= 0 && g_dragFilteredIndex < static_cast<int>(g_filtered.size()))
+    {
+        RECT text = { ghost.left + 12, ghost.top + 4, ghost.right - 12, ghost.bottom - 4 };
+        DrawTextClipped(dc, g_items[g_filtered[g_dragFilteredIndex]].displayName, text, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(242, 248, 255));
+    }
+}
+
 void PaintContent(HDC dc, const RECT& client)
 {
     g_hits.clear();
+    g_regionHits.clear();
     HBRUSH background = CreateSolidBrush(RGB(18, 22, 30));
     FillRect(dc, &client, background);
     DeleteObject(background);
@@ -678,10 +1083,15 @@ void PaintContent(HDC dc, const RECT& client)
                 activeRegion = item.regionId;
                 RECT headerRect = { left + 8, y, right, y + 28 };
                 DrawTextClipped(dc, RegionName(activeRegion), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(220, 232, 248));
+                g_regionHits.push_back({ { left, y, right, y + 38 }, activeRegion });
                 y += 38;
             }
 
             RECT tileRect = { x, y, x + tileSize, y + tileSize };
+            if (!g_regionHits.empty() && CompareStringOrdinal(g_regionHits.back().regionId.c_str(), -1, item.regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
+            {
+                g_regionHits.back().bounds.bottom = std::max(g_regionHits.back().bounds.bottom, tileRect.bottom + gap);
+            }
             if (tileRect.bottom >= 92 && tileRect.top <= client.bottom)
             {
                 const bool selected = filteredIndex == g_selectedFilteredIndex;
@@ -714,6 +1124,8 @@ void PaintContent(HDC dc, const RECT& client)
 
         g_contentHeight = contentBottom + 44;
     }
+
+    DrawDragFeedback(dc);
 
     DeleteObject(searchFont);
     DeleteObject(tileFont);
@@ -796,12 +1208,39 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (PtInRect(&hit.bounds, point))
             {
                 g_selectedFilteredIndex = hit.itemIndex;
+                g_mouseDown = g_searchText.empty();
+                g_dragFilteredIndex = hit.itemIndex;
+                g_dragStart = point;
+                g_dragCurrent = point;
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
         }
+        ResetDragState();
         return 0;
     }
+    case WM_MOUSEMOVE:
+    {
+        POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (g_mouseDown && !g_dragActive && HasExceededDragThreshold(point))
+        {
+            BeginDrag(hwnd, point);
+        }
+        if (g_dragActive)
+        {
+            UpdateDrag(point);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP:
+        if (g_dragActive)
+        {
+            CompleteDrag(hwnd);
+            return 0;
+        }
+        ResetDragState();
+        return 0;
     case WM_LBUTTONDBLCLK:
     {
         POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -816,7 +1255,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE) { HideNativeUi(); return 0; }
+        if (wParam == VK_ESCAPE)
+        {
+            if (g_dragActive) CancelDrag(hwnd);
+            else HideNativeUi();
+            return 0;
+        }
         if (wParam == VK_RETURN) { LaunchItemAtFilteredIndex(g_selectedFilteredIndex); return 0; }
         if (wParam == VK_DOWN && !g_filtered.empty())
         {
@@ -846,6 +1290,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_SIZE:
         ClampScroll();
+        return 0;
+    case WM_CAPTURECHANGED:
+        if (reinterpret_cast<HWND>(lParam) != hwnd && g_dragActive)
+        {
+            ResetDragState();
+        }
         return 0;
     case WM_DESTROY:
         RemoveTrayIcon();

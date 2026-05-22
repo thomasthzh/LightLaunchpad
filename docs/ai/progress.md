@@ -40,8 +40,10 @@
 - Search clear now preserves cached icon state after a no-result query.
 - Added `LightLaunchpad.NativeUi`, a C++ Win32 native launcher surface that owns hotkey, tray, search, drawing, and app launch without cold-starting WPF.
 - Added `tools/build-native-ui.ps1` and switched release packaging to native-first output with WPF fallback included.
-- Fixed NativeUi package startup by statically linking the larger MinGW C/C++ runtime pieces and bundling the transitive `libwinpthread-1.dll`; clean-`PATH` launch from the package now stays running at approximately 9.91 MB Working Set / 1.71 MB Private Memory.
+- Fixed NativeUi package startup by statically linking the MinGW C/C++ runtime; clean-`PATH` launch from the package no longer needs MinGW DLLs next to the executable.
 - Hardened `tools/package-release.ps1` so failed `dotnet publish` or native build steps abort instead of producing a partial package.
+- Added NativeUi M2 icon and drag work: shell image-list icon loading now prefers `SHIL_JUMBO` / `SHIL_EXTRALARGE`, and native app drag sorting now writes `layout.json` atomically.
+- Switched NativeUi to full static `-Os` / section-gc release builds and kept the tray icon on a light system icon; M2 probe measured approximately 8.87 MB Working Set / 1.55 MB Private Memory while idle.
 
 ## Changed Files
 
@@ -66,10 +68,11 @@
 - `tests/LightLaunchpad.App.Tests/LaunchpadViewModelIconStabilityTests.cs`
 - `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
 - `tools/build-native-ui.ps1`
+- `docs/superpowers/plans/2026-05-22-native-ui-m2-icons-drag.md`
 
 ## Next Step
 
-Continue with native region editing and Direct2D/DirectWrite renderer migration.
+Continue with native region editing, multi-select drag parity, and Direct2D/DirectWrite renderer migration.
 
 ## Risks
 

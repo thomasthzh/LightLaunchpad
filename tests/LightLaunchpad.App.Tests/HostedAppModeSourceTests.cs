@@ -121,6 +121,36 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("Search", source);
     }
 
+    public static void NativeUiSource_LoadsHighQualityShellIcons()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("SHGetImageList", source);
+        TestAssert.Contains("SHIL_JUMBO", source);
+        TestAssert.Contains("SHIL_EXTRALARGE", source);
+        TestAssert.Contains("IID_IImageList", source);
+        TestAssert.Contains("ILD_TRANSPARENT", source);
+        TestAssert.Contains("SHGFI_SYSICONINDEX", source);
+        TestAssert.DoesNotContain("SHGFI_USEFILEATTRIBUTES", source);
+        TestAssert.DoesNotContain("Assets\\\\Alice.ico", source);
+    }
+
+    public static void NativeUiSource_SupportsDragSortingAndLayoutPersistence()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("WM_MOUSEMOVE", source);
+        TestAssert.Contains("WM_LBUTTONUP", source);
+        TestAssert.Contains("SetCapture", source);
+        TestAssert.Contains("ReleaseCapture", source);
+        TestAssert.Contains("g_regionHits", source);
+        TestAssert.Contains("DropTarget", source);
+        TestAssert.Contains("BeginDrag", source);
+        TestAssert.Contains("CompleteDrag", source);
+        TestAssert.Contains("SaveLayout", source);
+        TestAssert.Contains("WriteFileUtf8", source);
+    }
+
     public static void NativeUiBuildScript_ProducesNativeUiExecutable()
     {
         var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
@@ -129,15 +159,14 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("LightLaunchpad.NativeUi.exe", script);
         TestAssert.Contains("GetTempPath", script);
         TestAssert.Contains("-mwindows", script);
-        TestAssert.Contains("objdump", script);
-        TestAssert.Contains("libgcc_s_seh-1.dll", script);
-        TestAssert.Contains("libstdc++-6.dll", script);
-        TestAssert.Contains("libwinpthread-1.dll", script);
-        TestAssert.Contains("Native UI runtime dependency not found", script);
-        TestAssert.Contains("Queue[string]", script);
+        TestAssert.Contains("-static `", script);
         TestAssert.Contains("-static-libgcc", script);
         TestAssert.Contains("-static-libstdc++", script);
-        TestAssert.DoesNotContain("-static `", script);
+        TestAssert.Contains("-Os", script);
+        TestAssert.Contains("-ffunction-sections", script);
+        TestAssert.Contains("-fdata-sections", script);
+        TestAssert.Contains("-Wl,--gc-sections", script);
+        TestAssert.DoesNotContain("libwinpthread-1.dll", script);
     }
 
     public static void PackageReleaseScript_IncludesNativeUiPrimaryExecutable()

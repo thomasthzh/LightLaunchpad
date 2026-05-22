@@ -89,6 +89,12 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_ReadsExistingSettingsLayoutAndSearches),
                 HostedAppModeSourceTests.NativeUiSource_ReadsExistingSettingsLayoutAndSearches),
             (
+                nameof(HostedAppModeSourceTests.NativeUiSource_LoadsHighQualityShellIcons),
+                HostedAppModeSourceTests.NativeUiSource_LoadsHighQualityShellIcons),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_SupportsDragSortingAndLayoutPersistence),
+                HostedAppModeSourceTests.NativeUiSource_SupportsDragSortingAndLayoutPersistence),
+            (
                 nameof(HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
                 HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
             (

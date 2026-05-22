@@ -14,13 +14,13 @@ LightLaunchpad is a lightweight Windows launchpad for shortcuts, executables, an
 - Icon cache stored under `Documents\LightLaunchpad\icons`.
 - User settings and layout stored under `%AppData%\LightLaunchpad`.
 - Single-process hotkey and tray mode for responsive repeated opening.
-- Experimental native UI executable for the low-memory, high-fluidity rewrite path.
+- Experimental native UI executable for the low-memory, high-fluidity rewrite path, now with high-resolution shell icons and native app drag sorting.
 
 ## Download
 
 Use the latest GitHub Release and download the Windows zip package. Start `LightLaunchpad.NativeUi.exe` for the native launcher, or `LightLaunchpad.App.exe` for the current WPF fallback/settings surface.
 
-The fallback app is a self-contained single-file Windows executable. The native launcher statically links the larger MinGW C/C++ runtime pieces and bundles the small `libwinpthread-1.dll` runtime dependency so it can start from the package without requiring the developer toolchain on `PATH`.
+The fallback app is a self-contained single-file Windows executable. The native launcher statically links the MinGW C/C++ runtime so it can start from the package without requiring the developer toolchain on `PATH`.
 
 ## Build
 

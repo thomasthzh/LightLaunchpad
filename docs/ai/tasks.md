@@ -230,5 +230,34 @@ Completion notes:
 
 - NativeUi M1 reads existing `%AppData%\LightLaunchpad\settings.json` and `layout.json`.
 - NativeUi M1 owns hotkey, tray, search input, double-buffered drawing, icon loading, mouse selection/double-click launch, Enter launch, Esc hide, and wheel scrolling.
-- NativeUi release builds statically link the larger MinGW C/C++ runtime pieces, bundle transitive `libwinpthread-1.dll`, and the package script now fails hard if publish/build steps fail.
+- NativeUi release builds statically link the MinGW C/C++ runtime and the package script now fails hard if publish/build steps fail.
 - WPF remains fallback for settings and full editing until later native milestones.
+
+## N2 - Native UI Icon Quality And Drag Sorting
+
+Status: done
+
+Dependency: N1
+
+Purpose: Make the native launcher feel materially closer to the WPF launchpad by improving icon fidelity and adding real drag ordering.
+
+Likely files:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
+- `tools/build-native-ui.ps1`
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs`
+- `tests/LightLaunchpad.App.Tests/Program.cs`
+- `docs/superpowers/plans/2026-05-22-native-ui-m2-icons-drag.md`
+
+Verification:
+
+- App source tests cover jumbo/extralarge shell icon loading.
+- App source tests cover native drag state, drop targets, capture, and layout persistence.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-m2-probe`
+- `.\tools\package-release.ps1`
+
+Completion notes:
+
+- NativeUi now requests shell system image-list icons with `SHIL_JUMBO` first and `SHIL_EXTRALARGE` fallback instead of using low-fidelity file-attribute icons.
+- NativeUi now supports app drag sorting with mouse capture, drop target feedback, region hit areas, order renumbering, and atomic `layout.json` saves.
+- Drag sorting is disabled while search text is active so filtered results do not corrupt the full layout order.
