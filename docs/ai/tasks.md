@@ -261,3 +261,30 @@ Completion notes:
 - NativeUi now requests shell system image-list icons with `SHIL_JUMBO` first and `SHIL_EXTRALARGE` fallback instead of using low-fidelity file-attribute icons.
 - NativeUi now supports app drag sorting with mouse capture, drop target feedback, region hit areas, order renumbering, and atomic `layout.json` saves.
 - Drag sorting is disabled while search text is active so filtered results do not corrupt the full layout order.
+
+## N3 - Native UI Interaction Parity
+
+Status: done
+
+Dependency: N2
+
+Purpose: Continue migrating WPF launchpad interactions into the native surface now that the memory target allows up to 15 MB.
+
+Likely files:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs`
+- `tests/LightLaunchpad.App.Tests/Program.cs`
+- `docs/superpowers/plans/2026-05-22-native-ui-m3-interaction-parity.md`
+
+Verification:
+
+- App source tests cover multi-select app drag, group reordering, region header drag sorting, and basic context menu commands.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-m3-probe`
+- `.\tools\package-release.ps1`
+
+Completion notes:
+
+- NativeUi supports Ctrl-click multi-select and drags selected apps as a group.
+- NativeUi supports dragging region headers to reorder regions and saves the new region order to `layout.json`.
+- NativeUi item context menu supports launch, open file location, and remove from layout; region context menu supports delete region, moving its items to Uncategorized.

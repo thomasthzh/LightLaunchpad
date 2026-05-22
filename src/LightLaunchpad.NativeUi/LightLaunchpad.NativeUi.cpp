@@ -26,6 +26,10 @@ constexpr int HotkeyId = 0x4C55;
 constexpr int TrayOpenCommand = 1001;
 constexpr int TrayRefreshCommand = 1002;
 constexpr int TrayExitCommand = 1003;
+constexpr int ItemLaunchCommand = 2001;
+constexpr int ItemOpenLocationCommand = 2002;
+constexpr int ItemRemoveCommand = 2003;
+constexpr int RegionDeleteCommand = 2101;
 constexpr UINT WmTray = WM_APP + 72;
 constexpr wchar_t WindowClassName[] = L"LightLaunchpadNativeUiWindow";
 const GUID NativeIID_IImageList = { 0x46eb5926, 0x582e, 0x4017, { 0x9f, 0xdf, 0xe8, 0x99, 0x8d, 0xaa, 0x09, 0x50 } };
@@ -66,6 +70,7 @@ struct HitTile
 struct RegionHit
 {
     RECT bounds;
+    RECT headerBounds;
     std::wstring regionId;
 };
 
@@ -76,6 +81,20 @@ struct DropTarget
     bool valid = false;
 };
 
+struct RegionDropTarget
+{
+    std::wstring regionId;
+    bool insertAfter = false;
+    bool valid = false;
+};
+
+enum class DragMode
+{
+    None,
+    Items,
+    Region
+};
+
 HINSTANCE g_instance = nullptr;
 HWND g_hwnd = nullptr;
 Settings g_settings;
@@ -84,6 +103,7 @@ std::vector<LaunchItem> g_items;
 std::vector<int> g_filtered;
 std::vector<HitTile> g_hits;
 std::vector<RegionHit> g_regionHits;
+std::vector<std::wstring> g_selectedSourcePaths;
 std::wstring g_searchText;
 int g_selectedFilteredIndex = -1;
 int g_scrollOffset = 0;
@@ -91,11 +111,17 @@ int g_contentHeight = 0;
 std::wstring g_layoutViewMode = L"InlineRegions";
 bool g_mouseDown = false;
 bool g_dragActive = false;
+DragMode g_dragMode = DragMode::None;
 int g_dragFilteredIndex = -1;
-std::wstring g_dragSourcePath;
+std::wstring g_pendingRegionDragId;
+std::wstring g_regionDragId;
+std::vector<std::wstring> g_dragSourcePaths;
 POINT g_dragStart = {};
 POINT g_dragCurrent = {};
 DropTarget g_dropTarget;
+RegionDropTarget g_regionDropTarget;
+std::vector<std::wstring> g_contextItemPaths;
+std::wstring g_contextRegionId;
 
 void CopyText(wchar_t* dest, size_t count, const wchar_t* source)
 {
@@ -444,6 +470,52 @@ bool SamePath(const std::wstring& left, const std::wstring& right)
     return CompareStringOrdinal(left.c_str(), -1, right.c_str(), -1, TRUE) == CSTR_EQUAL;
 }
 
+bool ContainsPath(const std::vector<std::wstring>& paths, const std::wstring& sourcePath)
+{
+    return std::any_of(paths.begin(), paths.end(), [&](const std::wstring& path) {
+        return SamePath(path, sourcePath);
+    });
+}
+
+void SetSingleSelection(const std::wstring& sourcePath)
+{
+    g_selectedSourcePaths.clear();
+    if (!sourcePath.empty())
+    {
+        g_selectedSourcePaths.push_back(sourcePath);
+    }
+}
+
+void ToggleSelection(const std::wstring& sourcePath)
+{
+    auto found = std::find_if(g_selectedSourcePaths.begin(), g_selectedSourcePaths.end(), [&](const std::wstring& path) {
+        return SamePath(path, sourcePath);
+    });
+    if (found == g_selectedSourcePaths.end())
+    {
+        g_selectedSourcePaths.push_back(sourcePath);
+    }
+    else
+    {
+        g_selectedSourcePaths.erase(found);
+    }
+}
+
+bool IsSelected(const std::wstring& sourcePath)
+{
+    return ContainsPath(g_selectedSourcePaths, sourcePath);
+}
+
+std::vector<std::wstring> ResolveDragSourcePaths(const LaunchItem& primary)
+{
+    if (IsSelected(primary.sourcePath) && !g_selectedSourcePaths.empty())
+    {
+        return g_selectedSourcePaths;
+    }
+
+    return { primary.sourcePath };
+}
+
 void AddDefaultRegion()
 {
     if (!RegionExists(L"uncategorized"))
@@ -556,18 +628,48 @@ std::vector<Region> OrderedRegions()
     return regions;
 }
 
-int CountItemsInRegion(const std::wstring& regionId, const std::wstring& excludeSourcePath = L"")
+int CountItemsInRegion(const std::wstring& regionId, const std::vector<std::wstring>& excludeSourcePaths)
 {
     int count = 0;
     for (const auto& item : g_items)
     {
-        if (!excludeSourcePath.empty() && SamePath(item.sourcePath, excludeSourcePath)) continue;
+        if (ContainsPath(excludeSourcePaths, item.sourcePath)) continue;
         if (CompareStringOrdinal(item.regionId.c_str(), -1, regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
         {
             count++;
         }
     }
     return count;
+}
+
+int CountItemsInRegion(const std::wstring& regionId, const std::wstring& excludeSourcePath = L"")
+{
+    return excludeSourcePath.empty()
+        ? CountItemsInRegion(regionId, std::vector<std::wstring>{})
+        : CountItemsInRegion(regionId, std::vector<std::wstring>{ excludeSourcePath });
+}
+
+int InsertionOrderForTargetItem(const LaunchItem& targetItem, bool insertAfter, const std::vector<std::wstring>& movingSourcePaths)
+{
+    int order = 0;
+    for (const auto& item : g_items)
+    {
+        if (CompareStringOrdinal(item.regionId.c_str(), -1, targetItem.regionId.c_str(), -1, TRUE) != CSTR_EQUAL)
+        {
+            continue;
+        }
+        if (ContainsPath(movingSourcePaths, item.sourcePath))
+        {
+            continue;
+        }
+        if (SamePath(item.sourcePath, targetItem.sourcePath))
+        {
+            return order + (insertAfter ? 1 : 0);
+        }
+        order++;
+    }
+
+    return order;
 }
 
 void RenumberItemsByRegion()
@@ -621,20 +723,21 @@ bool SaveLayout()
     return WriteFileUtf8(GetLayoutPath(), json);
 }
 
-void MoveItemToTarget(const std::wstring& sourcePath, const DropTarget& target)
+void MoveItemsToTarget(const std::vector<std::wstring>& sourcePaths, const DropTarget& target)
 {
     if (!target.valid || !RegionExists(target.regionId)) return;
+    if (sourcePaths.empty()) return;
 
-    LaunchItem moving = {};
-    bool found = false;
+    std::vector<LaunchItem> movingItems;
     std::vector<LaunchItem> remaining;
     remaining.reserve(g_items.size());
     for (const auto& item : g_items)
     {
-        if (!found && SamePath(item.sourcePath, sourcePath))
+        if (ContainsPath(sourcePaths, item.sourcePath))
         {
-            moving = item;
-            found = true;
+            auto moving = item;
+            moving.regionId = target.regionId;
+            movingItems.push_back(moving);
         }
         else
         {
@@ -642,8 +745,7 @@ void MoveItemToTarget(const std::wstring& sourcePath, const DropTarget& target)
         }
     }
 
-    if (!found) return;
-    moving.regionId = target.regionId;
+    if (movingItems.empty()) return;
 
     std::vector<LaunchItem> reordered;
     reordered.reserve(g_items.size());
@@ -661,13 +763,118 @@ void MoveItemToTarget(const std::wstring& sourcePath, const DropTarget& target)
         if (CompareStringOrdinal(region.id.c_str(), -1, target.regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
         {
             const int insertAt = std::clamp(target.order, 0, static_cast<int>(regionItems.size()));
-            regionItems.insert(regionItems.begin() + insertAt, moving);
+            regionItems.insert(regionItems.begin() + insertAt, movingItems.begin(), movingItems.end());
         }
 
         reordered.insert(reordered.end(), regionItems.begin(), regionItems.end());
     }
 
     g_items = std::move(reordered);
+    RenumberItemsByRegion();
+}
+
+void MoveItemToTarget(const std::wstring& sourcePath, const DropTarget& target)
+{
+    MoveItemsToTarget(std::vector<std::wstring>{ sourcePath }, target);
+}
+
+void MoveRegionToTarget(const std::wstring& sourceRegionId, const RegionDropTarget& target)
+{
+    if (sourceRegionId.empty() || !target.valid || !RegionExists(sourceRegionId) || !RegionExists(target.regionId)) return;
+    if (CompareStringOrdinal(sourceRegionId.c_str(), -1, target.regionId.c_str(), -1, TRUE) == CSTR_EQUAL) return;
+
+    auto regions = OrderedRegions();
+    Region moving = {};
+    bool found = false;
+    std::vector<Region> remaining;
+    remaining.reserve(regions.size());
+    for (const auto& region : regions)
+    {
+        if (CompareStringOrdinal(region.id.c_str(), -1, sourceRegionId.c_str(), -1, TRUE) == CSTR_EQUAL)
+        {
+            moving = region;
+            found = true;
+        }
+        else
+        {
+            remaining.push_back(region);
+        }
+    }
+
+    if (!found) return;
+
+    auto insert = std::find_if(remaining.begin(), remaining.end(), [&](const Region& region) {
+        return CompareStringOrdinal(region.id.c_str(), -1, target.regionId.c_str(), -1, TRUE) == CSTR_EQUAL;
+    });
+    if (insert == remaining.end()) return;
+    if (target.insertAfter) ++insert;
+    remaining.insert(insert, moving);
+
+    for (int i = 0; i < static_cast<int>(remaining.size()); ++i)
+    {
+        remaining[i].order = i;
+    }
+    g_regions = std::move(remaining);
+}
+
+void RemoveItemsFromLayout(const std::vector<std::wstring>& sourcePaths)
+{
+    if (sourcePaths.empty()) return;
+    std::vector<LaunchItem> remaining;
+    remaining.reserve(g_items.size());
+    for (auto& item : g_items)
+    {
+        if (ContainsPath(sourcePaths, item.sourcePath))
+        {
+            if (item.icon) DestroyIcon(item.icon);
+            item.icon = nullptr;
+            continue;
+        }
+
+        remaining.push_back(item);
+    }
+
+    g_items = std::move(remaining);
+    for (const auto& sourcePath : sourcePaths)
+    {
+        auto selected = std::find_if(g_selectedSourcePaths.begin(), g_selectedSourcePaths.end(), [&](const std::wstring& path) {
+            return SamePath(path, sourcePath);
+        });
+        if (selected != g_selectedSourcePaths.end())
+        {
+            g_selectedSourcePaths.erase(selected);
+        }
+    }
+    RenumberItemsByRegion();
+}
+
+void DeleteRegionAndMoveItems(const std::wstring& regionId)
+{
+    if (regionId.empty() || CompareStringOrdinal(regionId.c_str(), -1, L"uncategorized", -1, TRUE) == CSTR_EQUAL)
+    {
+        return;
+    }
+
+    for (auto& item : g_items)
+    {
+        if (CompareStringOrdinal(item.regionId.c_str(), -1, regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
+        {
+            item.regionId = L"uncategorized";
+        }
+    }
+
+    g_regions.erase(
+        std::remove_if(g_regions.begin(), g_regions.end(), [&](const Region& region) {
+            return CompareStringOrdinal(region.id.c_str(), -1, regionId.c_str(), -1, TRUE) == CSTR_EQUAL;
+        }),
+        g_regions.end());
+    AddDefaultRegion();
+    auto regions = OrderedRegions();
+    for (int i = 0; i < static_cast<int>(regions.size()); ++i)
+    {
+        regions[i].order = i;
+    }
+    g_regions = std::move(regions);
     RenumberItemsByRegion();
 }
 
@@ -682,6 +889,13 @@ void ReloadData()
     LoadLayout();
     AddMissingLaunchpadFolderItems();
     SortItems();
+    g_selectedSourcePaths.erase(
+        std::remove_if(g_selectedSourcePaths.begin(), g_selectedSourcePaths.end(), [](const std::wstring& sourcePath) {
+            return std::none_of(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
+                return SamePath(item.sourcePath, sourcePath);
+            });
+        }),
+        g_selectedSourcePaths.end());
 }
 
 void RebuildFiltered()
@@ -881,14 +1095,14 @@ DropTarget FindDropTarget(POINT point)
         if (hit.itemIndex < 0 || hit.itemIndex >= static_cast<int>(g_filtered.size())) continue;
         const auto& item = g_items[g_filtered[hit.itemIndex]];
         const int midpoint = hit.bounds.left + (hit.bounds.right - hit.bounds.left) / 2;
-        return { item.regionId, item.order + (point.x >= midpoint ? 1 : 0), true };
+        return { item.regionId, InsertionOrderForTargetItem(item, point.x >= midpoint, g_dragSourcePaths), true };
     }
 
     for (const auto& regionHit : g_regionHits)
     {
         if (PtInRect(&regionHit.bounds, point))
         {
-            return { regionHit.regionId, CountItemsInRegion(regionHit.regionId, g_dragSourcePath), true };
+            return { regionHit.regionId, CountItemsInRegion(regionHit.regionId, g_dragSourcePaths), true };
         }
     }
 
@@ -902,7 +1116,32 @@ DropTarget FindDropTarget(POINT point)
                 target = &regionHit;
             }
         }
-        return { target->regionId, CountItemsInRegion(target->regionId, g_dragSourcePath), true };
+        return { target->regionId, CountItemsInRegion(target->regionId, g_dragSourcePaths), true };
+    }
+
+    return {};
+}
+
+RegionDropTarget FindRegionDropTarget(POINT point)
+{
+    for (const auto& regionHit : g_regionHits)
+    {
+        if (!PtInRect(&regionHit.bounds, point)) continue;
+        const int midpoint = regionHit.headerBounds.top + (regionHit.headerBounds.bottom - regionHit.headerBounds.top) / 2;
+        return { regionHit.regionId, point.y >= midpoint, true };
+    }
+
+    if (!g_regionHits.empty())
+    {
+        const auto* target = &g_regionHits.front();
+        for (const auto& regionHit : g_regionHits)
+        {
+            if (point.y >= regionHit.bounds.top)
+            {
+                target = &regionHit;
+            }
+        }
+        return { target->regionId, true, true };
     }
 
     return {};
@@ -912,18 +1151,34 @@ void ResetDragState()
 {
     g_mouseDown = false;
     g_dragActive = false;
+    g_dragMode = DragMode::None;
     g_dragFilteredIndex = -1;
-    g_dragSourcePath.clear();
+    g_pendingRegionDragId.clear();
+    g_regionDragId.clear();
+    g_dragSourcePaths.clear();
     g_dropTarget = {};
+    g_regionDropTarget = {};
 }
 
 void BeginDrag(HWND hwnd, POINT point)
 {
     if (g_dragFilteredIndex < 0 || g_dragFilteredIndex >= static_cast<int>(g_filtered.size())) return;
     g_dragActive = true;
+    g_dragMode = DragMode::Items;
     g_dragCurrent = point;
-    g_dragSourcePath = g_items[g_filtered[g_dragFilteredIndex]].sourcePath;
+    g_dragSourcePaths = ResolveDragSourcePaths(g_items[g_filtered[g_dragFilteredIndex]]);
     g_dropTarget = FindDropTarget(point);
+    SetCapture(hwnd);
+}
+
+void BeginRegionDrag(HWND hwnd, POINT point)
+{
+    if (g_pendingRegionDragId.empty()) return;
+    g_dragActive = true;
+    g_dragMode = DragMode::Region;
+    g_dragCurrent = point;
+    g_regionDragId = g_pendingRegionDragId;
+    g_regionDropTarget = FindRegionDropTarget(point);
     SetCapture(hwnd);
 }
 
@@ -931,14 +1186,39 @@ void UpdateDrag(POINT point)
 {
     if (!g_dragActive) return;
     g_dragCurrent = point;
-    g_dropTarget = FindDropTarget(point);
+    if (g_dragMode == DragMode::Region)
+    {
+        g_regionDropTarget = FindRegionDropTarget(point);
+    }
+    else
+    {
+        g_dropTarget = FindDropTarget(point);
+    }
 }
 
 void CompleteDrag(HWND hwnd)
 {
-    if (g_dragActive && g_dropTarget.valid && !g_dragSourcePath.empty())
+    if (g_dragActive && g_dropTarget.valid && !g_dragSourcePaths.empty())
     {
-        MoveItemToTarget(g_dragSourcePath, g_dropTarget);
+        MoveItemsToTarget(g_dragSourcePaths, g_dropTarget);
+        SortItems();
+        SaveLayout();
+        RebuildFiltered();
+    }
+
+    if (GetCapture() == hwnd)
+    {
+        ReleaseCapture();
+    }
+    ResetDragState();
+    InvalidateRect(hwnd, nullptr, TRUE);
+}
+
+void CompleteRegionDrag(HWND hwnd)
+{
+    if (g_dragActive && g_regionDropTarget.valid && !g_regionDragId.empty())
+    {
+        MoveRegionToTarget(g_regionDragId, g_regionDropTarget);
         SortItems();
         SaveLayout();
         RebuildFiltered();
@@ -984,7 +1264,27 @@ void DrawTextClipped(HDC dc, const std::wstring& text, RECT rect, UINT format, C
 
 void DrawDragFeedback(HDC dc)
 {
-    if (!g_dragActive || !g_dropTarget.valid) return;
+    if (!g_dragActive) return;
+
+    if (g_dragMode == DragMode::Region && g_regionDropTarget.valid)
+    {
+        for (const auto& regionHit : g_regionHits)
+        {
+            if (CompareStringOrdinal(regionHit.regionId.c_str(), -1, g_regionDropTarget.regionId.c_str(), -1, TRUE) != CSTR_EQUAL) continue;
+            const int y = g_regionDropTarget.insertAfter ? regionHit.headerBounds.bottom + 3 : regionHit.headerBounds.top - 3;
+            RECT marker = { regionHit.headerBounds.left, y, regionHit.headerBounds.right, y + 6 };
+            DrawRoundedRect(dc, marker, RGB(80, 190, 255), RGB(160, 225, 255), 4);
+            break;
+        }
+
+        RECT ghost = { g_dragCurrent.x + 16, g_dragCurrent.y + 16, g_dragCurrent.x + 180, g_dragCurrent.y + 58 };
+        DrawRoundedRect(dc, ghost, RGB(42, 56, 76), RGB(120, 185, 255), 12);
+        RECT text = { ghost.left + 12, ghost.top + 4, ghost.right - 12, ghost.bottom - 4 };
+        DrawTextClipped(dc, RegionName(g_regionDragId), text, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(242, 248, 255));
+        return;
+    }
+
+    if (!g_dropTarget.valid) return;
 
     RECT marker = {};
     bool hasMarker = false;
@@ -1027,7 +1327,10 @@ void DrawDragFeedback(HDC dc)
     if (g_dragFilteredIndex >= 0 && g_dragFilteredIndex < static_cast<int>(g_filtered.size()))
     {
         RECT text = { ghost.left + 12, ghost.top + 4, ghost.right - 12, ghost.bottom - 4 };
-        DrawTextClipped(dc, g_items[g_filtered[g_dragFilteredIndex]].displayName, text, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(242, 248, 255));
+        const auto label = g_dragSourcePaths.size() > 1
+            ? std::to_wstring(g_dragSourcePaths.size()) + L" apps"
+            : g_items[g_filtered[g_dragFilteredIndex]].displayName;
+        DrawTextClipped(dc, label, text, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(242, 248, 255));
     }
 }
 
@@ -1083,7 +1386,7 @@ void PaintContent(HDC dc, const RECT& client)
                 activeRegion = item.regionId;
                 RECT headerRect = { left + 8, y, right, y + 28 };
                 DrawTextClipped(dc, RegionName(activeRegion), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(220, 232, 248));
-                g_regionHits.push_back({ { left, y, right, y + 38 }, activeRegion });
+                g_regionHits.push_back({ { left, y, right, y + 38 }, { left, y, right, y + 38 }, activeRegion });
                 y += 38;
             }
 
@@ -1094,7 +1397,7 @@ void PaintContent(HDC dc, const RECT& client)
             }
             if (tileRect.bottom >= 92 && tileRect.top <= client.bottom)
             {
-                const bool selected = filteredIndex == g_selectedFilteredIndex;
+                const bool selected = filteredIndex == g_selectedFilteredIndex || IsSelected(item.sourcePath);
                 DrawRoundedRect(dc, tileRect, selected ? RGB(42, 82, 118) : RGB(28, 35, 48), selected ? RGB(130, 190, 255) : RGB(50, 62, 82), 12);
                 LoadItemIcon(item);
                 if (item.icon)
@@ -1176,6 +1479,66 @@ void ShowTrayMenu()
     DestroyMenu(menu);
 }
 
+std::wstring ExplorerSelectArguments(const std::wstring& sourcePath)
+{
+    return L"/select,\"" + sourcePath + L"\"";
+}
+
+void LaunchItemBySourcePath(const std::wstring& sourcePath)
+{
+    auto found = std::find_if(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
+        return SamePath(item.sourcePath, sourcePath);
+    });
+    if (found != g_items.end())
+    {
+        ShellExecuteW(g_hwnd, L"open", found->sourcePath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        HideNativeUi();
+    }
+}
+
+void OpenItemLocation(const std::wstring& sourcePath)
+{
+    const auto arguments = ExplorerSelectArguments(sourcePath);
+    ShellExecuteW(g_hwnd, L"open", L"explorer.exe", arguments.c_str(), nullptr, SW_SHOWNORMAL);
+}
+
+void ShowItemContextMenu(POINT point, int filteredIndex)
+{
+    if (filteredIndex < 0 || filteredIndex >= static_cast<int>(g_filtered.size())) return;
+    const auto& item = g_items[g_filtered[filteredIndex]];
+    if (!IsSelected(item.sourcePath))
+    {
+        SetSingleSelection(item.sourcePath);
+    }
+    g_contextItemPaths = ResolveDragSourcePaths(item);
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING, ItemLaunchCommand, L"Launch");
+    AppendMenuW(menu, MF_STRING, ItemOpenLocationCommand, L"Open file location");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, ItemRemoveCommand, g_contextItemPaths.size() > 1 ? L"Remove selected from layout" : L"Remove from layout");
+    ClientToScreen(g_hwnd, &point);
+    SetForegroundWindow(g_hwnd);
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, g_hwnd, nullptr);
+    DestroyMenu(menu);
+}
+
+void ShowRegionContextMenu(POINT point, const std::wstring& regionId)
+{
+    g_contextRegionId = regionId;
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    const UINT deleteFlags = CompareStringOrdinal(regionId.c_str(), -1, L"uncategorized", -1, TRUE) == CSTR_EQUAL
+        ? MF_STRING | MF_GRAYED
+        : MF_STRING;
+    AppendMenuW(menu, deleteFlags, RegionDeleteCommand, L"Delete region");
+    ClientToScreen(g_hwnd, &point);
+    SetForegroundWindow(g_hwnd);
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, g_hwnd, nullptr);
+    DestroyMenu(menu);
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
@@ -1187,6 +1550,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (LOWORD(wParam) == TrayOpenCommand) ShowNativeUi();
         if (LOWORD(wParam) == TrayRefreshCommand) { ReloadData(); RebuildFiltered(); InvalidateRect(hwnd, nullptr, TRUE); }
         if (LOWORD(wParam) == TrayExitCommand) DestroyWindow(hwnd);
+        if (LOWORD(wParam) == ItemLaunchCommand && !g_contextItemPaths.empty()) LaunchItemBySourcePath(g_contextItemPaths.front());
+        if (LOWORD(wParam) == ItemOpenLocationCommand && !g_contextItemPaths.empty()) OpenItemLocation(g_contextItemPaths.front());
+        if (LOWORD(wParam) == ItemRemoveCommand && !g_contextItemPaths.empty())
+        {
+            RemoveItemsFromLayout(g_contextItemPaths);
+            SortItems();
+            SaveLayout();
+            RebuildFiltered();
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        if (LOWORD(wParam) == RegionDeleteCommand && !g_contextRegionId.empty())
+        {
+            DeleteRegionAndMoveItems(g_contextRegionId);
+            SortItems();
+            SaveLayout();
+            RebuildFiltered();
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
         return 0;
     case WmTray:
         if (lParam == WM_LBUTTONUP) ToggleNativeUi();
@@ -1203,11 +1584,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_LBUTTONDOWN:
     {
         POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ResetDragState();
         for (const auto& hit : g_hits)
         {
             if (PtInRect(&hit.bounds, point))
             {
                 g_selectedFilteredIndex = hit.itemIndex;
+                if (hit.itemIndex >= 0 && hit.itemIndex < static_cast<int>(g_filtered.size()))
+                {
+                    const auto& item = g_items[g_filtered[hit.itemIndex]];
+                    if (wParam & MK_CONTROL)
+                    {
+                        ToggleSelection(item.sourcePath);
+                    }
+                    else if (!IsSelected(item.sourcePath))
+                    {
+                        SetSingleSelection(item.sourcePath);
+                    }
+                }
                 g_mouseDown = g_searchText.empty();
                 g_dragFilteredIndex = hit.itemIndex;
                 g_dragStart = point;
@@ -1216,7 +1610,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 return 0;
             }
         }
-        ResetDragState();
+        for (const auto& regionHit : g_regionHits)
+        {
+            if (PtInRect(&regionHit.headerBounds, point))
+            {
+                g_mouseDown = g_searchText.empty();
+                g_pendingRegionDragId = regionHit.regionId;
+                g_dragStart = point;
+                g_dragCurrent = point;
+                return 0;
+            }
+        }
+        g_selectedSourcePaths.clear();
+        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
     case WM_MOUSEMOVE:
@@ -1224,7 +1630,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         if (g_mouseDown && !g_dragActive && HasExceededDragThreshold(point))
         {
-            BeginDrag(hwnd, point);
+            if (g_dragFilteredIndex >= 0)
+            {
+                BeginDrag(hwnd, point);
+            }
+            else if (!g_pendingRegionDragId.empty())
+            {
+                BeginRegionDrag(hwnd, point);
+            }
         }
         if (g_dragActive)
         {
@@ -1236,11 +1649,40 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_LBUTTONUP:
         if (g_dragActive)
         {
-            CompleteDrag(hwnd);
+            if (g_dragMode == DragMode::Region)
+            {
+                CompleteRegionDrag(hwnd);
+            }
+            else
+            {
+                CompleteDrag(hwnd);
+            }
             return 0;
         }
         ResetDragState();
         return 0;
+    case WM_RBUTTONUP:
+    {
+        POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        for (const auto& hit : g_hits)
+        {
+            if (PtInRect(&hit.bounds, point))
+            {
+                ShowItemContextMenu(point, hit.itemIndex);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+        }
+        for (const auto& regionHit : g_regionHits)
+        {
+            if (PtInRect(&regionHit.headerBounds, point))
+            {
+                ShowRegionContextMenu(point, regionHit.regionId);
+                return 0;
+            }
+        }
+        return 0;
+    }
     case WM_LBUTTONDBLCLK:
     {
         POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };

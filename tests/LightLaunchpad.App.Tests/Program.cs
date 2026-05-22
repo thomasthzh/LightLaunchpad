@@ -95,6 +95,12 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_SupportsDragSortingAndLayoutPersistence),
                 HostedAppModeSourceTests.NativeUiSource_SupportsDragSortingAndLayoutPersistence),
             (
+                nameof(HostedAppModeSourceTests.NativeUiSource_SupportsMultiSelectDragAndRegionReorder),
+                HostedAppModeSourceTests.NativeUiSource_SupportsMultiSelectDragAndRegionReorder),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_OffersBasicContextMenus),
+                HostedAppModeSourceTests.NativeUiSource_OffersBasicContextMenus),
+            (
                 nameof(HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
                 HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
             (

@@ -44,6 +44,7 @@
 - Hardened `tools/package-release.ps1` so failed `dotnet publish` or native build steps abort instead of producing a partial package.
 - Added NativeUi M2 icon and drag work: shell image-list icon loading now prefers `SHIL_JUMBO` / `SHIL_EXTRALARGE`, and native app drag sorting now writes `layout.json` atomically.
 - Switched NativeUi to full static `-Os` / section-gc release builds and kept the tray icon on a light system icon; M2 probe measured approximately 8.87 MB Working Set / 1.55 MB Private Memory while idle.
+- Added NativeUi M3 interaction parity: Ctrl-click multi-select, selected-app group drag, region header drag sorting, and basic item/region context menus.
 
 ## Changed Files
 
@@ -69,10 +70,11 @@
 - `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
 - `tools/build-native-ui.ps1`
 - `docs/superpowers/plans/2026-05-22-native-ui-m2-icons-drag.md`
+- `docs/superpowers/plans/2026-05-22-native-ui-m3-interaction-parity.md`
 
 ## Next Step
 
-Continue with native region editing, multi-select drag parity, and Direct2D/DirectWrite renderer migration.
+Continue with native rename/create-region dialogs, batch region editing, and Direct2D/DirectWrite renderer migration.
 
 ## Risks
 

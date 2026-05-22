@@ -151,6 +151,37 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("WriteFileUtf8", source);
     }
 
+    public static void NativeUiSource_SupportsMultiSelectDragAndRegionReorder()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("g_selectedSourcePaths", source);
+        TestAssert.Contains("ToggleSelection", source);
+        TestAssert.Contains("SetSingleSelection", source);
+        TestAssert.Contains("ResolveDragSourcePaths", source);
+        TestAssert.Contains("MoveItemsToTarget", source);
+        TestAssert.Contains("DragMode::Items", source);
+        TestAssert.Contains("DragMode::Region", source);
+        TestAssert.Contains("BeginRegionDrag", source);
+        TestAssert.Contains("CompleteRegionDrag", source);
+        TestAssert.Contains("MoveRegionToTarget", source);
+    }
+
+    public static void NativeUiSource_OffersBasicContextMenus()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("ShowItemContextMenu", source);
+        TestAssert.Contains("ShowRegionContextMenu", source);
+        TestAssert.Contains("ItemLaunchCommand", source);
+        TestAssert.Contains("ItemOpenLocationCommand", source);
+        TestAssert.Contains("ItemRemoveCommand", source);
+        TestAssert.Contains("RegionDeleteCommand", source);
+        TestAssert.Contains("RemoveItemsFromLayout", source);
+        TestAssert.Contains("DeleteRegionAndMoveItems", source);
+        TestAssert.Contains("ShellExecuteW(g_hwnd, L\"open\", L\"explorer.exe\"", source);
+    }
+
     public static void NativeUiBuildScript_ProducesNativeUiExecutable()
     {
         var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
