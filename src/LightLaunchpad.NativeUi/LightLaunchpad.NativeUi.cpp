@@ -59,22 +59,25 @@ enum class SettingsControlId : int
 {
     LaunchpadFolder = 3001,
     Hotkey = 3002,
-    DisplayMode = 3003,
-    Language = 3004,
-    SpotlightWidth = 3005,
-    SpotlightHeight = 3006,
-    AppSpacing = 3007,
-    WheelSensitivity = 3008,
-    StartWithWindows = 3009,
-    Save = 3010,
-    Cancel = 3011,
+    IconSize = 3003,
+    DisplayMode = 3004,
+    Language = 3005,
+    SpotlightWidth = 3006,
+    SpotlightHeight = 3007,
+    AppSpacing = 3008,
+    WheelSensitivity = 3009,
+    StartWithWindows = 3010,
+    Save = 3011,
+    Apply = 3012,
+    Cancel = 3013,
     FolderLabel = 3020,
     HotkeyLabel = 3021,
-    DisplayModeLabel = 3022,
-    LanguageLabel = 3023,
-    SpotlightSizeLabel = 3024,
-    AppSpacingLabel = 3025,
-    WheelSensitivityLabel = 3026
+    IconSizeLabel = 3022,
+    DisplayModeLabel = 3023,
+    LanguageLabel = 3024,
+    SpotlightSizeLabel = 3025,
+    AppSpacingLabel = 3026,
+    WheelSensitivityLabel = 3027
 };
 
 int ControlId(SettingsControlId id)
@@ -272,6 +275,11 @@ RECT SearchRect(const RECT& client)
 RECT SearchTextRect(const RECT& searchRect)
 {
     return { searchRect.left + 18, searchRect.top + 10, searchRect.right - 18, searchRect.bottom };
+}
+
+std::wstring SearchDisplayText()
+{
+    return g_searchText;
 }
 
 int TileSize()
@@ -639,7 +647,7 @@ void LoadSettings()
     const auto language = FindJsonStringValue(json, "Language");
     if (!language.empty()) g_settings.language = language;
     const auto iconSize = FindJsonStringValue(json, "IconSize");
-    if (ContainsIgnoreCase(iconSize, L"Large")) g_settings.iconSize = 64;
+    if (ContainsIgnoreCase(iconSize, L"Large")) g_settings.iconSize = 72;
     if (ContainsIgnoreCase(iconSize, L"Small")) g_settings.iconSize = 42;
     g_settings.spotlightWidth = NormalizeSpotlightWidth(FindJsonNumberValue(json, "SpotlightWidth", g_settings.spotlightWidth));
     g_settings.spotlightHeight = NormalizeSpotlightHeight(FindJsonNumberValue(json, "SpotlightHeight", g_settings.spotlightHeight));
@@ -1871,7 +1879,7 @@ void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client)
     DrawTextDirect(
         target,
         g_searchTextFormat,
-        g_searchText.empty() ? L"Search" : g_searchText,
+        SearchDisplayText(),
         SearchTextRect(searchRect),
         g_searchText.empty() ? RGB(110, 120, 132) : RGB(21, 26, 34),
         DWRITE_TEXT_ALIGNMENT_LEADING,
@@ -1885,7 +1893,7 @@ void DrawSearchSurface(HDC dc, const RECT& client)
     const RECT searchRect = SearchRect(client);
     DrawRoundedRect(dc, searchRect, RGB(242, 247, 250), RGB(92, 110, 130), 22);
     HGDIOBJ oldFont = SelectObject(dc, searchFont);
-    DrawTextClipped(dc, g_searchText.empty() ? L"Search" : g_searchText, SearchTextRect(searchRect), DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_searchText.empty() ? RGB(110, 120, 132) : RGB(21, 26, 34));
+    DrawTextClipped(dc, SearchDisplayText(), SearchTextRect(searchRect), DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_searchText.empty() ? RGB(110, 120, 132) : RGB(21, 26, 34));
     SelectObject(dc, oldFont);
     DeleteObject(searchFont);
 }
@@ -2406,6 +2414,31 @@ void ResetLanguageCombo(HWND hwnd)
     SendMessageW(combo, CB_SETCURSEL, current == 1 ? 1 : 0, 0);
 }
 
+void ResetIconSizeCombo(HWND hwnd, const std::wstring& language)
+{
+    HWND combo = GetDlgItem(hwnd, ControlId(SettingsControlId::IconSize));
+    const int current = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
+    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(IsChineseLanguage(language) ? L"小" : L"Small"));
+    SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(IsChineseLanguage(language) ? L"中" : L"Medium"));
+    SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(IsChineseLanguage(language) ? L"大" : L"Large"));
+    SendMessageW(combo, CB_SETCURSEL, current >= 0 ? current : 1, 0);
+}
+
+void SetIconSizeSelection(HWND hwnd)
+{
+    const int index = g_settings.iconSize <= 44
+        ? 0
+        : (g_settings.iconSize >= 64 ? 2 : 1);
+    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::IconSize), CB_SETCURSEL, index, 0);
+}
+
+void ReadIconSizeFromSettingsWindow(HWND hwnd)
+{
+    const int index = static_cast<int>(SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::IconSize), CB_GETCURSEL, 0, 0));
+    g_settings.iconSize = index == 0 ? 42 : (index == 2 ? 72 : 56);
+}
+
 std::wstring SettingsWindowLanguage(HWND hwnd)
 {
     HWND combo = GetDlgItem(hwnd, ControlId(SettingsControlId::Language));
@@ -2424,6 +2457,7 @@ void ApplyLanguageToSettingsWindow(HWND hwnd)
     SetWindowTextW(hwnd, IsChineseLanguage(language) ? L"LightLaunchpad 设置" : L"LightLaunchpad Settings");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::FolderLabel), IsChineseLanguage(language) ? L"启动台文件夹" : L"Launchpad folder");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::HotkeyLabel), IsChineseLanguage(language) ? L"快捷键" : L"Hotkey");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::IconSizeLabel), IsChineseLanguage(language) ? L"APP 大小" : L"App size");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::DisplayModeLabel), IsChineseLanguage(language) ? L"打开方式" : L"Open mode");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::LanguageLabel), IsChineseLanguage(language) ? L"语言" : L"Language");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::SpotlightSizeLabel), IsChineseLanguage(language) ? L"聚焦窗口大小" : L"Spotlight size");
@@ -2431,7 +2465,9 @@ void ApplyLanguageToSettingsWindow(HWND hwnd)
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::WheelSensitivityLabel), IsChineseLanguage(language) ? L"滚轮灵敏度" : L"Wheel sensitivity");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::StartWithWindows), IsChineseLanguage(language) ? L"随 Windows 启动" : L"Start with Windows");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Save), IsChineseLanguage(language) ? L"保存" : L"Save");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Apply), IsChineseLanguage(language) ? L"应用" : L"Apply");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Cancel), IsChineseLanguage(language) ? L"取消" : L"Cancel");
+    ResetIconSizeCombo(hwnd, language);
     ResetDisplayModeCombo(hwnd, language);
 }
 
@@ -2447,6 +2483,7 @@ void PopulateSettingsWindow(HWND hwnd)
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::Language), CB_SETCURSEL, IsChineseLanguage(g_settings.language) ? 1 : 0, 0);
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::StartWithWindows), BM_SETCHECK, g_settings.startWithWindows ? BST_CHECKED : BST_UNCHECKED, 0);
     ApplyLanguageToSettingsWindow(hwnd);
+    SetIconSizeSelection(hwnd);
 }
 
 void ReadSettingsWindow(HWND hwnd)
@@ -2464,6 +2501,7 @@ void ReadSettingsWindow(HWND hwnd)
     const int languageIndex = static_cast<int>(SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::Language), CB_GETCURSEL, 0, 0));
     g_settings.displayMode = displayIndex == 1 ? L"Spotlight" : L"Launchpad";
     g_settings.language = languageIndex == 1 ? L"Chinese" : L"English";
+    ReadIconSizeFromSettingsWindow(hwnd);
     g_settings.spotlightWidth = NormalizeSpotlightWidth(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::SpotlightWidth)).c_str()));
     g_settings.spotlightHeight = NormalizeSpotlightHeight(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::SpotlightHeight)).c_str()));
     g_settings.appSpacing = NormalizeAppSpacing(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::AppSpacing)).c_str()));
@@ -2619,6 +2657,19 @@ void ImportStartMenuApps()
     if (imported > 0) RefreshAfterImport();
 }
 
+void ApplySettingsFromWindow(HWND hwnd)
+{
+    ReadSettingsWindow(hwnd);
+    SaveSettings();
+    SetStartWithWindows(g_settings.startWithWindows);
+    RegisterCurrentHotkey();
+    ReloadData();
+    RebuildFiltered();
+    PositionWindow();
+    PopulateSettingsWindow(hwnd);
+    InvalidateRect(g_hwnd, nullptr, TRUE);
+}
+
 LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
@@ -2634,6 +2685,9 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         y += 38;
         CreateSettingsLabel(hwnd, SettingsControlId::HotkeyLabel, labelX, y);
         CreateSettingsEdit(hwnd, SettingsControlId::Hotkey, inputX, y, inputW);
+        y += 38;
+        CreateSettingsLabel(hwnd, SettingsControlId::IconSizeLabel, labelX, y);
+        CreateSettingsCombo(hwnd, SettingsControlId::IconSize, inputX, y, inputW);
         y += 38;
         CreateSettingsLabel(hwnd, SettingsControlId::DisplayModeLabel, labelX, y);
         CreateSettingsCombo(hwnd, SettingsControlId::DisplayMode, inputX, y, inputW);
@@ -2655,7 +2709,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         y += 38;
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, inputX, y, inputW, 24, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::StartWithWindows)), g_instance, nullptr));
         y += 48;
-        ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, inputX + 146, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Save)), g_instance, nullptr));
+        ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, inputX + 48, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Save)), g_instance, nullptr));
+        ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, inputX + 146, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Apply)), g_instance, nullptr));
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, inputX + 244, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Cancel)), g_instance, nullptr));
         PopulateSettingsWindow(hwnd);
         return 0;
@@ -2668,15 +2723,13 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         }
         if (LOWORD(wParam) == ControlId(SettingsControlId::Save))
         {
-            ReadSettingsWindow(hwnd);
-            SaveSettings();
-            SetStartWithWindows(g_settings.startWithWindows);
-            RegisterCurrentHotkey();
-            ReloadData();
-            RebuildFiltered();
-            PositionWindow();
-            InvalidateRect(g_hwnd, nullptr, TRUE);
+            ApplySettingsFromWindow(hwnd);
             DestroyWindow(hwnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == ControlId(SettingsControlId::Apply))
+        {
+            ApplySettingsFromWindow(hwnd);
             return 0;
         }
         if (LOWORD(wParam) == ControlId(SettingsControlId::Cancel))
@@ -2726,7 +2779,7 @@ void ShowSettingsWindow()
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         560,
-        380,
+        500,
         g_hwnd,
         nullptr,
         g_instance,

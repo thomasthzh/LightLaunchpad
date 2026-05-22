@@ -4,7 +4,7 @@
 
 - Branch: `main`
 - Workspace: `C:\Users\thoma\Desktop\启动台`
-- Active task: N5 - Native UI Spotlight UX Polish
+- Active task: N6 - Native UI Settings And Search Cleanup
 
 ## Completed
 
@@ -47,6 +47,7 @@
 - Added NativeUi M3 interaction parity: Ctrl-click multi-select, selected-app group drag, region header drag sorting, and basic item/region context menus.
 - Added NativeUi M4 editing/settings parity: native settings window, language/display/spotlight/app-spacing/wheel-sensitivity persistence, native region and item rename/create/delete flows, selected-region batch rename/delete, native import files and Start Menu import, Spotlight deactivation hide, and Direct2D/DirectWrite drawing with GDI fallback.
 - Added NativeUi N5 UX polish: true rounded Spotlight window region, content clipping below the search bar, exact-sized shortcut/target icon extraction before shell fallback, grid arrow-key selection, stronger app-spacing/wheel-sensitivity mapping, and themed Segoe UI settings controls.
+- Added NativeUi N6 settings/search cleanup: removed the visible empty-search placeholder, added APP size selection to native settings, added an Apply button, and enlarged the settings window so the action buttons remain visible.
 
 ## Changed Files
 
@@ -76,7 +77,7 @@
 
 ## Next Step
 
-Verify N5 package memory and continue with any hands-on polish found in the native UI.
+Verify N6 package memory and continue with any hands-on polish found in the native UI.
 
 ## Risks
 

@@ -308,6 +308,31 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("-luxtheme", script);
     }
 
+    public static void NativeUiSource_RemovesSearchPlaceholderAndSupportsApplySettings()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("SearchDisplayText", source);
+        TestAssert.Contains("SettingsControlId::Apply", source);
+        TestAssert.Contains("ApplySettingsFromWindow", source);
+        TestAssert.Contains("SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Apply)", source);
+        TestAssert.Contains("L\"应用\" : L\"Apply\"", source);
+        TestAssert.DoesNotContain("? L\"Search\" : g_searchText", source);
+    }
+
+    public static void NativeUiSource_ExposesAppSizeSetting()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("SettingsControlId::IconSize", source);
+        TestAssert.Contains("SettingsControlId::IconSizeLabel", source);
+        TestAssert.Contains("ResetIconSizeCombo", source);
+        TestAssert.Contains("ReadIconSizeFromSettingsWindow", source);
+        TestAssert.Contains("SetIconSizeSelection", source);
+        TestAssert.Contains("APP 大小", source);
+        TestAssert.Contains("IconSizeName", source);
+    }
+
     public static void NativeUiBuildScript_ProducesNativeUiExecutable()
     {
         var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));

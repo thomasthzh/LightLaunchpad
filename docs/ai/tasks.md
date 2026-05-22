@@ -349,3 +349,31 @@ Completion notes:
 - Arrow keys now move selection by grid direction: left/right by one tile and up/down by one visible row.
 - APP spacing now maps to a visibly stronger tile gap, and wheel sensitivity maps through a dedicated scroll step.
 - Settings and text input controls now use a shared Segoe UI font and Explorer theme styling.
+
+## N6 - Native UI Settings And Search Cleanup
+
+Status: done
+
+Dependency: N5
+
+Purpose: Fix follow-up UX issues in the native settings and search surface.
+
+Likely files:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs`
+- `tests/LightLaunchpad.App.Tests/Program.cs`
+- `docs/ai/progress.md`
+
+Verification:
+
+- App source tests cover no visible Search placeholder, native Apply button, and APP size setting.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-n6-probe`
+- `.\tools\package-release.ps1`
+
+Completion notes:
+
+- Empty native search box now renders without the visible `Search` placeholder text.
+- Native settings now exposes APP size with small, medium, and large options.
+- Native settings now has Save, Apply, and Cancel buttons; Apply persists settings without closing.
+- Native settings window height was increased so the bottom action buttons remain visible.

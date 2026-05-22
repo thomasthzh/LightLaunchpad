@@ -125,6 +125,12 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_MapsSpotlightTuningAndImprovesSettingsRendering),
                 HostedAppModeSourceTests.NativeUiSource_MapsSpotlightTuningAndImprovesSettingsRendering),
             (
+                nameof(HostedAppModeSourceTests.NativeUiSource_RemovesSearchPlaceholderAndSupportsApplySettings),
+                HostedAppModeSourceTests.NativeUiSource_RemovesSearchPlaceholderAndSupportsApplySettings),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_ExposesAppSizeSetting),
+                HostedAppModeSourceTests.NativeUiSource_ExposesAppSizeSetting),
+            (
                 nameof(HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
                 HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
             (
