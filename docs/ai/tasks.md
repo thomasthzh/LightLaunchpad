@@ -288,3 +288,33 @@ Completion notes:
 - NativeUi supports Ctrl-click multi-select and drags selected apps as a group.
 - NativeUi supports dragging region headers to reorder regions and saves the new region order to `layout.json`.
 - NativeUi item context menu supports launch, open file location, and remove from layout; region context menu supports delete region, moving its items to Uncategorized.
+
+## N4 - Native UI Full Editing And Settings Parity
+
+Status: done
+
+Dependency: N3
+
+Purpose: Continue removing WPF dependency from day-to-day use by migrating settings, create/rename/import, batch region editing, spotlight behavior, and renderer quality into NativeUi.
+
+Likely files:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
+- `tools/build-native-ui.ps1`
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs`
+- `tests/LightLaunchpad.App.Tests/Program.cs`
+- `docs/ai/progress.md`
+
+Verification:
+
+- App source tests cover native settings, region/item editing, import commands, spotlight tuning, and Direct2D/DirectWrite renderer fallback.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-m4-probe`
+- `.\tools\package-release.ps1`
+
+Completion notes:
+
+- NativeUi now has a native settings window that saves launchpad folder, hotkey, language, display mode, spotlight size, app spacing, wheel sensitivity, and Windows startup.
+- NativeUi now supports create region, rename item, rename region, rename selected regions, delete selected regions, select all, clear selection, and workspace context menus.
+- NativeUi now supports native launchable-file import and Start Menu import without restoring VUI import.
+- NativeUi now hides Spotlight mode on deactivation and uses configured app spacing and wheel sensitivity.
+- NativeUi now has a Direct2D/DirectWrite drawing path with GDI fallback.

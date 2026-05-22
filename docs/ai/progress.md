@@ -4,7 +4,7 @@
 
 - Branch: `main`
 - Workspace: `C:\Users\thoma\Desktop\启动台`
-- Active task: N1 - Native UI M1
+- Active task: N4 - Native UI Full Editing And Settings Parity
 
 ## Completed
 
@@ -45,6 +45,7 @@
 - Added NativeUi M2 icon and drag work: shell image-list icon loading now prefers `SHIL_JUMBO` / `SHIL_EXTRALARGE`, and native app drag sorting now writes `layout.json` atomically.
 - Switched NativeUi to full static `-Os` / section-gc release builds and kept the tray icon on a light system icon; M2 probe measured approximately 8.87 MB Working Set / 1.55 MB Private Memory while idle.
 - Added NativeUi M3 interaction parity: Ctrl-click multi-select, selected-app group drag, region header drag sorting, and basic item/region context menus.
+- Added NativeUi M4 editing/settings parity: native settings window, language/display/spotlight/app-spacing/wheel-sensitivity persistence, native region and item rename/create/delete flows, selected-region batch rename/delete, native import files and Start Menu import, Spotlight deactivation hide, and Direct2D/DirectWrite drawing with GDI fallback.
 
 ## Changed Files
 
@@ -74,7 +75,7 @@
 
 ## Next Step
 
-Continue with native rename/create-region dialogs, batch region editing, and Direct2D/DirectWrite renderer migration.
+Verify M4 package memory and continue with any manual UX polish found during hands-on NativeUi use.
 
 ## Risks
 

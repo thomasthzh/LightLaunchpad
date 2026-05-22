@@ -101,6 +101,21 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_OffersBasicContextMenus),
                 HostedAppModeSourceTests.NativeUiSource_OffersBasicContextMenus),
             (
+                nameof(HostedAppModeSourceTests.NativeUiSource_ProvidesNativeSettingsWindowAndSavesSettings),
+                HostedAppModeSourceTests.NativeUiSource_ProvidesNativeSettingsWindowAndSavesSettings),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_SupportsNativeRegionAndItemEditing),
+                HostedAppModeSourceTests.NativeUiSource_SupportsNativeRegionAndItemEditing),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_AppliesSpotlightAndLayoutTuning),
+                HostedAppModeSourceTests.NativeUiSource_AppliesSpotlightAndLayoutTuning),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_SupportsNativeImportWithoutVuiImport),
+                HostedAppModeSourceTests.NativeUiSource_SupportsNativeImportWithoutVuiImport),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_HasDirect2DDirectWriteRendererWithGdiFallback),
+                HostedAppModeSourceTests.NativeUiSource_HasDirect2DDirectWriteRendererWithGdiFallback),
+            (
                 nameof(HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
                 HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
             (

@@ -30,6 +30,8 @@ try {
     & $gpp `
         src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp `
         -std=c++17 `
+        -finput-charset=UTF-8 `
+        -fexec-charset=UTF-8 `
         -municode `
         -mwindows `
         -static `
@@ -43,8 +45,12 @@ try {
         -lshell32 `
         -lshlwapi `
         -lcomctl32 `
+        -lcomdlg32 `
         -luser32 `
         -lgdi32 `
+        -ld2d1 `
+        -ldwrite `
+        -ladvapi32 `
         -luuid `
         -o $temporaryExe
     if ($LASTEXITCODE -ne 0) {

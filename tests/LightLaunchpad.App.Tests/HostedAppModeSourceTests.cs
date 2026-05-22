@@ -182,6 +182,91 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("ShellExecuteW(g_hwnd, L\"open\", L\"explorer.exe\"", source);
     }
 
+    public static void NativeUiSource_ProvidesNativeSettingsWindowAndSavesSettings()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("TraySettingsCommand", source);
+        TestAssert.Contains("ShowSettingsWindow", source);
+        TestAssert.Contains("SettingsWndProc", source);
+        TestAssert.Contains("SaveSettings", source);
+        TestAssert.Contains("SettingsControlId::DisplayMode", source);
+        TestAssert.Contains("SettingsControlId::Language", source);
+        TestAssert.Contains("SettingsControlId::SpotlightWidth", source);
+        TestAssert.Contains("SettingsControlId::SpotlightHeight", source);
+        TestAssert.Contains("SettingsControlId::AppSpacing", source);
+        TestAssert.Contains("SettingsControlId::WheelSensitivity", source);
+        TestAssert.Contains("SettingsControlId::StartWithWindows", source);
+        TestAssert.Contains("RegisterCurrentHotkey", source);
+        TestAssert.Contains("LightLaunchpad Settings", source);
+        TestAssert.Contains("LightLaunchpad 设置", source);
+    }
+
+    public static void NativeUiSource_SupportsNativeRegionAndItemEditing()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("WorkspaceCreateRegionCommand", source);
+        TestAssert.Contains("ItemRenameCommand", source);
+        TestAssert.Contains("RegionRenameCommand", source);
+        TestAssert.Contains("RegionRenameSelectedCommand", source);
+        TestAssert.Contains("RegionDeleteSelectedCommand", source);
+        TestAssert.Contains("g_selectedRegionIds", source);
+        TestAssert.Contains("ShowWorkspaceContextMenu", source);
+        TestAssert.Contains("CreateRegion", source);
+        TestAssert.Contains("RenameItem", source);
+        TestAssert.Contains("RenameRegion", source);
+        TestAssert.Contains("RenameSelectedRegions", source);
+        TestAssert.Contains("DeleteSelectedRegions", source);
+        TestAssert.Contains("ShowTextInputDialog", source);
+        TestAssert.Contains("ToggleRegionSelection", source);
+    }
+
+    public static void NativeUiSource_AppliesSpotlightAndLayoutTuning()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("IsSpotlightMode", source);
+        TestAssert.Contains("WM_ACTIVATE", source);
+        TestAssert.Contains("HideNativeUi", source);
+        TestAssert.Contains("AppSpacing", source);
+        TestAssert.Contains("g_settings.appSpacing", source);
+        TestAssert.Contains("NormalizeAppSpacing", source);
+        TestAssert.Contains("NormalizeWheelSensitivity", source);
+        TestAssert.Contains("ApplyLanguageToSettingsWindow", source);
+        TestAssert.DoesNotContain("MouseSensitivity", source);
+    }
+
+    public static void NativeUiSource_SupportsNativeImportWithoutVuiImport()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("WorkspaceImportFilesCommand", source);
+        TestAssert.Contains("WorkspaceImportStartMenuCommand", source);
+        TestAssert.Contains("ImportLaunchableFiles", source);
+        TestAssert.Contains("ImportStartMenuApps", source);
+        TestAssert.Contains("GetOpenFileNameW", source);
+        TestAssert.Contains("CopyLaunchableIntoLaunchpad", source);
+        TestAssert.Contains("PROGRAMDATA", source);
+        TestAssert.Contains("Microsoft\\\\Windows\\\\Start Menu\\\\Programs", source);
+        TestAssert.DoesNotContain(".vui", source);
+    }
+
+    public static void NativeUiSource_HasDirect2DDirectWriteRendererWithGdiFallback()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
+
+        TestAssert.Contains("ID2D1DCRenderTarget", source);
+        TestAssert.Contains("IDWriteFactory", source);
+        TestAssert.Contains("PaintContentDirect2D", source);
+        TestAssert.Contains("InitializeDirectRenderer", source);
+        TestAssert.Contains("DestroyDirectRenderer", source);
+        TestAssert.Contains("PaintContent(memoryDc, client)", source);
+        TestAssert.Contains("-ld2d1", script);
+        TestAssert.Contains("-ldwrite", script);
+    }
+
     public static void NativeUiBuildScript_ProducesNativeUiExecutable()
     {
         var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
