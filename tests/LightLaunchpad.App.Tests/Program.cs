@@ -116,6 +116,15 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_HasDirect2DDirectWriteRendererWithGdiFallback),
                 HostedAppModeSourceTests.NativeUiSource_HasDirect2DDirectWriteRendererWithGdiFallback),
             (
+                nameof(HostedAppModeSourceTests.NativeUiSource_RoundsSpotlightAndClipsScrollableContentBelowSearch),
+                HostedAppModeSourceTests.NativeUiSource_RoundsSpotlightAndClipsScrollableContentBelowSearch),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_UsesExactSizedIconsAndGridKeyboardNavigation),
+                HostedAppModeSourceTests.NativeUiSource_UsesExactSizedIconsAndGridKeyboardNavigation),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_MapsSpotlightTuningAndImprovesSettingsRendering),
+                HostedAppModeSourceTests.NativeUiSource_MapsSpotlightTuningAndImprovesSettingsRendering),
+            (
                 nameof(HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
                 HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
             (

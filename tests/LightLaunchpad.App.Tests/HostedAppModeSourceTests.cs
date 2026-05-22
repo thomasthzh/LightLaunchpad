@@ -267,6 +267,47 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("-ldwrite", script);
     }
 
+    public static void NativeUiSource_RoundsSpotlightAndClipsScrollableContentBelowSearch()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("ApplySpotlightWindowRegion", source);
+        TestAssert.Contains("CreateRoundRectRgn", source);
+        TestAssert.Contains("SetWindowRgn", source);
+        TestAssert.Contains("ContentClipTop", source);
+        TestAssert.Contains("PushAxisAlignedClip", source);
+        TestAssert.Contains("SelectClipRgn", source);
+        TestAssert.Contains("DrawSearchSurface", source);
+    }
+
+    public static void NativeUiSource_UsesExactSizedIconsAndGridKeyboardNavigation()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("ResolveShortcutIconPath", source);
+        TestAssert.Contains("LoadExactSizedIcon", source);
+        TestAssert.Contains("PrivateExtractIconsW", source);
+        TestAssert.Contains("MoveSelectionHorizontal", source);
+        TestAssert.Contains("MoveSelectionVertical", source);
+        TestAssert.Contains("ScrollSelectedIntoView", source);
+        TestAssert.Contains("VK_LEFT", source);
+        TestAssert.Contains("VK_RIGHT", source);
+    }
+
+    public static void NativeUiSource_MapsSpotlightTuningAndImprovesSettingsRendering()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
+
+        TestAssert.Contains("TileGap", source);
+        TestAssert.Contains("WheelScrollStep", source);
+        TestAssert.Contains("ApplyControlFont", source);
+        TestAssert.Contains("SetWindowTheme", source);
+        TestAssert.Contains("g_uiFont", source);
+        TestAssert.Contains("-lole32", script);
+        TestAssert.Contains("-luxtheme", script);
+    }
+
     public static void NativeUiBuildScript_ProducesNativeUiExecutable()
     {
         var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));

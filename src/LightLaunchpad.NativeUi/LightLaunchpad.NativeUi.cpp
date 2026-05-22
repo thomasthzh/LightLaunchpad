@@ -5,8 +5,11 @@
 #include <commdlg.h>
 #include <d2d1.h>
 #include <dwrite.h>
+#include <objbase.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <shlwapi.h>
+#include <uxtheme.h>
 
 #include <algorithm>
 #include <cmath>
@@ -179,12 +182,16 @@ IDWriteFactory* g_dwriteFactory = nullptr;
 IDWriteTextFormat* g_searchTextFormat = nullptr;
 IDWriteTextFormat* g_tileTextFormat = nullptr;
 IDWriteTextFormat* g_headerTextFormat = nullptr;
+HFONT g_uiFont = nullptr;
 
 bool ShowTextInputDialog(const std::wstring& title, const std::wstring& label, const std::wstring& initialValue, std::wstring& result);
 void RegisterCurrentHotkey();
 void ShowSettingsWindow();
 void RebuildFiltered();
 void DestroyDirectRenderer();
+void DrawSearchSurface(HDC dc, const RECT& client);
+void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client);
+int CalculateColumnCount(const RECT& client);
 
 template <typename T>
 void SafeRelease(T*& value)
@@ -240,6 +247,46 @@ std::wstring FormatDouble(double value)
     while (text.find(L'.') != std::wstring::npos && !text.empty() && text.back() == L'0') text.pop_back();
     if (!text.empty() && text.back() == L'.') text.pop_back();
     return text;
+}
+
+int SearchTop()
+{
+    return 34;
+}
+
+int SearchBottom()
+{
+    return 84;
+}
+
+int ContentClipTop()
+{
+    return SearchBottom() + 16;
+}
+
+RECT SearchRect(const RECT& client)
+{
+    return { 48, SearchTop(), client.right - 48, SearchBottom() };
+}
+
+RECT SearchTextRect(const RECT& searchRect)
+{
+    return { searchRect.left + 18, searchRect.top + 10, searchRect.right - 18, searchRect.bottom };
+}
+
+int TileSize()
+{
+    return std::max(112, g_settings.iconSize + 72);
+}
+
+int TileGap()
+{
+    return std::clamp(g_settings.appSpacing * 2, 0, 56);
+}
+
+int WheelScrollStep()
+{
+    return static_cast<int>(std::round(96.0 * g_settings.wheelSensitivity));
 }
 
 bool EndsWithIgnoreCase(const std::wstring& value, const wchar_t* suffix)
@@ -1312,8 +1359,74 @@ HICON LoadShellImageListIcon(const std::wstring& path, int imageListSize)
     return SUCCEEDED(hr) ? icon : nullptr;
 }
 
+bool ResolveShortcutIconPath(const std::wstring& sourcePath, std::wstring& iconPath, int& iconIndex)
+{
+    iconPath = sourcePath;
+    iconIndex = 0;
+    if (!EndsWithIgnoreCase(sourcePath, L".lnk"))
+    {
+        return true;
+    }
+
+    IShellLinkW* link = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, reinterpret_cast<void**>(&link));
+    if (FAILED(hr) || !link) return false;
+
+    IPersistFile* file = nullptr;
+    hr = link->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&file));
+    if (SUCCEEDED(hr) && file)
+    {
+        hr = file->Load(sourcePath.c_str(), STGM_READ);
+        if (SUCCEEDED(hr))
+        {
+            wchar_t resolvedIcon[MAX_PATH] = L"";
+            int resolvedIndex = 0;
+            if (SUCCEEDED(link->GetIconLocation(resolvedIcon, ARRAYSIZE(resolvedIcon), &resolvedIndex)) && resolvedIcon[0] != L'\0')
+            {
+                iconPath = resolvedIcon;
+                iconIndex = resolvedIndex;
+            }
+            else
+            {
+                wchar_t target[MAX_PATH] = L"";
+                if (SUCCEEDED(link->GetPath(target, ARRAYSIZE(target), nullptr, SLGP_UNCPRIORITY)) && target[0] != L'\0')
+                {
+                    iconPath = target;
+                    iconIndex = 0;
+                }
+            }
+        }
+        file->Release();
+    }
+
+    link->Release();
+    return !iconPath.empty();
+}
+
+HICON LoadExactSizedIcon(const std::wstring& sourcePath, int size)
+{
+    std::wstring iconPath;
+    int iconIndex = 0;
+    ResolveShortcutIconPath(sourcePath, iconPath, iconIndex);
+    if (iconPath.empty()) iconPath = sourcePath;
+
+    HICON icon = nullptr;
+    UINT extracted = PrivateExtractIconsW(
+        iconPath.c_str(),
+        iconIndex,
+        size,
+        size,
+        &icon,
+        nullptr,
+        1,
+        0);
+    return extracted > 0 ? icon : nullptr;
+}
+
 void LoadItemIcon(LaunchItem& item)
 {
+    if (item.icon) return;
+    item.icon = LoadExactSizedIcon(item.sourcePath, g_settings.iconSize);
     if (item.icon) return;
     item.icon = LoadShellImageListIcon(item.sourcePath, SHIL_JUMBO);
     if (!item.icon) item.icon = LoadShellImageListIcon(item.sourcePath, SHIL_EXTRALARGE);
@@ -1393,6 +1506,22 @@ bool IsSpotlightMode()
     return ContainsIgnoreCase(g_settings.displayMode, L"Spotlight");
 }
 
+void ApplySpotlightWindowRegion(int width, int height)
+{
+    if (!g_hwnd) return;
+    if (!IsSpotlightMode())
+    {
+        SetWindowRgn(g_hwnd, nullptr, TRUE);
+        return;
+    }
+
+    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 32, 32);
+    if (region)
+    {
+        SetWindowRgn(g_hwnd, region, TRUE);
+    }
+}
+
 void PositionWindow()
 {
     RECT work = {};
@@ -1404,6 +1533,7 @@ void PositionWindow()
         const int workHeight = static_cast<int>(work.bottom - work.top);
         const int width = std::clamp(g_settings.spotlightWidth, 520, workWidth);
         const int height = std::clamp(g_settings.spotlightHeight, 420, workHeight);
+        ApplySpotlightWindowRegion(width, height);
         SetWindowPos(
             g_hwnd,
             HWND_TOPMOST,
@@ -1415,13 +1545,16 @@ void PositionWindow()
     }
     else
     {
+        const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        ApplySpotlightWindowRegion(width, height);
         SetWindowPos(
             g_hwnd,
             HWND_TOPMOST,
             GetSystemMetrics(SM_XVIRTUALSCREEN),
             GetSystemMetrics(SM_YVIRTUALSCREEN),
-            GetSystemMetrics(SM_CXVIRTUALSCREEN),
-            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            width,
+            height,
             SWP_NOACTIVATE);
     }
 }
@@ -1731,6 +1864,32 @@ void DrawTextDirect(
     SafeRelease(brush);
 }
 
+void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client)
+{
+    const RECT searchRect = SearchRect(client);
+    DrawRoundedRectDirect(target, searchRect, RGB(242, 247, 250), RGB(92, 110, 130), 22.0f);
+    DrawTextDirect(
+        target,
+        g_searchTextFormat,
+        g_searchText.empty() ? L"Search" : g_searchText,
+        SearchTextRect(searchRect),
+        g_searchText.empty() ? RGB(110, 120, 132) : RGB(21, 26, 34),
+        DWRITE_TEXT_ALIGNMENT_LEADING,
+        DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+        DWRITE_WORD_WRAPPING_NO_WRAP);
+}
+
+void DrawSearchSurface(HDC dc, const RECT& client)
+{
+    HFONT searchFont = CreateFontW(26, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    const RECT searchRect = SearchRect(client);
+    DrawRoundedRect(dc, searchRect, RGB(242, 247, 250), RGB(92, 110, 130), 22);
+    HGDIOBJ oldFont = SelectObject(dc, searchFont);
+    DrawTextClipped(dc, g_searchText.empty() ? L"Search" : g_searchText, SearchTextRect(searchRect), DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_searchText.empty() ? RGB(110, 120, 132) : RGB(21, 26, 34));
+    SelectObject(dc, oldFont);
+    DeleteObject(searchFont);
+}
+
 struct PendingIconDraw
 {
     HICON icon = nullptr;
@@ -1836,25 +1995,16 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
 
     target->BeginDraw();
     target->Clear(D2DColor(RGB(18, 22, 30)));
+    DrawSearchSurface(target, client);
 
-    RECT searchRect = { 48, 34, client.right - 48, 84 };
-    DrawRoundedRectDirect(target, searchRect, RGB(242, 247, 250), RGB(92, 110, 130), 22.0f);
-    RECT searchTextRect = { searchRect.left + 18, searchRect.top + 10, searchRect.right - 18, searchRect.bottom };
-    DrawTextDirect(
-        target,
-        g_searchTextFormat,
-        g_searchText.empty() ? L"Search" : g_searchText,
-        searchTextRect,
-        g_searchText.empty() ? RGB(110, 120, 132) : RGB(21, 26, 34),
-        DWRITE_TEXT_ALIGNMENT_LEADING,
-        DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-        DWRITE_WORD_WRAPPING_NO_WRAP);
+    const RECT contentClip = { 0, ContentClipTop(), client.right, client.bottom };
+    target->PushAxisAlignedClip(D2DRect(contentClip), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-    const int tileSize = std::max(112, g_settings.iconSize + 72);
-    const int gap = std::clamp(g_settings.appSpacing + 4, 4, 32);
+    const int tileSize = TileSize();
+    const int gap = TileGap();
     const int left = 44;
     const int right = client.right - 44;
-    const int columns = std::max(1, (right - left + gap) / (tileSize + gap));
+    const int columns = CalculateColumnCount(client);
     int column = 0;
     int x = left;
     int y = 114 - g_scrollOffset;
@@ -1897,7 +2047,7 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
             {
                 g_regionHits.back().bounds.bottom = std::max(g_regionHits.back().bounds.bottom, tileRect.bottom + gap);
             }
-            if (tileRect.bottom >= 92 && tileRect.top <= client.bottom)
+            if (tileRect.bottom >= ContentClipTop() && tileRect.top <= client.bottom)
             {
                 const bool selected = filteredIndex == g_selectedFilteredIndex || IsSelected(item.sourcePath);
                 DrawRoundedRectDirect(target, tileRect, selected ? RGB(42, 82, 118) : RGB(28, 35, 48), selected ? RGB(130, 190, 255) : RGB(50, 62, 82), 12.0f);
@@ -1929,15 +2079,23 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
         g_contentHeight = contentBottom + 44;
     }
 
+    target->PopAxisAlignedClip();
+
     const HRESULT drawn = target->EndDraw();
     SafeRelease(target);
     if (FAILED(drawn)) return false;
 
+    int savedDc = SaveDC(dc);
+    HRGN clip = CreateRectRgn(0, ContentClipTop(), client.right, client.bottom);
+    SelectClipRgn(dc, clip);
     for (const auto& icon : pendingIcons)
     {
         DrawIconEx(dc, icon.x, icon.y, icon.icon, icon.size, icon.size, 0, nullptr, DI_NORMAL);
     }
     DrawDragFeedback(dc);
+    SelectClipRgn(dc, nullptr);
+    DeleteObject(clip);
+    RestoreDC(dc, savedDc);
     return true;
 }
 
@@ -1949,21 +2107,20 @@ void PaintContent(HDC dc, const RECT& client)
     FillRect(dc, &client, background);
     DeleteObject(background);
 
-    HFONT searchFont = CreateFontW(26, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     HFONT tileFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     HFONT headerFont = CreateFontW(18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
-    RECT searchRect = { 48, 34, client.right - 48, 84 };
-    DrawRoundedRect(dc, searchRect, RGB(242, 247, 250), RGB(92, 110, 130), 22);
-    SelectObject(dc, searchFont);
-    RECT searchTextRect = { searchRect.left + 18, searchRect.top + 10, searchRect.right - 18, searchRect.bottom };
-    DrawTextClipped(dc, g_searchText.empty() ? L"Search" : g_searchText, searchTextRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_searchText.empty() ? RGB(110, 120, 132) : RGB(21, 26, 34));
+    DrawSearchSurface(dc, client);
 
-    const int tileSize = std::max(112, g_settings.iconSize + 72);
-    const int gap = std::clamp(g_settings.appSpacing + 4, 4, 32);
+    const int savedDc = SaveDC(dc);
+    HRGN contentClip = CreateRectRgn(0, ContentClipTop(), client.right, client.bottom);
+    SelectClipRgn(dc, contentClip);
+
+    const int tileSize = TileSize();
+    const int gap = TileGap();
     const int left = 44;
     const int right = client.right - 44;
-    const int columns = std::max(1, (right - left + gap) / (tileSize + gap));
+    const int columns = CalculateColumnCount(client);
     int column = 0;
     int x = left;
     int y = 114 - g_scrollOffset;
@@ -2007,7 +2164,7 @@ void PaintContent(HDC dc, const RECT& client)
             {
                 g_regionHits.back().bounds.bottom = std::max(g_regionHits.back().bounds.bottom, tileRect.bottom + gap);
             }
-            if (tileRect.bottom >= 92 && tileRect.top <= client.bottom)
+            if (tileRect.bottom >= ContentClipTop() && tileRect.top <= client.bottom)
             {
                 const bool selected = filteredIndex == g_selectedFilteredIndex || IsSelected(item.sourcePath);
                 DrawRoundedRect(dc, tileRect, selected ? RGB(42, 82, 118) : RGB(28, 35, 48), selected ? RGB(130, 190, 255) : RGB(50, 62, 82), 12);
@@ -2041,8 +2198,10 @@ void PaintContent(HDC dc, const RECT& client)
     }
 
     DrawDragFeedback(dc);
+    SelectClipRgn(dc, nullptr);
+    DeleteObject(contentClip);
+    RestoreDC(dc, savedDc);
 
-    DeleteObject(searchFont);
     DeleteObject(tileFont);
     DeleteObject(headerFont);
 }
@@ -2079,6 +2238,107 @@ void ClampScroll()
     g_scrollOffset = std::clamp(g_scrollOffset, 0, maxScroll);
 }
 
+int CalculateColumnCount(const RECT& client)
+{
+    const int gap = TileGap();
+    const int left = 44;
+    const int right = client.right - 44;
+    return std::max(1, (right - left + gap) / (TileSize() + gap));
+}
+
+bool EstimateTileBoundsForFilteredIndex(int targetFilteredIndex, RECT& bounds)
+{
+    if (targetFilteredIndex < 0 || targetFilteredIndex >= static_cast<int>(g_filtered.size())) return false;
+
+    RECT client = {};
+    GetClientRect(g_hwnd, &client);
+    const int tileSize = TileSize();
+    const int gap = TileGap();
+    const int columns = CalculateColumnCount(client);
+    const int left = 44;
+    int column = 0;
+    int x = left;
+    int logicalY = 114;
+    std::wstring activeRegion;
+
+    for (int filteredIndex = 0; filteredIndex <= targetFilteredIndex; ++filteredIndex)
+    {
+        const auto& item = g_items[g_filtered[filteredIndex]];
+        if (activeRegion != item.regionId)
+        {
+            if (column != 0)
+            {
+                logicalY += tileSize + gap;
+                column = 0;
+                x = left;
+            }
+            activeRegion = item.regionId;
+            logicalY += 38;
+        }
+
+        if (filteredIndex == targetFilteredIndex)
+        {
+            bounds = { x, logicalY - g_scrollOffset, x + tileSize, logicalY + tileSize - g_scrollOffset };
+            return true;
+        }
+
+        x += tileSize + gap;
+        column++;
+        if (column >= columns)
+        {
+            column = 0;
+            x = left;
+            logicalY += tileSize + gap;
+        }
+    }
+
+    return false;
+}
+
+void ScrollSelectedIntoView()
+{
+    RECT bounds = {};
+    if (!EstimateTileBoundsForFilteredIndex(g_selectedFilteredIndex, bounds)) return;
+
+    RECT client = {};
+    GetClientRect(g_hwnd, &client);
+    const int topLimit = ContentClipTop();
+    const int bottomLimit = client.bottom - 24;
+    if (bounds.top < topLimit)
+    {
+        g_scrollOffset -= topLimit - bounds.top;
+    }
+    else if (bounds.bottom > bottomLimit)
+    {
+        g_scrollOffset += bounds.bottom - bottomLimit;
+    }
+    ClampScroll();
+}
+
+void SelectFilteredIndex(int index)
+{
+    if (g_filtered.empty()) return;
+    g_selectedFilteredIndex = std::clamp(index, 0, static_cast<int>(g_filtered.size()) - 1);
+    const auto& item = g_items[g_filtered[g_selectedFilteredIndex]];
+    SetSingleSelection(item.sourcePath);
+    ScrollSelectedIntoView();
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+void MoveSelectionHorizontal(int delta)
+{
+    if (g_filtered.empty()) return;
+    SelectFilteredIndex(g_selectedFilteredIndex + delta);
+}
+
+void MoveSelectionVertical(int delta)
+{
+    if (g_filtered.empty()) return;
+    RECT client = {};
+    GetClientRect(g_hwnd, &client);
+    SelectFilteredIndex(g_selectedFilteredIndex + delta * CalculateColumnCount(client));
+}
+
 std::wstring GetControlText(HWND hwnd, int controlId, int maxChars = 2048)
 {
     std::wstring value(static_cast<size_t>(maxChars), L'\0');
@@ -2092,19 +2352,38 @@ void SetControlText(HWND hwnd, SettingsControlId id, const std::wstring& value)
     SetDlgItemTextW(hwnd, ControlId(id), value.c_str());
 }
 
+HFONT UiFont()
+{
+    if (!g_uiFont)
+    {
+        g_uiFont = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    }
+    return g_uiFont;
+}
+
+HWND ApplyControlFont(HWND control)
+{
+    if (control)
+    {
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(UiFont()), TRUE);
+        SetWindowTheme(control, L"Explorer", nullptr);
+    }
+    return control;
+}
+
 HWND CreateSettingsLabel(HWND parent, SettingsControlId id, int x, int y)
 {
-    return CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, x, y + 5, 150, 24, parent, reinterpret_cast<HMENU>(ControlId(id)), g_instance, nullptr);
+    return ApplyControlFont(CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, x, y + 5, 150, 24, parent, reinterpret_cast<HMENU>(ControlId(id)), g_instance, nullptr));
 }
 
 HWND CreateSettingsEdit(HWND parent, SettingsControlId id, int x, int y, int width)
 {
-    return CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, x, y, width, 26, parent, reinterpret_cast<HMENU>(ControlId(id)), g_instance, nullptr);
+    return ApplyControlFont(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, x, y, width, 26, parent, reinterpret_cast<HMENU>(ControlId(id)), g_instance, nullptr));
 }
 
 HWND CreateSettingsCombo(HWND parent, SettingsControlId id, int x, int y, int width)
 {
-    return CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, x, y, width, 140, parent, reinterpret_cast<HMENU>(ControlId(id)), g_instance, nullptr);
+    return ApplyControlFont(CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, x, y, width, 140, parent, reinterpret_cast<HMENU>(ControlId(id)), g_instance, nullptr));
 }
 
 void ResetDisplayModeCombo(HWND hwnd, const std::wstring& language)
@@ -2365,7 +2644,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         y += 38;
         CreateSettingsLabel(hwnd, SettingsControlId::SpotlightSizeLabel, labelX, y);
         CreateSettingsEdit(hwnd, SettingsControlId::SpotlightWidth, inputX, y, 96);
-        CreateWindowW(L"STATIC", L"x", WS_CHILD | WS_VISIBLE | SS_CENTER, inputX + 106, y + 5, 24, 24, hwnd, nullptr, g_instance, nullptr);
+        ApplyControlFont(CreateWindowW(L"STATIC", L"x", WS_CHILD | WS_VISIBLE | SS_CENTER, inputX + 106, y + 5, 24, 24, hwnd, nullptr, g_instance, nullptr));
         CreateSettingsEdit(hwnd, SettingsControlId::SpotlightHeight, inputX + 140, y, 96);
         y += 38;
         CreateSettingsLabel(hwnd, SettingsControlId::AppSpacingLabel, labelX, y);
@@ -2374,10 +2653,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         CreateSettingsLabel(hwnd, SettingsControlId::WheelSensitivityLabel, labelX, y);
         CreateSettingsEdit(hwnd, SettingsControlId::WheelSensitivity, inputX, y, 96);
         y += 38;
-        CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, inputX, y, inputW, 24, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::StartWithWindows)), g_instance, nullptr);
+        ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, inputX, y, inputW, 24, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::StartWithWindows)), g_instance, nullptr));
         y += 48;
-        CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, inputX + 146, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Save)), g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, inputX + 244, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Cancel)), g_instance, nullptr);
+        ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, inputX + 146, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Save)), g_instance, nullptr));
+        ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, inputX + 244, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Cancel)), g_instance, nullptr));
         PopulateSettingsWindow(hwnd);
         return 0;
     }
@@ -2478,10 +2757,10 @@ LRESULT CALLBACK TextInputWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         state = reinterpret_cast<TextInputState*>(reinterpret_cast<LPCREATESTRUCTW>(lParam)->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
         SetWindowTextW(hwnd, state->title.c_str());
-        CreateWindowW(L"STATIC", state->label.c_str(), WS_CHILD | WS_VISIBLE, 18, 18, 340, 24, hwnd, nullptr, g_instance, nullptr);
-        state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->value.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 18, 48, 340, 26, hwnd, reinterpret_cast<HMENU>(1), g_instance, nullptr);
-        CreateWindowW(L"BUTTON", Text(L"OK", L"确定"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 166, 90, 88, 30, hwnd, reinterpret_cast<HMENU>(IDOK), g_instance, nullptr);
-        CreateWindowW(L"BUTTON", Text(L"Cancel", L"取消"), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 270, 90, 88, 30, hwnd, reinterpret_cast<HMENU>(IDCANCEL), g_instance, nullptr);
+        ApplyControlFont(CreateWindowW(L"STATIC", state->label.c_str(), WS_CHILD | WS_VISIBLE, 18, 18, 340, 24, hwnd, nullptr, g_instance, nullptr));
+        state->edit = ApplyControlFont(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->value.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 18, 48, 340, 26, hwnd, reinterpret_cast<HMENU>(1), g_instance, nullptr));
+        ApplyControlFont(CreateWindowW(L"BUTTON", Text(L"OK", L"确定"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 166, 90, 88, 30, hwnd, reinterpret_cast<HMENU>(IDOK), g_instance, nullptr));
+        ApplyControlFont(CreateWindowW(L"BUTTON", Text(L"Cancel", L"取消"), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 270, 90, 88, 30, hwnd, reinterpret_cast<HMENU>(IDCANCEL), g_instance, nullptr));
         SendMessageW(state->edit, EM_SETSEL, 0, -1);
         SetFocus(state->edit);
         return 0;
@@ -2877,16 +3156,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         if (wParam == VK_RETURN) { LaunchItemAtFilteredIndex(g_selectedFilteredIndex); return 0; }
-        if (wParam == VK_DOWN && !g_filtered.empty())
+        if (wParam == VK_RIGHT)
         {
-            g_selectedFilteredIndex = std::min(static_cast<int>(g_filtered.size()) - 1, g_selectedFilteredIndex + 1);
-            InvalidateRect(hwnd, nullptr, FALSE);
+            MoveSelectionHorizontal(1);
             return 0;
         }
-        if (wParam == VK_UP && !g_filtered.empty())
+        if (wParam == VK_LEFT)
         {
-            g_selectedFilteredIndex = std::max(0, g_selectedFilteredIndex - 1);
-            InvalidateRect(hwnd, nullptr, FALSE);
+            MoveSelectionHorizontal(-1);
+            return 0;
+        }
+        if (wParam == VK_DOWN)
+        {
+            MoveSelectionVertical(1);
+            return 0;
+        }
+        if (wParam == VK_UP)
+        {
+            MoveSelectionVertical(-1);
             return 0;
         }
         return 0;
@@ -2922,6 +3209,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         RemoveTrayIcon();
         UnregisterHotKey(hwnd, HotkeyId);
         DestroyDirectRenderer();
+        if (g_uiFont)
+        {
+            DeleteObject(g_uiFont);
+            g_uiFont = nullptr;
+        }
         for (auto& item : g_items)
         {
             if (item.icon) DestroyIcon(item.icon);
@@ -2938,9 +3230,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
 {
     g_instance = instance;
+    const HRESULT coInitializeResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool comInitialized = SUCCEEDED(coInitializeResult);
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"LightLaunchpad.NativeUi.SingleInstance");
     if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS)
     {
+        if (comInitialized) CoUninitialize();
         return 0;
     }
 
@@ -2974,6 +3269,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     if (!g_hwnd)
     {
         CloseHandle(mutex);
+        if (comInitialized) CoUninitialize();
         return 1;
     }
 
@@ -2988,5 +3284,6 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     }
 
     CloseHandle(mutex);
+    if (comInitialized) CoUninitialize();
     return static_cast<int>(msg.wParam);
 }

@@ -4,7 +4,7 @@
 
 - Branch: `main`
 - Workspace: `C:\Users\thoma\Desktop\启动台`
-- Active task: N4 - Native UI Full Editing And Settings Parity
+- Active task: N5 - Native UI Spotlight UX Polish
 
 ## Completed
 
@@ -46,6 +46,7 @@
 - Switched NativeUi to full static `-Os` / section-gc release builds and kept the tray icon on a light system icon; M2 probe measured approximately 8.87 MB Working Set / 1.55 MB Private Memory while idle.
 - Added NativeUi M3 interaction parity: Ctrl-click multi-select, selected-app group drag, region header drag sorting, and basic item/region context menus.
 - Added NativeUi M4 editing/settings parity: native settings window, language/display/spotlight/app-spacing/wheel-sensitivity persistence, native region and item rename/create/delete flows, selected-region batch rename/delete, native import files and Start Menu import, Spotlight deactivation hide, and Direct2D/DirectWrite drawing with GDI fallback.
+- Added NativeUi N5 UX polish: true rounded Spotlight window region, content clipping below the search bar, exact-sized shortcut/target icon extraction before shell fallback, grid arrow-key selection, stronger app-spacing/wheel-sensitivity mapping, and themed Segoe UI settings controls.
 
 ## Changed Files
 
@@ -75,7 +76,7 @@
 
 ## Next Step
 
-Verify M4 package memory and continue with any manual UX polish found during hands-on NativeUi use.
+Verify N5 package memory and continue with any hands-on polish found in the native UI.
 
 ## Risks
 

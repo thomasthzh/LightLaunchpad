@@ -318,3 +318,34 @@ Completion notes:
 - NativeUi now supports native launchable-file import and Start Menu import without restoring VUI import.
 - NativeUi now hides Spotlight mode on deactivation and uses configured app spacing and wheel sensitivity.
 - NativeUi now has a Direct2D/DirectWrite drawing path with GDI fallback.
+
+## N5 - Native UI Spotlight UX Polish
+
+Status: done
+
+Dependency: N4
+
+Purpose: Fix hands-on NativeUi UX regressions around Spotlight shape, scroll clipping, icon sizing, keyboard navigation, Spotlight tuning, and settings rendering.
+
+Likely files:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
+- `tools/build-native-ui.ps1`
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs`
+- `tests/LightLaunchpad.App.Tests/Program.cs`
+- `docs/ai/progress.md`
+
+Verification:
+
+- App source tests cover rounded Spotlight window region, scrollable content clipping below the search box, exact-sized icon extraction, grid keyboard navigation, stronger spacing/wheel tuning, and themed settings controls.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-n5-probe`
+- `.\tools\package-release.ps1`
+
+Completion notes:
+
+- Spotlight mode now applies a real rounded Win32 window region.
+- Scrollable app content is clipped below the search surface so icons cannot cover the search bar while scrolling.
+- NativeUi now tries exact-size icon extraction from shortcut icon locations or targets before shell image-list fallback.
+- Arrow keys now move selection by grid direction: left/right by one tile and up/down by one visible row.
+- APP spacing now maps to a visibly stronger tile gap, and wheel sensitivity maps through a dedicated scroll step.
+- Settings and text input controls now use a shared Segoe UI font and Explorer theme styling.

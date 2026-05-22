@@ -50,6 +50,8 @@ try {
         -lgdi32 `
         -ld2d1 `
         -ldwrite `
+        -lole32 `
+        -luxtheme `
         -ladvapi32 `
         -luuid `
         -o $temporaryExe
