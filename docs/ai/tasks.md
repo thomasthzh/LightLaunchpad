@@ -489,3 +489,30 @@ Completion notes:
 - Direct2D/GDI renderers now draw a darker glass-like background, top highlight, and softened window edge.
 - Search opens focused by default, ranks results with token/prefix/boundary/path/fuzzy scoring, removes region headers while searching, and supports Tab completion from the selected result.
 - Added native optimization/refactor notes documenting near-term, small, medium, and full refactor routes under the 10/15/20 MB memory target.
+
+## N11 - Native UI Selection And Drag Avoidance Polish
+
+Status: done
+
+Dependency: N10
+
+Purpose: Remove high-contrast rubber-band selection, keep selection stable while wheeling, and preview surrounding app tiles moving around a dragged icon.
+
+Likely files:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs`
+- `tests/LightLaunchpad.App.Tests/Program.cs`
+- `docs/ai/progress.md`
+
+Verification:
+
+- App source tests cover quiet selection outline, selection-wheel freeze, and drag avoidance preview helpers.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-n11-probe`
+- `.\tools\package-release.ps1`
+
+Completion notes:
+
+- NativeUi no longer fills the rubber-band selection rectangle with bright blue; it now draws a low-contrast two-line outline.
+- Mouse wheel input is ignored while a rubber-band selection is active so the selection rectangle does not visually drift against scrolled content.
+- Item drag preview now hides the dragged tiles and shifts nearby non-dragged tiles into preview slots so the surrounding icons visibly make room for the drop target.

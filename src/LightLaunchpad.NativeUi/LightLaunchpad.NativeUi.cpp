@@ -2276,6 +2276,80 @@ void CancelDrag(HWND hwnd)
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
+bool ShouldUseDragAvoidancePreview()
+{
+    return g_dragActive
+        && g_dragMode == DragMode::Items
+        && g_dropTarget.valid
+        && g_searchText.empty()
+        && !g_dragSourcePaths.empty();
+}
+
+bool ShouldHideTileForDragPreview(const LaunchItem& item)
+{
+    return ShouldUseDragAvoidancePreview() && ContainsPath(g_dragSourcePaths, item.sourcePath);
+}
+
+int ItemSlotInRegion(const LaunchItem& item)
+{
+    int slot = 0;
+    for (const auto& candidate : g_items)
+    {
+        if (CompareStringOrdinal(candidate.regionId.c_str(), -1, item.regionId.c_str(), -1, TRUE) != CSTR_EQUAL) continue;
+        if (candidate.order < item.order)
+        {
+            slot++;
+        }
+    }
+    return slot;
+}
+
+int CountNonDraggedItemsBefore(const std::wstring& regionId, int order)
+{
+    int count = 0;
+    for (const auto& item : g_items)
+    {
+        if (CompareStringOrdinal(item.regionId.c_str(), -1, regionId.c_str(), -1, TRUE) != CSTR_EQUAL) continue;
+        if (ContainsPath(g_dragSourcePaths, item.sourcePath)) continue;
+        if (item.order < order)
+        {
+            count++;
+        }
+    }
+    return count;
+}
+
+int DragPreviewSlotForItem(const LaunchItem& item)
+{
+    int previewSlot = CountNonDraggedItemsBefore(item.regionId, item.order);
+    if (CompareStringOrdinal(item.regionId.c_str(), -1, g_dropTarget.regionId.c_str(), -1, TRUE) == CSTR_EQUAL
+        && previewSlot >= g_dropTarget.order)
+    {
+        previewSlot += static_cast<int>(g_dragSourcePaths.size());
+    }
+    return previewSlot;
+}
+
+void ApplyDragAvoidanceOffset(RECT& visualTileRect, const LaunchItem& item, int tileSize, int gap, int columns)
+{
+    if (!ShouldUseDragAvoidancePreview()) return;
+    if (ShouldHideTileForDragPreview(item)) return;
+
+    const int currentSlot = ItemSlotInRegion(item);
+    const int previewSlot = DragPreviewSlotForItem(item);
+    if (currentSlot == previewSlot) return;
+
+    const int stride = tileSize + gap;
+    const int currentColumn = currentSlot % columns;
+    const int currentRow = currentSlot / columns;
+    const int previewColumn = previewSlot % columns;
+    const int previewRow = previewSlot / columns;
+    OffsetRect(
+        &visualTileRect,
+        (previewColumn - currentColumn) * stride,
+        (previewRow - currentRow) * stride);
+}
+
 void DrawRoundedRect(HDC dc, const RECT& rect, COLORREF fill, COLORREF stroke, int radius)
 {
     HBRUSH brush = CreateSolidBrush(fill);
@@ -2731,6 +2805,8 @@ void DrawDragFeedback(HDC dc)
     }
 }
 
+void DrawSubtleSelectionOutline(HDC dc, const RECT& rect);
+
 void DrawSelectionBox(HDC dc)
 {
     if (!g_selectionBoxActive) return;
@@ -2740,36 +2816,22 @@ void DrawSelectionBox(HDC dc)
     const int height = rect.bottom - rect.top;
     if (width < 2 || height < 2) return;
 
-    HDC overlayDc = CreateCompatibleDC(dc);
-    BITMAPINFO info = {};
-    info.bmiHeader.biSize = sizeof(info.bmiHeader);
-    info.bmiHeader.biWidth = width;
-    info.bmiHeader.biHeight = -height;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
+    DrawSubtleSelectionOutline(dc, rect);
+}
 
-    void* bits = nullptr;
-    HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (overlayDc && bitmap && bits)
-    {
-        HGDIOBJ oldBitmap = SelectObject(overlayDc, bitmap);
-        std::fill_n(static_cast<DWORD*>(bits), width * height, 0x30489BFF);
-        BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-        AlphaBlend(dc, rect.left, rect.top, width, height, overlayDc, 0, 0, width, height, blend);
-        SelectObject(overlayDc, oldBitmap);
-    }
-
-    if (bitmap) DeleteObject(bitmap);
-    if (overlayDc) DeleteDC(overlayDc);
-
-    HPEN pen = CreatePen(PS_SOLID, 2, RGB(98, 186, 255));
-    HGDIOBJ oldPen = SelectObject(dc, pen);
+void DrawSubtleSelectionOutline(HDC dc, const RECT& rect)
+{
+    HPEN outerPen = CreatePen(PS_SOLID, 1, RGB(74, 88, 104));
+    HPEN innerPen = CreatePen(PS_SOLID, 1, RGB(150, 166, 182));
+    HGDIOBJ oldPen = SelectObject(dc, outerPen);
     HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
     Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
+    SelectObject(dc, innerPen);
+    Rectangle(dc, rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1);
     SelectObject(dc, oldBrush);
     SelectObject(dc, oldPen);
-    DeleteObject(pen);
+    DeleteObject(innerPen);
+    DeleteObject(outerPen);
 }
 
 bool PaintContentDirect2D(HDC dc, const RECT& client)
@@ -2846,26 +2908,37 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
             }
 
             RECT tileRect = { x, y, x + tileSize, y + tileSize };
-            if (!g_regionHits.empty() && CompareStringOrdinal(g_regionHits.back().regionId.c_str(), -1, item.regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
+            RECT visualTileRect = tileRect;
+            bool hideTileForDrag = false;
+            if (ShouldHideTileForDragPreview(item))
             {
-                g_regionHits.back().bounds.bottom = std::max(g_regionHits.back().bounds.bottom, tileRect.bottom + gap);
+                hideTileForDrag = true;
             }
-            if (tileRect.bottom >= ContentClipTop() && tileRect.top <= client.bottom)
+            else
+            {
+                ApplyDragAvoidanceOffset(visualTileRect, item, tileSize, gap, columns);
+            }
+
+            if (!hideTileForDrag && !g_regionHits.empty() && CompareStringOrdinal(g_regionHits.back().regionId.c_str(), -1, item.regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
+            {
+                g_regionHits.back().bounds.bottom = std::max(g_regionHits.back().bounds.bottom, visualTileRect.bottom + gap);
+            }
+            if (!hideTileForDrag && visualTileRect.bottom >= ContentClipTop() && visualTileRect.top <= client.bottom)
             {
                 const bool selected = filteredIndex == g_selectedFilteredIndex || IsSelected(item.sourcePath);
-                DrawAppTileSurface(target, tileRect, selected);
+                DrawAppTileSurface(target, visualTileRect, selected);
                 LoadItemIcon(item);
                 if (item.icon)
                 {
                     const int icon = g_settings.iconSize;
-                    const int iconX = tileRect.left + (tileSize - icon) / 2;
-                    const int iconY = tileRect.top + 14;
+                    const int iconX = visualTileRect.left + (tileSize - icon) / 2;
+                    const int iconY = visualTileRect.top + 14;
                     pendingIcons.push_back({ item.icon, iconX, iconY, icon });
                 }
 
-                RECT labelRect = { tileRect.left + 8, tileRect.top + g_settings.iconSize + 24, tileRect.right - 8, tileRect.bottom - 8 };
+                RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
                 DrawTextDirect(target, g_tileTextFormat, item.displayName, labelRect, RGB(238, 244, 252), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP);
-                g_hits.push_back({ tileRect, filteredIndex });
+                g_hits.push_back({ visualTileRect, filteredIndex });
             }
 
             x += tileSize + gap;
@@ -2876,7 +2949,7 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
                 x = left;
                 y += tileSize + gap;
             }
-            contentBottom = std::max(contentBottom, static_cast<int>(tileRect.bottom) + gap + g_scrollOffset);
+            contentBottom = std::max(contentBottom, static_cast<int>(visualTileRect.bottom) + gap + g_scrollOffset);
         }
 
         g_contentHeight = contentBottom + 44;
@@ -2964,27 +3037,38 @@ void PaintContent(HDC dc, const RECT& client)
             }
 
             RECT tileRect = { x, y, x + tileSize, y + tileSize };
-            if (!g_regionHits.empty() && CompareStringOrdinal(g_regionHits.back().regionId.c_str(), -1, item.regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
+            RECT visualTileRect = tileRect;
+            bool hideTileForDrag = false;
+            if (ShouldHideTileForDragPreview(item))
             {
-                g_regionHits.back().bounds.bottom = std::max(g_regionHits.back().bounds.bottom, tileRect.bottom + gap);
+                hideTileForDrag = true;
             }
-            if (tileRect.bottom >= ContentClipTop() && tileRect.top <= client.bottom)
+            else
+            {
+                ApplyDragAvoidanceOffset(visualTileRect, item, tileSize, gap, columns);
+            }
+
+            if (!hideTileForDrag && !g_regionHits.empty() && CompareStringOrdinal(g_regionHits.back().regionId.c_str(), -1, item.regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
+            {
+                g_regionHits.back().bounds.bottom = std::max(g_regionHits.back().bounds.bottom, visualTileRect.bottom + gap);
+            }
+            if (!hideTileForDrag && visualTileRect.bottom >= ContentClipTop() && visualTileRect.top <= client.bottom)
             {
                 const bool selected = filteredIndex == g_selectedFilteredIndex || IsSelected(item.sourcePath);
-                DrawAppTileSurface(dc, tileRect, selected);
+                DrawAppTileSurface(dc, visualTileRect, selected);
                 LoadItemIcon(item);
                 if (item.icon)
                 {
                     const int icon = g_settings.iconSize;
-                    const int iconX = tileRect.left + (tileSize - icon) / 2;
-                    const int iconY = tileRect.top + 14;
+                    const int iconX = visualTileRect.left + (tileSize - icon) / 2;
+                    const int iconY = visualTileRect.top + 14;
                     DrawFittedIcon(dc, iconX, iconY, item.icon, icon);
                 }
 
                 SelectObject(dc, tileFont);
-                RECT labelRect = { tileRect.left + 8, tileRect.top + g_settings.iconSize + 24, tileRect.right - 8, tileRect.bottom - 8 };
+                RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
                 DrawTextClipped(dc, item.displayName, labelRect, DT_CENTER | DT_WORDBREAK | DT_END_ELLIPSIS, RGB(238, 244, 252));
-                g_hits.push_back({ tileRect, filteredIndex });
+                g_hits.push_back({ visualTileRect, filteredIndex });
             }
 
             x += tileSize + gap;
@@ -2995,7 +3079,7 @@ void PaintContent(HDC dc, const RECT& client)
                 x = left;
                 y += tileSize + gap;
             }
-            contentBottom = std::max(contentBottom, static_cast<int>(tileRect.bottom) + gap + g_scrollOffset);
+            contentBottom = std::max(contentBottom, static_cast<int>(visualTileRect.bottom) + gap + g_scrollOffset);
         }
 
         g_contentHeight = contentBottom + 44;
@@ -3898,6 +3982,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         PaintWindow(hwnd);
         return 0;
     case WM_MOUSEWHEEL:
+        if (g_selectionBoxActive) return 0;
         g_scrollOffset -= static_cast<int>((GET_WHEEL_DELTA_WPARAM(wParam) / static_cast<double>(WHEEL_DELTA)) * 72.0 * g_settings.wheelSensitivity);
         ClampScroll();
         InvalidateRect(hwnd, nullptr, FALSE);

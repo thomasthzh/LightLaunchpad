@@ -339,8 +339,8 @@ public sealed class HostedAppModeSourceTests
 
         TestAssert.Contains("DrawAppTileSurface", source);
         TestAssert.Contains("if (!selected) return;", source);
-        TestAssert.Contains("DrawAppTileSurface(target, tileRect, selected)", source);
-        TestAssert.Contains("DrawAppTileSurface(dc, tileRect, selected)", source);
+        TestAssert.Contains("DrawAppTileSurface(target, visualTileRect, selected)", source);
+        TestAssert.Contains("DrawAppTileSurface(dc, visualTileRect, selected)", source);
         TestAssert.DoesNotContain("DrawRoundedRectDirect(target, tileRect, selected ?", source);
         TestAssert.DoesNotContain("DrawRoundedRect(dc, tileRect, selected ?", source);
     }
@@ -430,6 +430,31 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("VK_TAB", source);
         TestAssert.Contains("std::stable_sort(g_filtered.begin(), g_filtered.end()", source);
         TestAssert.Contains("const bool groupByRegion = g_searchText.empty()", source);
+    }
+
+    public static void NativeUiSource_UsesQuietSelectionBoxAndFreezesWheelWhileSelecting()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("DrawSubtleSelectionOutline", source);
+        TestAssert.Contains("if (g_selectionBoxActive) return 0;", source);
+        TestAssert.Contains("CreatePen(PS_SOLID, 1, RGB(150, 166, 182))", source);
+        TestAssert.Contains("CreatePen(PS_SOLID, 1, RGB(74, 88, 104))", source);
+        TestAssert.DoesNotContain("0x30489BFF", source);
+        TestAssert.DoesNotContain("RGB(98, 186, 255)", source);
+    }
+
+    public static void NativeUiSource_PreviewsDragAvoidanceReflow()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("ShouldHideTileForDragPreview", source);
+        TestAssert.Contains("CountNonDraggedItemsBefore", source);
+        TestAssert.Contains("DragPreviewSlotForItem", source);
+        TestAssert.Contains("ApplyDragAvoidanceOffset", source);
+        TestAssert.Contains("visualTileRect", source);
+        TestAssert.Contains("if (ShouldHideTileForDragPreview(item))", source);
+        TestAssert.Contains("DragPreviewSlotForItem(item)", source);
     }
 
     public static void NativeUiBuildScript_ProducesNativeUiExecutable()
