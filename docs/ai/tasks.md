@@ -432,3 +432,30 @@ Completion notes:
 - NativeUi now supports rubber-band selection from empty content space, including Ctrl additive selection and Escape/capture cleanup.
 - NativeUi draws a translucent selection rectangle clipped under the search surface.
 - NativeUi now caches HICON alpha bounds and draws transparent-padded icons through a fitted `AlphaBlend` path so icons like `卡片魔王` fill the configured APP size more naturally.
+
+## N9 - Native UI Delete Icon Removes Launchpad Entry
+
+Status: done
+
+Dependency: N8
+
+Purpose: Make item deletion delete the launchpad file instead of only removing layout metadata, so deleted icons do not return to Uncategorized after refresh.
+
+Likely files:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs`
+- `tests/LightLaunchpad.App.Tests/Program.cs`
+- `docs/ai/progress.md`
+
+Verification:
+
+- App source tests cover native delete-icon behavior, native file deletion, and menu text.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-n9-probe`
+- `.\tools\package-release.ps1`
+
+Completion notes:
+
+- NativeUi item context menu now says Delete icon / Delete selected icons.
+- Deleting an item now deletes the file when it is inside the configured launchpad folder, removes it from layout, clears icon-bound cache entries, and warns if disk deletion fails.
+- External source paths are removed from layout without deleting the real external executable.

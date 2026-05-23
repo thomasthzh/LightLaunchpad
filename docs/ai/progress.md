@@ -4,7 +4,7 @@
 
 - Branch: `main`
 - Workspace: `C:\Users\thoma\Desktop\启动台`
-- Active task: N8 - Native UI Rubber Band Selection And Icon Fit
+- Active task: N9 - Native UI Delete Icon Removes Launchpad Entry
 
 ## Completed
 
@@ -50,13 +50,14 @@
 - Added NativeUi N6 settings/search cleanup: removed the visible empty-search placeholder, added APP size selection to native settings, added an Apply button, and enlarged the settings window so the action buttons remain visible.
 - Added NativeUi N7 visual/drag polish: app tiles now only draw frames when selected, and inter-tile drag gaps use row-aware insertion logic instead of falling through to the region tail.
 - Added NativeUi N8 selection/icon polish: empty-space drag now supports rubber-band multi-selection, and transparent-padded HICONs are cropped to cached alpha bounds before fitted `AlphaBlend` drawing so small-looking icons fill the configured APP size better without rescanning every frame.
+- Added NativeUi N9 delete polish: item context menu now deletes launchpad-folder files from disk before removing layout metadata, so deleted icons do not return to Uncategorized after refresh; external source paths are layout-only removal to avoid deleting real apps.
 - `git diff --check` - passed with line-ending warnings only.
 - `.\.dotnet\dotnet.exe run --project tests\LightLaunchpad.Core.Tests\LightLaunchpad.Core.Tests.csproj` - 32/32 passed.
-- `.\.dotnet\dotnet.exe run --project tests\LightLaunchpad.App.Tests\LightLaunchpad.App.Tests.csproj` - 57/57 passed.
+- `.\.dotnet\dotnet.exe run --project tests\LightLaunchpad.App.Tests\LightLaunchpad.App.Tests.csproj` - 58/58 passed.
 - `.\.dotnet\dotnet.exe build LightLaunchpad.sln` - passed with 0 warnings and 0 errors.
-- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-n8-probe` - passed.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-n9-probe` - passed.
 - `.\tools\package-release.ps1` - produced the committed NativeUi package under `release\LightLaunchpad-nativeui-win-x64-<commit>.zip`.
-- N8 packaged probe measured approximately 11.35 MB Working Set / 1.93 MB Private Memory while idle from a clean `PATH`.
+- N9 packaged probe measured approximately 11.33 MB Working Set / 1.91 MB Private Memory while idle from a clean `PATH`.
 
 ## Changed Files
 
@@ -86,7 +87,7 @@
 
 ## Next Step
 
-Push `main`, then continue with any hands-on polish found in the native UI.
+Package with the final committed hash, push `main`, and verify the GitHub remote main SHA via `gh api`.
 
 ## Risks
 

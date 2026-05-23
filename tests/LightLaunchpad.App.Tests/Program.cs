@@ -143,6 +143,9 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_FitsTransparentPaddedIcons),
                 HostedAppModeSourceTests.NativeUiSource_FitsTransparentPaddedIcons),
             (
+                nameof(HostedAppModeSourceTests.NativeUiSource_DeletesLaunchpadItemsInsteadOfOnlyRemovingLayout),
+                HostedAppModeSourceTests.NativeUiSource_DeletesLaunchpadItemsInsteadOfOnlyRemovingLayout),
+            (
                 nameof(HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
                 HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
             (

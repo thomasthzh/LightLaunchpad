@@ -1085,6 +1085,56 @@ void MoveItemToTarget(const std::wstring& sourcePath, const DropTarget& target)
     MoveItemsToTarget(std::vector<std::wstring>{ sourcePath }, target);
 }
 
+std::wstring FullPath(const std::wstring& path)
+{
+    if (path.empty()) return L"";
+    const DWORD required = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+    if (required == 0) return path;
+
+    std::vector<wchar_t> buffer(static_cast<size_t>(required) + 1, L'\0');
+    const DWORD written = GetFullPathNameW(path.c_str(), static_cast<DWORD>(buffer.size()), buffer.data(), nullptr);
+    if (written == 0 || written >= buffer.size()) return path;
+
+    std::wstring fullPath(buffer.data(), written);
+    while (fullPath.size() > 3 && (fullPath.back() == L'\\' || fullPath.back() == L'/'))
+    {
+        fullPath.pop_back();
+    }
+    return fullPath;
+}
+
+bool IsPathInsideLaunchpadFolder(const std::wstring& sourcePath)
+{
+    std::wstring root = FullPath(g_settings.launchpadFolder);
+    const std::wstring fullPath = FullPath(sourcePath);
+    if (root.empty() || fullPath.empty()) return false;
+    if (root.back() != L'\\' && root.back() != L'/')
+    {
+        root.push_back(L'\\');
+    }
+    if (fullPath.size() <= root.size()) return false;
+    return CompareStringOrdinal(fullPath.c_str(), static_cast<int>(root.size()), root.c_str(), static_cast<int>(root.size()), TRUE) == CSTR_EQUAL;
+}
+
+bool DeleteLaunchpadItemFile(const std::wstring& sourcePath)
+{
+    if (!IsPathInsideLaunchpadFolder(sourcePath)) return true;
+    const DWORD attributes = GetFileAttributesW(sourcePath.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) return true;
+    if (attributes & FILE_ATTRIBUTE_DIRECTORY) return false;
+    return DeleteFileW(sourcePath.c_str()) != FALSE;
+}
+
+void ForgetIconBounds(HICON icon)
+{
+    if (!icon) return;
+    g_iconBoundsCache.erase(
+        std::remove_if(g_iconBoundsCache.begin(), g_iconBoundsCache.end(), [&](const IconOpaqueBoundsCacheEntry& entry) {
+            return entry.icon == icon;
+        }),
+        g_iconBoundsCache.end());
+}
+
 void MoveRegionToTarget(const std::wstring& sourceRegionId, const RegionDropTarget& target)
 {
     if (sourceRegionId.empty() || !target.valid || !RegionExists(sourceRegionId) || !RegionExists(target.regionId)) return;
@@ -1133,7 +1183,11 @@ void RemoveItemsFromLayout(const std::vector<std::wstring>& sourcePaths)
     {
         if (ContainsPath(sourcePaths, item.sourcePath))
         {
-            if (item.icon) DestroyIcon(item.icon);
+            if (item.icon)
+            {
+                ForgetIconBounds(item.icon);
+                DestroyIcon(item.icon);
+            }
             item.icon = nullptr;
             continue;
         }
@@ -1153,6 +1207,20 @@ void RemoveItemsFromLayout(const std::vector<std::wstring>& sourcePaths)
         }
     }
     RenumberItemsByRegion();
+}
+
+int DeleteItemsFromLaunchpad(const std::vector<std::wstring>& sourcePaths)
+{
+    int failed = 0;
+    for (const auto& sourcePath : sourcePaths)
+    {
+        if (!DeleteLaunchpadItemFile(sourcePath))
+        {
+            failed++;
+        }
+    }
+    RemoveItemsFromLayout(sourcePaths);
+    return failed;
 }
 
 void DeleteRegionAndMoveItems(const std::wstring& regionId)
@@ -3359,7 +3427,7 @@ void ShowItemContextMenu(POINT point, int filteredIndex)
     AppendMenuW(menu, g_contextItemPaths.size() > 1 ? MF_STRING | MF_GRAYED : MF_STRING, ItemRenameCommand, Text(L"Rename", L"重命名"));
     AppendMenuW(menu, MF_STRING, ItemOpenLocationCommand, Text(L"Open file location", L"打开文件位置"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, ItemRemoveCommand, g_contextItemPaths.size() > 1 ? Text(L"Remove selected from layout", L"从布局移除已选") : Text(L"Remove from layout", L"从布局移除"));
+    AppendMenuW(menu, MF_STRING, ItemRemoveCommand, g_contextItemPaths.size() > 1 ? Text(L"Delete selected icons", L"删除已选图标") : Text(L"Delete icon", L"删除图标"));
     ClientToScreen(g_hwnd, &point);
     SetForegroundWindow(g_hwnd);
     TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, g_hwnd, nullptr);
@@ -3428,11 +3496,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (LOWORD(wParam) == ItemOpenLocationCommand && !g_contextItemPaths.empty()) OpenItemLocation(g_contextItemPaths.front());
         if (LOWORD(wParam) == ItemRemoveCommand && !g_contextItemPaths.empty())
         {
-            RemoveItemsFromLayout(g_contextItemPaths);
+            const int failed = DeleteItemsFromLaunchpad(g_contextItemPaths);
             SortItems();
             SaveLayout();
             RebuildFiltered();
             InvalidateRect(hwnd, nullptr, TRUE);
+            if (failed > 0)
+            {
+                MessageBoxW(hwnd, Text(L"Some icons could not be deleted from disk.", L"部分图标无法从磁盘删除。"), Text(L"Delete icon", L"删除图标"), MB_ICONWARNING | MB_OK);
+            }
         }
         if (LOWORD(wParam) == RegionRenameCommand && !g_contextRegionId.empty())
         {

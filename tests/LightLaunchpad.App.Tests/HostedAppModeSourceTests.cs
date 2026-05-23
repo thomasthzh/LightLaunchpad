@@ -387,6 +387,22 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("-lmsimg32", script);
     }
 
+    public static void NativeUiSource_DeletesLaunchpadItemsInsteadOfOnlyRemovingLayout()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("DeleteItemsFromLaunchpad", source);
+        TestAssert.Contains("DeleteLaunchpadItemFile", source);
+        TestAssert.Contains("IsPathInsideLaunchpadFolder", source);
+        TestAssert.Contains("DeleteFileW(sourcePath.c_str())", source);
+        TestAssert.Contains("RemoveItemsFromLayout(sourcePaths)", source);
+        TestAssert.Contains("Text(L\"Delete icon\", L\"删除图标\")", source);
+        TestAssert.Contains("Text(L\"Delete selected icons\", L\"删除已选图标\")", source);
+        TestAssert.Contains("ForgetIconBounds", source);
+        TestAssert.DoesNotContain("Remove from layout", source);
+        TestAssert.DoesNotContain("从布局移除", source);
+    }
+
     public static void NativeUiBuildScript_ProducesNativeUiExecutable()
     {
         var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
