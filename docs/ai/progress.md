@@ -4,7 +4,7 @@
 
 - Branch: `main`
 - Workspace: `C:\Users\thoma\Desktop\启动台`
-- Active task: N9 - Native UI Delete Icon Removes Launchpad Entry
+- Active task: N10 - Native UI Spotlight Glass And Search Completion
 
 ## Completed
 
@@ -51,13 +51,15 @@
 - Added NativeUi N7 visual/drag polish: app tiles now only draw frames when selected, and inter-tile drag gaps use row-aware insertion logic instead of falling through to the region tail.
 - Added NativeUi N8 selection/icon polish: empty-space drag now supports rubber-band multi-selection, and transparent-padded HICONs are cropped to cached alpha bounds before fitted `AlphaBlend` drawing so small-looking icons fill the configured APP size better without rescanning every frame.
 - Added NativeUi N9 delete polish: item context menu now deletes launchpad-folder files from disk before removing layout metadata, so deleted icons do not return to Uncategorized after refresh; external source paths are layout-only removal to avoid deleting real apps.
+- Added NativeUi N10 Spotlight/search polish: lightweight DWM acrylic backdrop, DWM rounded-corner preference, glass-like renderer background, softened edge drawing, default search focus, ranked token/prefix/boundary/path/fuzzy search, and Tab completion from the selected result.
+- Added `docs/ai/native-ui-optimization-refactor.md` with next-step optimization and refactor routes under the 10/15/20 MB memory target.
 - `git diff --check` - passed with line-ending warnings only.
 - `.\.dotnet\dotnet.exe run --project tests\LightLaunchpad.Core.Tests\LightLaunchpad.Core.Tests.csproj` - 32/32 passed.
-- `.\.dotnet\dotnet.exe run --project tests\LightLaunchpad.App.Tests\LightLaunchpad.App.Tests.csproj` - 58/58 passed.
+- `.\.dotnet\dotnet.exe run --project tests\LightLaunchpad.App.Tests\LightLaunchpad.App.Tests.csproj` - 60/60 passed.
 - `.\.dotnet\dotnet.exe build LightLaunchpad.sln` - passed with 0 warnings and 0 errors.
-- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-n9-probe` - passed.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-n10-probe` - passed.
 - `.\tools\package-release.ps1` - produced the committed NativeUi package under `release\LightLaunchpad-nativeui-win-x64-<commit>.zip`.
-- N9 packaged probe measured approximately 11.33 MB Working Set / 1.91 MB Private Memory while idle from a clean `PATH`.
+- N10 packaged probes measured approximately 10.5-11.4 MB Working Set / 1.9 MB Private Memory while idle from a clean `PATH`, staying under the 15 MB acceptable target and well under the 20 MB hard limit.
 
 ## Changed Files
 
@@ -82,12 +84,13 @@
 - `tests/LightLaunchpad.App.Tests/LaunchpadViewModelIconStabilityTests.cs`
 - `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
 - `tools/build-native-ui.ps1`
+- `docs/ai/native-ui-optimization-refactor.md`
 - `docs/superpowers/plans/2026-05-22-native-ui-m2-icons-drag.md`
 - `docs/superpowers/plans/2026-05-22-native-ui-m3-interaction-parity.md`
 
 ## Next Step
 
-Package with the final committed hash, push `main`, and verify the GitHub remote main SHA via `gh api`.
+Commit N10, package with the final committed hash, publish GitHub Release, and verify the GitHub remote/release via `gh`.
 
 ## Risks
 

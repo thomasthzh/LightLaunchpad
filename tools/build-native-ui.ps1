@@ -49,6 +49,7 @@ try {
         -luser32 `
         -lgdi32 `
         -lmsimg32 `
+        -ldwmapi `
         -ld2d1 `
         -ldwrite `
         -lole32 `

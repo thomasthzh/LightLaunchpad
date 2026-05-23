@@ -146,6 +146,12 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_DeletesLaunchpadItemsInsteadOfOnlyRemovingLayout),
                 HostedAppModeSourceTests.NativeUiSource_DeletesLaunchpadItemsInsteadOfOnlyRemovingLayout),
             (
+                nameof(HostedAppModeSourceTests.NativeUiSource_UsesGlassBackdropAndSoftEdges),
+                HostedAppModeSourceTests.NativeUiSource_UsesGlassBackdropAndSoftEdges),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_ImprovesSearchAndTabCompletion),
+                HostedAppModeSourceTests.NativeUiSource_ImprovesSearchAndTabCompletion),
+            (
                 nameof(HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
                 HostedAppModeSourceTests.NativeUiBuildScript_ProducesNativeUiExecutable),
             (

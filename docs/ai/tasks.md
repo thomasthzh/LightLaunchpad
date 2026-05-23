@@ -459,3 +459,33 @@ Completion notes:
 - NativeUi item context menu now says Delete icon / Delete selected icons.
 - Deleting an item now deletes the file when it is inside the configured launchpad folder, removes it from layout, clears icon-bound cache entries, and warns if disk deletion fails.
 - External source paths are removed from layout without deleting the real external executable.
+
+## N10 - Native UI Spotlight Glass And Search Completion
+
+Status: done
+
+Dependency: N9
+
+Purpose: Move the NativeUi visual and search behavior closer to macOS Spotlight/Launchpad while staying inside the low-memory budget.
+
+Likely files:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
+- `tools/build-native-ui.ps1`
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs`
+- `tests/LightLaunchpad.App.Tests/Program.cs`
+- `docs/ai/native-ui-optimization-refactor.md`
+- `docs/ai/progress.md`
+
+Verification:
+
+- App source tests cover glass backdrop, soft edge drawing, search focus, ranked search, and Tab completion.
+- `.\tools\build-native-ui.ps1 -OutputDirectory release\native-ui-n10-probe`
+- `.\tools\package-release.ps1`
+
+Completion notes:
+
+- NativeUi now applies a lightweight DWM acrylic/transparent-window backdrop and DWM rounded-corner preference, with fallback rounded region behavior.
+- Direct2D/GDI renderers now draw a darker glass-like background, top highlight, and softened window edge.
+- Search opens focused by default, ranks results with token/prefix/boundary/path/fuzzy scoring, removes region headers while searching, and supports Tab completion from the selected result.
+- Added native optimization/refactor notes documenting near-term, small, medium, and full refactor routes under the 10/15/20 MB memory target.

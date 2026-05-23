@@ -403,6 +403,35 @@ public sealed class HostedAppModeSourceTests
         TestAssert.DoesNotContain("从布局移除", source);
     }
 
+    public static void NativeUiSource_UsesGlassBackdropAndSoftEdges()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
+
+        TestAssert.Contains("ApplyGlassBackdrop", source);
+        TestAssert.Contains("SetWindowCompositionAttribute", source);
+        TestAssert.Contains("ACCENT_ENABLE_ACRYLICBLURBEHIND", source);
+        TestAssert.Contains("DwmSetWindowAttribute", source);
+        TestAssert.Contains("DWMWA_WINDOW_CORNER_PREFERENCE", source);
+        TestAssert.Contains("DrawGlassBackground", source);
+        TestAssert.Contains("DrawSoftWindowEdge", source);
+        TestAssert.Contains("-ldwmapi", script);
+    }
+
+    public static void NativeUiSource_ImprovesSearchAndTabCompletion()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("ActivateSearchInput", source);
+        TestAssert.Contains("BuildSearchCandidateText", source);
+        TestAssert.Contains("FuzzyMatchScore", source);
+        TestAssert.Contains("SearchScore", source);
+        TestAssert.Contains("CompleteSearchFromSelection", source);
+        TestAssert.Contains("VK_TAB", source);
+        TestAssert.Contains("std::stable_sort(g_filtered.begin(), g_filtered.end()", source);
+        TestAssert.Contains("const bool groupByRegion = g_searchText.empty()", source);
+    }
+
     public static void NativeUiBuildScript_ProducesNativeUiExecutable()
     {
         var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
