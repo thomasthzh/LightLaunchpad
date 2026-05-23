@@ -152,8 +152,8 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_ImprovesSearchAndTabCompletion),
                 HostedAppModeSourceTests.NativeUiSource_ImprovesSearchAndTabCompletion),
             (
-                nameof(HostedAppModeSourceTests.NativeUiSource_UsesQuietSelectionBoxAndFreezesWheelWhileSelecting),
-                HostedAppModeSourceTests.NativeUiSource_UsesQuietSelectionBoxAndFreezesWheelWhileSelecting),
+                nameof(HostedAppModeSourceTests.NativeUiSource_UsesQuietSelectionBoxAndScrollsWhileSelecting),
+                HostedAppModeSourceTests.NativeUiSource_UsesQuietSelectionBoxAndScrollsWhileSelecting),
             (
                 nameof(HostedAppModeSourceTests.NativeUiSource_PreviewsDragAvoidanceReflow),
                 HostedAppModeSourceTests.NativeUiSource_PreviewsDragAvoidanceReflow),
