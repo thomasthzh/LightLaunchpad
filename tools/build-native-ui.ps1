@@ -14,10 +14,16 @@ else {
 
 $temporaryDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("lightlaunchpad-native-ui-" + [System.Guid]::NewGuid().ToString("N"))
 $temporaryExe = Join-Path $temporaryDirectory "LightLaunchpad.NativeUi.exe"
+$temporaryResourceObject = Join-Path $temporaryDirectory "LightLaunchpad.NativeUi.res.o"
 
 $gpp = (where.exe g++ | Select-Object -First 1)
 if (-not $gpp) {
     throw "g++ was not found. Install MinGW-w64 or build the native UI with a C++ toolchain."
+}
+
+$windres = (where.exe windres | Select-Object -First 1)
+if (-not $windres) {
+    throw "windres was not found. Install MinGW-w64 so the native UI can embed the app icon."
 }
 
 New-Item -ItemType Directory -Force -Path $outputDirectoryFull | Out-Null
@@ -27,8 +33,17 @@ $pushedLocation = $false
 try {
     Push-Location $repoRoot
     $pushedLocation = $true
+    & $windres `
+        src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.rc `
+        -O coff `
+        -o $temporaryResourceObject
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native UI resource compilation failed with exit code $LASTEXITCODE."
+    }
+
     & $gpp `
         src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp `
+        $temporaryResourceObject `
         -std=c++17 `
         -finput-charset=UTF-8 `
         -fexec-charset=UTF-8 `

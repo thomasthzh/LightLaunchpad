@@ -38,6 +38,14 @@
 #define DWMWA_SYSTEMBACKDROP_TYPE 38
 #endif
 
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+
+#ifndef DWMWA_COLOR_NONE
+#define DWMWA_COLOR_NONE 0xFFFFFFFE
+#endif
+
 #ifndef DWMWCP_ROUND
 #define DWMWCP_ROUND 2
 #endif
@@ -2298,6 +2306,8 @@ void ApplyGlassBackdrop()
 
     const DWORD backdrop = DWMSBT_TRANSIENTWINDOW;
     DwmSetWindowAttribute(g_hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
+    const DWORD borderColor = DWMWA_COLOR_NONE;
+    DwmSetWindowAttribute(g_hwnd, DWMWA_BORDER_COLOR, &borderColor, sizeof(borderColor));
     ApplyDwmRoundedCorners();
     SetSpotlightLayeredOpacity(IsSpotlightMode() ? SpotlightGlassAlpha : 255);
 }
@@ -2315,8 +2325,8 @@ void ApplySpotlightWindowRegion(int width, int height)
     HRGN region = CreateRoundRectRgn(
         0,
         0,
-        width + 1,
-        height + 1,
+        width,
+        height,
         SpotlightCornerRadius * 2,
         SpotlightCornerRadius * 2);
     if (region)
@@ -3085,6 +3095,7 @@ void DrawGlassBackground(HDC dc, const RECT& client)
 
 void DrawSoftWindowEdge(ID2D1DCRenderTarget* target, const RECT& client)
 {
+    if (IsSpotlightMode()) return;
     const float radius = IsSpotlightMode() ? static_cast<float>(SpotlightCornerRadius) : 0.0f;
     const int layers = IsSpotlightMode() ? 7 : 5;
     for (int inset = 0; inset < layers; ++inset)
@@ -3105,6 +3116,7 @@ void DrawSoftWindowEdge(ID2D1DCRenderTarget* target, const RECT& client)
 
 void DrawSoftWindowEdge(HDC dc, const RECT& client)
 {
+    if (IsSpotlightMode()) return;
     const int radius = IsSpotlightMode() ? SpotlightCornerRadius : 0;
     const int layers = IsSpotlightMode() ? 7 : 5;
     for (int inset = 0; inset < layers; ++inset)

@@ -61,12 +61,11 @@ public sealed class HostedAppModeSourceTests
         var script = File.ReadAllText(FindRepoFile("tools", "package-release.ps1"));
 
         TestAssert.Contains("LightLaunchpad-nativeui-$Runtime-$Version", script);
-        TestAssert.Contains("src\\LightLaunchpad.App\\LightLaunchpad.App.csproj", script);
         TestAssert.Contains("Compress-Archive", script);
         TestAssert.Contains("Package output must stay under the release directory.", script);
         TestAssert.Contains("-join [Environment]::NewLine", script);
-        TestAssert.Contains("dotnet publish failed", script);
         TestAssert.Contains("Native UI build failed", script);
+        TestAssert.DoesNotContain("LightLaunchpad.App.csproj", script);
         TestAssert.DoesNotContain("LightLaunchpad-native-agent-$Runtime-$Version", script);
         TestAssert.DoesNotContain("build-native-agent.ps1", script);
         TestAssert.DoesNotContain("LightLaunchpad.Agent.csproj", script);
@@ -415,6 +414,9 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("DwmSetWindowAttribute", source);
         TestAssert.Contains("DwmEnableBlurBehindWindow", source);
         TestAssert.Contains("DWMWA_WINDOW_CORNER_PREFERENCE", source);
+        TestAssert.Contains("DWMWA_BORDER_COLOR", source);
+        TestAssert.Contains("DWMWA_COLOR_NONE", source);
+        TestAssert.Contains("if (IsSpotlightMode()) return;", source);
         TestAssert.Contains("SetSpotlightLayeredOpacity", source);
         TestAssert.Contains("SpotlightGlassAlpha", source);
         TestAssert.Contains("ShowSpotlightWithAnimation", source);
@@ -483,7 +485,9 @@ public sealed class HostedAppModeSourceTests
         var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
 
         TestAssert.Contains("LightLaunchpad.NativeUi.cpp", script);
+        TestAssert.Contains("LightLaunchpad.NativeUi.rc", script);
         TestAssert.Contains("LightLaunchpad.NativeUi.exe", script);
+        TestAssert.Contains("windres", script);
         TestAssert.Contains("GetTempPath", script);
         TestAssert.Contains("-mwindows", script);
         TestAssert.Contains("-static `", script);
@@ -503,7 +507,7 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("LightLaunchpad-nativeui-$Runtime-$Version", script);
         TestAssert.Contains("build-native-ui.ps1", script);
         TestAssert.Contains("LightLaunchpad.NativeUi.exe", script);
-        TestAssert.Contains("LightLaunchpad.App.exe", script);
+        TestAssert.DoesNotContain("LightLaunchpad.App.exe", script);
     }
 
     private static string FindRepoFile(params string[] parts)
