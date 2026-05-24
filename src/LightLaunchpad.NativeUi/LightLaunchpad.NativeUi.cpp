@@ -51,6 +51,10 @@
 #define DWMWCP_ROUND 2
 #endif
 
+#ifndef DWMWCP_DONOTROUND
+#define DWMWCP_DONOTROUND 1
+#endif
+
 #ifndef DWMSBT_TRANSIENTWINDOW
 #define DWMSBT_TRANSIENTWINDOW 3
 #endif
@@ -84,9 +88,13 @@ constexpr UINT WmTray = WM_APP + 72;
 constexpr wchar_t WindowClassName[] = L"LightLaunchpadNativeUiWindow";
 constexpr wchar_t SettingsWindowClassName[] = L"LightLaunchpadNativeSettingsWindow";
 constexpr wchar_t TextInputWindowClassName[] = L"LightLaunchpadNativeTextInputWindow";
-constexpr int SpotlightCornerRadius = 30;
+constexpr int SpotlightCornerRadius = 34;
 constexpr int SpotlightEdgeLayers = 7;
-constexpr int SpotlightPanelInset = 1;
+constexpr int SpotlightPanelInset = 0;
+constexpr int SpotlightContentInset = 68;
+constexpr int SpotlightContentBottomInset = 34;
+constexpr int SpotlightSearchSideInset = 68;
+constexpr int SpotlightSearchCornerRadius = 24;
 constexpr BYTE SpotlightGlassAlpha = 232;
 constexpr int SpotlightAnimationSteps = 9;
 constexpr int SpotlightAnimationOffset = 18;
@@ -294,6 +302,7 @@ void RebuildFiltered();
 void DestroyDirectRenderer();
 void ActivateSearchInput();
 bool InitializeDirectRenderer();
+bool IsSpotlightMode();
 std::wstring BuildPinyinSearchText(const std::wstring& text);
 void UpdateSearchIndex(LaunchItem& item);
 void RebuildSearchIndex();
@@ -378,14 +387,27 @@ int ContentClipTop()
     return SearchBottom() + 16;
 }
 
+RECT ContentClipRect(const RECT& client)
+{
+    const int sideInset = IsSpotlightMode() ? SpotlightContentInset : 0;
+    const int bottomInset = IsSpotlightMode() ? SpotlightContentBottomInset : 0;
+    return {
+        static_cast<LONG>(sideInset),
+        static_cast<LONG>(ContentClipTop()),
+        std::max<LONG>(static_cast<LONG>(sideInset), client.right - static_cast<LONG>(sideInset)),
+        std::max<LONG>(static_cast<LONG>(ContentClipTop()), client.bottom - static_cast<LONG>(bottomInset))
+    };
+}
+
 RECT SearchRect(const RECT& client)
 {
-    return { 48, SearchTop(), client.right - 48, SearchBottom() };
+    const int sideInset = IsSpotlightMode() ? SpotlightSearchSideInset : 48;
+    return { sideInset, SearchTop(), client.right - sideInset, SearchBottom() };
 }
 
 RECT SearchTextRect(const RECT& searchRect)
 {
-    return { searchRect.left + 18, searchRect.top + 10, searchRect.right - 18, searchRect.bottom };
+    return { searchRect.left + 22, searchRect.top, searchRect.right - 22, searchRect.bottom };
 }
 
 std::wstring SearchDisplayText()
@@ -2441,7 +2463,7 @@ bool IsSpotlightMode()
 bool ApplyDwmRoundedCorners()
 {
     if (!g_hwnd) return false;
-    const DWORD cornerPreference = DWMWCP_ROUND;
+    const DWORD cornerPreference = IsSpotlightMode() ? DWMWCP_DONOTROUND : DWMWCP_ROUND;
     return SUCCEEDED(DwmSetWindowAttribute(
         g_hwnd,
         DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -2508,9 +2530,25 @@ void ApplyGlassBackdrop()
 void ApplySpotlightWindowRegion(int width, int height)
 {
     if (!g_hwnd) return;
+    if (!IsSpotlightMode())
+    {
+        ApplyDwmRoundedCorners();
+        SetWindowRgn(g_hwnd, nullptr, TRUE);
+        return;
+    }
+
     ApplyDwmRoundedCorners();
-    SetWindowRgn(g_hwnd, nullptr, TRUE);
-    if (!IsSpotlightMode()) return;
+    HRGN region = CreateRoundRectRgn(
+        0,
+        0,
+        std::max(1, width),
+        std::max(1, height),
+        SpotlightCornerRadius * 2,
+        SpotlightCornerRadius * 2);
+    if (region)
+    {
+        SetWindowRgn(g_hwnd, region, TRUE);
+    }
 
     RECT client = { 0, 0, std::max(1, width), std::max(1, height) };
     InvalidateRect(g_hwnd, &client, FALSE);
@@ -3388,6 +3426,53 @@ void DrawRoundedRectDirect(ID2D1DCRenderTarget* target, const RECT& rect, COLORR
     SafeRelease(strokeBrush);
 }
 
+void DrawSearchGlassSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool active)
+{
+    ID2D1GradientStopCollection* fillStops = nullptr;
+    ID2D1LinearGradientBrush* fillBrush = nullptr;
+    D2D1_GRADIENT_STOP stops[] = {
+        { 0.0f, D2DColorAlpha(RGB(248, 252, 255), active ? 0.74f : 0.62f) },
+        { 0.52f, D2DColorAlpha(RGB(222, 234, 244), active ? 0.58f : 0.48f) },
+        { 1.0f, D2DColorAlpha(RGB(180, 202, 222), active ? 0.48f : 0.40f) }
+    };
+    if (SUCCEEDED(target->CreateGradientStopCollection(stops, ARRAYSIZE(stops), &fillStops)) && fillStops)
+    {
+        const auto props = D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.top)),
+            D2D1::Point2F(static_cast<float>(rect.right), static_cast<float>(rect.bottom)));
+        target->CreateLinearGradientBrush(props, fillStops, &fillBrush);
+    }
+
+    const auto rounded = D2D1::RoundedRect(D2DRect(rect), static_cast<float>(SpotlightSearchCornerRadius), static_cast<float>(SpotlightSearchCornerRadius));
+    if (fillBrush)
+    {
+        target->FillRoundedRectangle(rounded, fillBrush);
+    }
+
+    ID2D1SolidColorBrush* strokeBrush = nullptr;
+    target->CreateSolidColorBrush(D2DColorAlpha(active ? RGB(116, 194, 255) : RGB(242, 248, 255), active ? 0.86f : 0.42f), &strokeBrush);
+    if (strokeBrush)
+    {
+        target->DrawRoundedRectangle(rounded, strokeBrush, active ? 1.35f : 1.0f);
+    }
+    SafeRelease(strokeBrush);
+    SafeRelease(fillBrush);
+    SafeRelease(fillStops);
+}
+
+void DrawSearchGlassSurface(HDC dc, const RECT& rect, bool active)
+{
+    HBRUSH fill = CreateSolidBrush(active ? RGB(220, 235, 246) : RGB(204, 220, 234));
+    HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(116, 194, 255) : RGB(228, 238, 248));
+    HGDIOBJ oldBrush = SelectObject(dc, fill);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, SpotlightSearchCornerRadius * 2, SpotlightSearchCornerRadius * 2);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(fill);
+}
+
 void DrawAppTileSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool selected)
 {
     if (!selected) return;
@@ -3458,7 +3543,7 @@ void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client)
 {
     const RECT searchRect = SearchRect(client);
     const RECT textRect = SearchTextRect(searchRect);
-    DrawRoundedRectDirect(target, searchRect, RGB(232, 238, 244), g_searchInputActive ? RGB(118, 196, 255) : RGB(120, 136, 154), 22.0f);
+    DrawSearchGlassSurface(target, searchRect, g_searchInputActive);
     DrawTextDirect(
         target,
         g_searchTextFormat,
@@ -3493,7 +3578,7 @@ void DrawSearchSurface(HDC dc, const RECT& client)
     HFONT searchFont = CreateFontW(26, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     const RECT searchRect = SearchRect(client);
     const RECT textRect = SearchTextRect(searchRect);
-    DrawRoundedRect(dc, searchRect, RGB(232, 238, 244), g_searchInputActive ? RGB(118, 196, 255) : RGB(120, 136, 154), 22);
+    DrawSearchGlassSurface(dc, searchRect, g_searchInputActive);
     HGDIOBJ oldFont = SelectObject(dc, searchFont);
     DrawTextClipped(dc, SearchDisplayText(), textRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_searchText.empty() ? RGB(110, 120, 132) : RGB(21, 26, 34));
     const std::wstring tail = SearchCompletionTail();
@@ -3792,11 +3877,11 @@ RenderLayoutMetrics CreateRenderLayoutMetrics(const RECT& client)
     RenderLayoutMetrics metrics = {};
     metrics.tileSize = TileSize();
     metrics.gap = TileGap();
-    metrics.left = 44;
-    metrics.right = client.right - 44;
+    metrics.left = IsSpotlightMode() ? SpotlightContentInset : 44;
+    metrics.right = client.right - metrics.left;
     metrics.columns = CalculateColumnCount(client);
     metrics.initialY = 114 - g_scrollOffset;
-    metrics.contentClip = { 0, ContentClipTop(), client.right, client.bottom };
+    metrics.contentClip = ContentClipRect(client);
     metrics.groupByRegion = g_searchText.empty();
     return metrics;
 }
@@ -3822,7 +3907,8 @@ void RenderFrameGdi(HDC dc, const RECT& client)
 void RenderDeferredIconOverlay(HDC dc, const RECT& client, const std::vector<PendingIconDraw>& pendingIcons)
 {
     int savedDc = SaveDC(dc);
-    HRGN clip = CreateRectRgn(0, ContentClipTop(), client.right, client.bottom);
+    const RECT contentClip = ContentClipRect(client);
+    HRGN clip = CreateRectRgn(contentClip.left, contentClip.top, contentClip.right, contentClip.bottom);
     SelectClipRgn(dc, clip);
     for (const auto& icon : pendingIcons)
     {
@@ -4109,8 +4195,8 @@ void ClampScroll()
 int CalculateColumnCount(const RECT& client)
 {
     const int gap = TileGap();
-    const int left = 44;
-    const int right = client.right - 44;
+    const int left = IsSpotlightMode() ? SpotlightContentInset : 44;
+    const int right = client.right - left;
     return std::max(1, (right - left + gap) / (TileSize() + gap));
 }
 

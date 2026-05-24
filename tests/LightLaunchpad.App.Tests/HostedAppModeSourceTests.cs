@@ -416,6 +416,9 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("DWMWA_WINDOW_CORNER_PREFERENCE", source);
         TestAssert.Contains("DWMWA_BORDER_COLOR", source);
         TestAssert.Contains("DWMWA_COLOR_NONE", source);
+        TestAssert.Contains("DWMWCP_DONOTROUND", source);
+        TestAssert.Contains("CreateRoundRectRgn", source);
+        TestAssert.Contains("SetWindowRgn(g_hwnd, region, TRUE)", source);
         TestAssert.Contains("SetWindowRgn(g_hwnd, nullptr, TRUE)", source);
         TestAssert.Contains("SpotlightRoundedRect", source);
         TestAssert.Contains("SpotlightPanelInset", source);
@@ -472,6 +475,10 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("SearchCompletionTail", source);
         TestAssert.Contains("g_completionCandidateText", source);
         TestAssert.Contains("SearchCompletionHighlightRect", source);
+        TestAssert.Contains("DrawSearchGlassSurface", source);
+        TestAssert.Contains("SpotlightSearchSideInset", source);
+        TestAssert.Contains("SpotlightSearchCornerRadius", source);
+        TestAssert.Contains("searchRect.top, searchRect.right", source);
         TestAssert.Contains("RGB(58, 140, 255)", source);
         TestAssert.Contains("VK_TAB", source);
         TestAssert.Contains("std::stable_sort(g_filtered.begin(), g_filtered.end()", source);
@@ -492,6 +499,9 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("const RenderLayoutMetrics metrics = CreateRenderLayoutMetrics(client)", source);
         TestAssert.Contains("RenderFrameDirect2D(target, client)", source);
         TestAssert.Contains("RenderFrameGdi(dc, client)", source);
+        TestAssert.Contains("ContentClipRect", source);
+        TestAssert.Contains("SpotlightContentInset", source);
+        TestAssert.Contains("SpotlightContentBottomInset", source);
     }
 
     public static void NativeUiSource_UsesQuietSelectionBoxAndScrollsWhileSelecting()
@@ -557,6 +567,17 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("build-native-ui.ps1", script);
         TestAssert.Contains("LightLaunchpad.NativeUi.exe", script);
         TestAssert.DoesNotContain("LightLaunchpad.App.exe", script);
+    }
+
+    public static void ProjectStructureDocument_ExplainsRepositoryFiles()
+    {
+        var document = File.ReadAllText(FindRepoFile("PROJECT_STRUCTURE.md"));
+
+        TestAssert.Contains("LightLaunchpad.NativeUi.exe", document);
+        TestAssert.Contains("src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp", document);
+        TestAssert.Contains("tools/package-release.ps1", document);
+        TestAssert.Contains("tests/LightLaunchpad.App.Tests/", document);
+        TestAssert.Contains("旧 WPF 与实验源码", document);
     }
 
     private static string FindRepoFile(params string[] parts)
