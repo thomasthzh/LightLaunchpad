@@ -89,15 +89,17 @@ constexpr wchar_t WindowClassName[] = L"LightLaunchpadNativeUiWindow";
 constexpr wchar_t SettingsWindowClassName[] = L"LightLaunchpadNativeSettingsWindow";
 constexpr wchar_t TextInputWindowClassName[] = L"LightLaunchpadNativeTextInputWindow";
 constexpr int SpotlightCornerRadius = 34;
-constexpr int SpotlightEdgeLayers = 7;
+constexpr int SpotlightEdgeLayers = 10;
 constexpr int SpotlightPanelInset = 0;
 constexpr int SpotlightContentInset = 68;
 constexpr int SpotlightContentBottomInset = 34;
 constexpr int SpotlightSearchSideInset = 68;
 constexpr int SpotlightSearchCornerRadius = 24;
-constexpr BYTE SpotlightGlassAlpha = 232;
+constexpr COLORREF SpotlightTransparentKey = RGB(1, 2, 3);
+constexpr BYTE SpotlightGlassAlpha = 218;
 constexpr int SpotlightAnimationSteps = 9;
 constexpr int SpotlightAnimationOffset = 18;
+constexpr int SpotlightCloseAnimationOffset = 12;
 constexpr size_t MaxResidentIconCount = 96;
 constexpr UINT_PTR DragAnimationTimerId = 0x4C5601;
 constexpr int DragTargetSettleMs = 55;
@@ -2482,7 +2484,7 @@ void SetSpotlightLayeredOpacity(BYTE alpha)
         {
             SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED);
         }
-        SetLayeredWindowAttributes(g_hwnd, 0, alpha, LWA_ALPHA);
+        SetLayeredWindowAttributes(g_hwnd, SpotlightTransparentKey, alpha, LWA_ALPHA | LWA_COLORKEY);
         return;
     }
 
@@ -2531,25 +2533,10 @@ void ApplyGlassBackdrop()
 void ApplySpotlightWindowRegion(int width, int height)
 {
     if (!g_hwnd) return;
-    if (!IsSpotlightMode())
-    {
-        ApplyDwmRoundedCorners();
-        SetWindowRgn(g_hwnd, nullptr, TRUE);
-        return;
-    }
 
     ApplyDwmRoundedCorners();
-    HRGN region = CreateRoundRectRgn(
-        0,
-        0,
-        std::max(1, width),
-        std::max(1, height),
-        SpotlightCornerRadius * 2,
-        SpotlightCornerRadius * 2);
-    if (region)
-    {
-        SetWindowRgn(g_hwnd, region, TRUE);
-    }
+    // Keep the real window rectangular, then make the glass exterior transparent with a color key.
+    SetWindowRgn(g_hwnd, nullptr, TRUE);
 
     RECT client = { 0, 0, std::max(1, width), std::max(1, height) };
     InvalidateRect(g_hwnd, &client, FALSE);
@@ -2650,6 +2637,34 @@ void ShowSpotlightWithAnimation()
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
+void HideSpotlightWithAnimation()
+{
+    if (!g_hwnd || !IsWindowVisible(g_hwnd))
+    {
+        return;
+    }
+
+    RECT startRect = {};
+    GetWindowRect(g_hwnd, &startRect);
+    const int width = startRect.right - startRect.left;
+    const int height = startRect.bottom - startRect.top;
+
+    for (int step = 1; step <= SpotlightAnimationSteps; ++step)
+    {
+        const double progress = step / static_cast<double>(SpotlightAnimationSteps);
+        const double eased = 1.0 - std::pow(1.0 - progress, 3.0);
+        const BYTE alpha = static_cast<BYTE>(std::round(SpotlightGlassAlpha * (1.0 - eased)));
+        const int y = startRect.top - static_cast<int>(std::round(eased * SpotlightCloseAnimationOffset));
+        SetWindowPos(g_hwnd, HWND_TOPMOST, startRect.left, y, width, height, SWP_NOACTIVATE);
+        SetSpotlightLayeredOpacity(alpha);
+        Sleep(7);
+    }
+
+    ShowWindow(g_hwnd, SW_HIDE);
+    SetWindowPos(g_hwnd, HWND_TOPMOST, startRect.left, startRect.top, width, height, SWP_NOACTIVATE);
+    SetSpotlightLayeredOpacity(SpotlightGlassAlpha);
+}
+
 void ShowNativeUi()
 {
     ReloadData();
@@ -2674,7 +2689,14 @@ void ShowNativeUi()
 void HideNativeUi()
 {
     g_searchInputActive = false;
-    ShowWindow(g_hwnd, SW_HIDE);
+    if (IsSpotlightMode())
+    {
+        HideSpotlightWithAnimation();
+    }
+    else
+    {
+        ShowWindow(g_hwnd, SW_HIDE);
+    }
     TrimHiddenFootprint();
 }
 
@@ -3213,16 +3235,46 @@ D2D1_ROUNDED_RECT SpotlightRoundedRect(const RECT& client, float inset)
         radius);
 }
 
+bool IsPointInsideRoundedRect(POINT point, const RECT& rect, int radius)
+{
+    if (!PtInRect(&rect, point)) return false;
+    const int r = std::max(1, radius);
+    const int left = rect.left;
+    const int right = rect.right;
+    const int top = rect.top;
+    const int bottom = rect.bottom;
+
+    if ((point.x >= left + r && point.x < right - r) || (point.y >= top + r && point.y < bottom - r))
+    {
+        return true;
+    }
+
+    const int cx = point.x < left + r ? left + r : right - r - 1;
+    const int cy = point.y < top + r ? top + r : bottom - r - 1;
+    const int dx = point.x - cx;
+    const int dy = point.y - cy;
+    return dx * dx + dy * dy <= r * r;
+}
+
+bool IsPointInsideSpotlightGlass(POINT point)
+{
+    if (!g_hwnd || !IsSpotlightMode()) return true;
+    RECT client = {};
+    GetClientRect(g_hwnd, &client);
+    return IsPointInsideRoundedRect(point, client, SpotlightCornerRadius);
+}
+
 void RenderSpotlightGlassDirect2D(ID2D1DCRenderTarget* target, const RECT& client)
 {
-    target->Clear(D2DColor(RGB(34, 42, 52)));
+    target->Clear(D2DColor(SpotlightTransparentKey));
 
     ID2D1GradientStopCollection* glassStops = nullptr;
     ID2D1LinearGradientBrush* glassBrush = nullptr;
     D2D1_GRADIENT_STOP stops[] = {
-        { 0.0f, D2DColorAlpha(RGB(88, 104, 120), 0.82f) },
-        { 0.46f, D2DColorAlpha(RGB(58, 70, 84), 0.78f) },
-        { 1.0f, D2DColorAlpha(RGB(34, 44, 58), 0.84f) }
+        { 0.0f, D2DColorAlpha(RGB(82, 100, 118), 0.66f) },
+        { 0.35f, D2DColorAlpha(RGB(50, 64, 82), 0.70f) },
+        { 0.72f, D2DColorAlpha(RGB(26, 38, 58), 0.76f) },
+        { 1.0f, D2DColorAlpha(RGB(16, 26, 42), 0.80f) }
     };
     if (SUCCEEDED(target->CreateGradientStopCollection(stops, ARRAYSIZE(stops), &glassStops)) && glassStops)
     {
@@ -3238,11 +3290,32 @@ void RenderSpotlightGlassDirect2D(ID2D1DCRenderTarget* target, const RECT& clien
         target->FillRoundedRectangle(panel, glassBrush);
     }
 
+    ID2D1GradientStopCollection* depthStops = nullptr;
+    ID2D1RadialGradientBrush* depthBrush = nullptr;
+    D2D1_GRADIENT_STOP depth[] = {
+        { 0.0f, D2DColorAlpha(RGB(128, 154, 178), 0.16f) },
+        { 0.58f, D2DColorAlpha(RGB(70, 96, 124), 0.052f) },
+        { 1.0f, D2DColorAlpha(RGB(6, 14, 26), 0.28f) }
+    };
+    if (SUCCEEDED(target->CreateGradientStopCollection(depth, ARRAYSIZE(depth), &depthStops)) && depthStops)
+    {
+        const auto props = D2D1::RadialGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(client.left) + (client.right - client.left) * 0.36f, static_cast<float>(client.top) + (client.bottom - client.top) * 0.18f),
+            D2D1::Point2F(0.0f, 0.0f),
+            static_cast<float>(client.right - client.left) * 0.82f,
+            static_cast<float>(client.bottom - client.top) * 0.78f);
+        target->CreateRadialGradientBrush(props, depthStops, &depthBrush);
+    }
+    if (depthBrush)
+    {
+        target->FillRoundedRectangle(panel, depthBrush);
+    }
+
     ID2D1GradientStopCollection* sheenStops = nullptr;
     ID2D1LinearGradientBrush* sheenBrush = nullptr;
     D2D1_GRADIENT_STOP sheen[] = {
-        { 0.0f, D2DColorAlpha(RGB(255, 255, 255), 0.18f) },
-        { 0.32f, D2DColorAlpha(RGB(255, 255, 255), 0.055f) },
+        { 0.0f, D2DColorAlpha(RGB(238, 248, 255), 0.13f) },
+        { 0.24f, D2DColorAlpha(RGB(196, 220, 240), 0.055f) },
         { 1.0f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) }
     };
     if (SUCCEEDED(target->CreateGradientStopCollection(sheen, ARRAYSIZE(sheen), &sheenStops)) && sheenStops)
@@ -3259,6 +3332,8 @@ void RenderSpotlightGlassDirect2D(ID2D1DCRenderTarget* target, const RECT& clien
 
     SafeRelease(sheenBrush);
     SafeRelease(sheenStops);
+    SafeRelease(depthBrush);
+    SafeRelease(depthStops);
     SafeRelease(glassBrush);
     SafeRelease(glassStops);
 }
@@ -3296,6 +3371,10 @@ void DrawGlassBackground(ID2D1DCRenderTarget* target, const RECT& client)
 void RenderSpotlightGlassGdi(HDC dc, const RECT& client)
 {
     const int saved = SaveDC(dc);
+    HBRUSH transparent = CreateSolidBrush(SpotlightTransparentKey);
+    FillRect(dc, &client, transparent);
+    DeleteObject(transparent);
+
     const int radius = std::max(1, SpotlightCornerRadius * 2);
     HRGN clip = CreateRoundRectRgn(client.left, client.top, client.right + 1, client.bottom + 1, radius, radius);
     if (clip)
@@ -3306,23 +3385,23 @@ void RenderSpotlightGlassGdi(HDC dc, const RECT& client)
     TRIVERTEX vertices[3] = {};
     vertices[0].x = client.left;
     vertices[0].y = client.top;
-    vertices[0].Red = 88 << 8;
-    vertices[0].Green = 104 << 8;
-    vertices[0].Blue = 120 << 8;
+    vertices[0].Red = 82 << 8;
+    vertices[0].Green = 100 << 8;
+    vertices[0].Blue = 118 << 8;
     vertices[0].Alpha = 0xFFFF;
 
     vertices[1].x = client.right;
     vertices[1].y = client.top + ((client.bottom - client.top) * 46 / 100);
-    vertices[1].Red = 58 << 8;
-    vertices[1].Green = 70 << 8;
-    vertices[1].Blue = 84 << 8;
+    vertices[1].Red = 48 << 8;
+    vertices[1].Green = 62 << 8;
+    vertices[1].Blue = 80 << 8;
     vertices[1].Alpha = 0xFFFF;
 
     vertices[2].x = client.right;
     vertices[2].y = client.bottom;
-    vertices[2].Red = 34 << 8;
-    vertices[2].Green = 44 << 8;
-    vertices[2].Blue = 58 << 8;
+    vertices[2].Red = 16 << 8;
+    vertices[2].Green = 26 << 8;
+    vertices[2].Blue = 42 << 8;
     vertices[2].Alpha = 0xFFFF;
 
     GRADIENT_RECT upper = { 0, 1 };
@@ -3365,10 +3444,10 @@ void DrawSoftWindowEdge(ID2D1DCRenderTarget* target, const RECT& client)
     {
         ID2D1SolidColorBrush* brush = nullptr;
         const float alpha = spotlight
-            ? std::max(0.025f, 0.18f - inset * 0.022f)
+            ? std::max(0.010f, 0.070f - inset * 0.0055f)
             : std::max(0.04f, 0.22f - inset * 0.035f);
         const COLORREF edgeColor = spotlight
-            ? (inset < 2 ? RGB(246, 252, 255) : RGB(142, 164, 186))
+            ? (inset < 3 ? RGB(214, 234, 248) : RGB(112, 150, 184))
             : (inset < 2 ? RGB(238, 248, 255) : RGB(130, 178, 220));
         target->CreateSolidColorBrush(D2DColorAlpha(edgeColor, std::max(0.04f, alpha)), &brush);
         if (brush)
@@ -3398,7 +3477,7 @@ void DrawSoftWindowEdge(HDC dc, const RECT& client)
     const int layers = spotlight ? SpotlightEdgeLayers : 5;
     for (int inset = 0; inset < layers; ++inset)
     {
-        const int shade = spotlight ? 178 - inset * 10 : 92 + inset * 18;
+        const int shade = spotlight ? 126 - inset * 5 : 92 + inset * 18;
         const COLORREF color = spotlight
             ? RGB(std::max(80, shade), std::max(92, shade + 8), std::max(110, shade + 18))
             : RGB(shade, shade + 18, shade + 38);
@@ -3432,9 +3511,9 @@ void DrawSearchGlassSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool 
     ID2D1GradientStopCollection* fillStops = nullptr;
     ID2D1LinearGradientBrush* fillBrush = nullptr;
     D2D1_GRADIENT_STOP stops[] = {
-        { 0.0f, D2DColorAlpha(RGB(248, 252, 255), active ? 0.74f : 0.62f) },
-        { 0.52f, D2DColorAlpha(RGB(222, 234, 244), active ? 0.58f : 0.48f) },
-        { 1.0f, D2DColorAlpha(RGB(180, 202, 222), active ? 0.48f : 0.40f) }
+        { 0.0f, D2DColorAlpha(RGB(118, 138, 154), active ? 0.48f : 0.40f) },
+        { 0.52f, D2DColorAlpha(RGB(66, 82, 100), active ? 0.46f : 0.36f) },
+        { 1.0f, D2DColorAlpha(RGB(34, 46, 62), active ? 0.50f : 0.40f) }
     };
     if (SUCCEEDED(target->CreateGradientStopCollection(stops, ARRAYSIZE(stops), &fillStops)) && fillStops)
     {
@@ -3451,7 +3530,7 @@ void DrawSearchGlassSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool 
     }
 
     ID2D1SolidColorBrush* strokeBrush = nullptr;
-    target->CreateSolidColorBrush(D2DColorAlpha(active ? RGB(116, 194, 255) : RGB(242, 248, 255), active ? 0.86f : 0.42f), &strokeBrush);
+    target->CreateSolidColorBrush(D2DColorAlpha(active ? RGB(146, 206, 255) : RGB(178, 206, 228), active ? 0.62f : 0.28f), &strokeBrush);
     if (strokeBrush)
     {
         target->DrawRoundedRectangle(rounded, strokeBrush, active ? 1.35f : 1.0f);
@@ -3463,8 +3542,8 @@ void DrawSearchGlassSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool 
 
 void DrawSearchGlassSurface(HDC dc, const RECT& rect, bool active)
 {
-    HBRUSH fill = CreateSolidBrush(active ? RGB(220, 235, 246) : RGB(204, 220, 234));
-    HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(116, 194, 255) : RGB(228, 238, 248));
+    HBRUSH fill = CreateSolidBrush(active ? RGB(68, 84, 102) : RGB(52, 66, 82));
+    HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(146, 206, 255) : RGB(126, 154, 180));
     HGDIOBJ oldBrush = SelectObject(dc, fill);
     HGDIOBJ oldPen = SelectObject(dc, pen);
     RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, SpotlightSearchCornerRadius * 2, SpotlightSearchCornerRadius * 2);
@@ -3550,7 +3629,7 @@ void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client)
         g_searchTextFormat,
         SearchDisplayText(),
         textRect,
-        g_searchText.empty() ? RGB(110, 120, 132) : RGB(21, 26, 34),
+        g_searchText.empty() ? RGB(158, 172, 188) : RGB(236, 244, 252),
         DWRITE_TEXT_ALIGNMENT_LEADING,
         DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
         DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -3581,7 +3660,7 @@ void DrawSearchSurface(HDC dc, const RECT& client)
     const RECT textRect = SearchTextRect(searchRect);
     DrawSearchGlassSurface(dc, searchRect, g_searchInputActive);
     HGDIOBJ oldFont = SelectObject(dc, searchFont);
-    DrawTextClipped(dc, SearchDisplayText(), textRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_searchText.empty() ? RGB(110, 120, 132) : RGB(21, 26, 34));
+    DrawTextClipped(dc, SearchDisplayText(), textRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_searchText.empty() ? RGB(158, 172, 188) : RGB(236, 244, 252));
     const std::wstring tail = SearchCompletionTail();
     if (!tail.empty())
     {
@@ -4994,6 +5073,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
     {
+    case WM_NCHITTEST:
+    {
+        if (IsSpotlightMode())
+        {
+            POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &point);
+            if (!IsPointInsideSpotlightGlass(point))
+            {
+                return HTTRANSPARENT;
+            }
+        }
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
     case WM_HOTKEY:
         if (wParam == HotkeyId) ToggleNativeUi();
         return 0;
@@ -5077,6 +5169,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_LBUTTONDOWN:
     {
         POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (IsSpotlightMode() && !IsPointInsideSpotlightGlass(point))
+        {
+            HideNativeUi();
+            return 0;
+        }
         RECT client = {};
         GetClientRect(hwnd, &client);
         RECT searchRect = SearchRect(client);

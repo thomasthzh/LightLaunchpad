@@ -272,8 +272,11 @@ public sealed class HostedAppModeSourceTests
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
 
         TestAssert.Contains("ApplySpotlightWindowRegion", source);
-        TestAssert.Contains("CreateRoundRectRgn", source);
-        TestAssert.Contains("SetWindowRgn", source);
+        TestAssert.Contains("SpotlightTransparentKey", source);
+        TestAssert.Contains("LWA_ALPHA | LWA_COLORKEY", source);
+        TestAssert.Contains("const DWORD cornerPreference = IsSpotlightMode() ? DWMWCP_DONOTROUND : DWMWCP_ROUND;", source);
+        TestAssert.Contains("SetWindowRgn(g_hwnd, nullptr, TRUE)", source);
+        TestAssert.DoesNotContain("SetWindowRgn(g_hwnd, region, TRUE)", source);
         TestAssert.Contains("ContentClipTop", source);
         TestAssert.Contains("PushAxisAlignedClip", source);
         TestAssert.Contains("SelectClipRgn", source);
@@ -419,10 +422,11 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("DWMWA_WINDOW_CORNER_PREFERENCE", source);
         TestAssert.Contains("DWMWA_BORDER_COLOR", source);
         TestAssert.Contains("DWMWA_COLOR_NONE", source);
-        TestAssert.Contains("DWMWCP_DONOTROUND", source);
+        TestAssert.Contains("const DWORD cornerPreference = IsSpotlightMode() ? DWMWCP_DONOTROUND : DWMWCP_ROUND;", source);
+        TestAssert.Contains("SetLayeredWindowAttributes(g_hwnd, SpotlightTransparentKey, alpha, LWA_ALPHA | LWA_COLORKEY)", source);
         TestAssert.Contains("CreateRoundRectRgn", source);
-        TestAssert.Contains("SetWindowRgn(g_hwnd, region, TRUE)", source);
         TestAssert.Contains("SetWindowRgn(g_hwnd, nullptr, TRUE)", source);
+        TestAssert.DoesNotContain("SetWindowRgn(g_hwnd, region, TRUE)", source);
         TestAssert.Contains("SpotlightRoundedRect", source);
         TestAssert.Contains("SpotlightPanelInset", source);
         TestAssert.Contains("SpotlightEdgeLayers", source);
@@ -430,8 +434,11 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("SetSpotlightLayeredOpacity", source);
         TestAssert.Contains("SpotlightGlassAlpha", source);
         TestAssert.Contains("ShowSpotlightWithAnimation", source);
+        TestAssert.Contains("HideSpotlightWithAnimation", source);
+        TestAssert.Contains("SpotlightCloseAnimationOffset", source);
         TestAssert.Contains("std::pow(1.0 - progress, 3.0)", source);
         TestAssert.Contains("RenderSpotlightGlassDirect2D", source);
+        TestAssert.Contains("CreateRadialGradientBrush", source);
         TestAssert.Contains("RenderSpotlightGlassGdi", source);
         TestAssert.Contains("CreateGradientStopCollection", source);
         TestAssert.Contains("GradientFill", source);
