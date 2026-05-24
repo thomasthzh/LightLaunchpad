@@ -411,8 +411,11 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("ApplyGlassBackdrop", source);
         TestAssert.Contains("SetWindowCompositionAttribute", source);
         TestAssert.Contains("ACCENT_ENABLE_ACRYLICBLURBEHIND", source);
+        TestAssert.Contains("policy.accentState = spotlight ? ACCENT_DISABLED : ACCENT_ENABLE_ACRYLICBLURBEHIND;", source);
         TestAssert.Contains("DwmSetWindowAttribute", source);
         TestAssert.Contains("DwmEnableBlurBehindWindow", source);
+        TestAssert.Contains("blur.fEnable = spotlight ? FALSE : TRUE;", source);
+        TestAssert.Contains("const DWORD backdrop = spotlight ? DWMSBT_NONE : DWMSBT_TRANSIENTWINDOW;", source);
         TestAssert.Contains("DWMWA_WINDOW_CORNER_PREFERENCE", source);
         TestAssert.Contains("DWMWA_BORDER_COLOR", source);
         TestAssert.Contains("DWMWA_COLOR_NONE", source);
@@ -434,6 +437,7 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("GradientFill", source);
         TestAssert.Contains("DrawGlassBackground", source);
         TestAssert.Contains("DrawSoftWindowEdge", source);
+        TestAssert.DoesNotContain("SpotlightBackgroundProbeStage", source);
         TestAssert.DoesNotContain("FillRectInSpotlightClip", source);
         TestAssert.Contains("-ldwmapi", script);
     }

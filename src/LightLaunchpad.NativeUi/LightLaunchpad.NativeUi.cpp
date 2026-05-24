@@ -2497,6 +2497,7 @@ void ApplyGlassBackdrop()
 {
     if (!g_hwnd) return;
 
+    const bool spotlight = IsSpotlightMode();
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     auto setWindowCompositionAttribute = user32
         ? reinterpret_cast<SetWindowCompositionAttributeFn>(GetProcAddress(user32, "SetWindowCompositionAttribute"))
@@ -2504,9 +2505,9 @@ void ApplyGlassBackdrop()
     if (setWindowCompositionAttribute)
     {
         AccentPolicy policy = {};
-        policy.accentState = ACCENT_ENABLE_ACRYLICBLURBEHIND;
-        policy.accentFlags = 2;
-        policy.gradientColor = IsSpotlightMode() ? 0x9C332D28 : 0xC4282520;
+        policy.accentState = spotlight ? ACCENT_DISABLED : ACCENT_ENABLE_ACRYLICBLURBEHIND;
+        policy.accentFlags = spotlight ? 0 : 2;
+        policy.gradientColor = spotlight ? 0 : 0xC4282520;
         WindowCompositionAttribData data = {};
         data.attribute = 19;
         data.data = &policy;
@@ -2516,15 +2517,15 @@ void ApplyGlassBackdrop()
 
     DWM_BLURBEHIND blur = {};
     blur.dwFlags = DWM_BB_ENABLE;
-    blur.fEnable = TRUE;
+    blur.fEnable = spotlight ? FALSE : TRUE;
     DwmEnableBlurBehindWindow(g_hwnd, &blur);
 
-    const DWORD backdrop = IsSpotlightMode() ? DWMSBT_NONE : DWMSBT_TRANSIENTWINDOW;
+    const DWORD backdrop = spotlight ? DWMSBT_NONE : DWMSBT_TRANSIENTWINDOW;
     DwmSetWindowAttribute(g_hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
     const DWORD borderColor = DWMWA_COLOR_NONE;
     DwmSetWindowAttribute(g_hwnd, DWMWA_BORDER_COLOR, &borderColor, sizeof(borderColor));
     ApplyDwmRoundedCorners();
-    SetSpotlightLayeredOpacity(IsSpotlightMode() ? SpotlightGlassAlpha : 255);
+    SetSpotlightLayeredOpacity(spotlight ? SpotlightGlassAlpha : 255);
 }
 
 void ApplySpotlightWindowRegion(int width, int height)
