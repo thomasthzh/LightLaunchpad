@@ -416,7 +416,11 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("DWMWA_WINDOW_CORNER_PREFERENCE", source);
         TestAssert.Contains("DWMWA_BORDER_COLOR", source);
         TestAssert.Contains("DWMWA_COLOR_NONE", source);
-        TestAssert.Contains("if (IsSpotlightMode()) return;", source);
+        TestAssert.Contains("SetWindowRgn(g_hwnd, nullptr, TRUE)", source);
+        TestAssert.Contains("SpotlightRoundedRect", source);
+        TestAssert.Contains("SpotlightPanelInset", source);
+        TestAssert.Contains("SpotlightEdgeLayers", source);
+        TestAssert.DoesNotContain("if (IsSpotlightMode()) return;", source);
         TestAssert.Contains("SetSpotlightLayeredOpacity", source);
         TestAssert.Contains("SpotlightGlassAlpha", source);
         TestAssert.Contains("ShowSpotlightWithAnimation", source);
@@ -427,6 +431,25 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("DrawGlassBackground", source);
         TestAssert.Contains("DrawSoftWindowEdge", source);
         TestAssert.Contains("-ldwmapi", script);
+    }
+
+    public static void NativeUiSource_TrimsResidentIconsForMemory()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("MaxResidentIconCount", source);
+        TestAssert.Contains("iconLastUsed", source);
+        TestAssert.Contains("TrimResidentIcons", source);
+        TestAssert.Contains("TrimHiddenFootprint", source);
+        TestAssert.Contains("ReleaseItemIcon", source);
+        TestAssert.Contains("ReleaseAllResidentIcons", source);
+        TestAssert.Contains("DestroyDirectRenderer", source);
+        TestAssert.Contains("CoFreeUnusedLibrariesEx", source);
+        TestAssert.Contains("SetProcessWorkingSetSize", source);
+        TestAssert.Contains("g_filterScores.assign(g_items.size(), 0)", source);
+        TestAssert.Contains("g_filtered.reserve(g_items.size())", source);
+        TestAssert.Contains("ShowWindow(g_hwnd, SW_HIDE)", source);
+        TestAssert.DoesNotContain("std::vector<int> scores(g_items.size(), 0)", source);
     }
 
     public static void NativeUiSource_ImprovesSearchAndTabCompletion()
