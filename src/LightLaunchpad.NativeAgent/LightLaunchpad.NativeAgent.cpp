@@ -92,7 +92,7 @@ HICON LoadTrayIcon()
     {
         wchar_t iconPath[MAX_PATH] = L"";
         CopyText(iconPath, MAX_PATH, base);
-        lstrcatW(iconPath, L"Assets\\Alice.ico");
+        lstrcatW(iconPath, L"Assets\\LightLaunchpad.ico");
         if (GetFileAttributesW(iconPath) != INVALID_FILE_ATTRIBUTES)
         {
             HICON icon = reinterpret_cast<HICON>(

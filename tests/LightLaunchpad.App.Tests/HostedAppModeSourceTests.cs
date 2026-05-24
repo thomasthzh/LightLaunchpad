@@ -45,13 +45,13 @@ public sealed class HostedAppModeSourceTests
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeAgent", "LightLaunchpad.NativeAgent.cpp"));
         var script = File.ReadAllText(FindRepoFile("tools", "build-native-agent.ps1"));
 
-        TestAssert.Contains("Assets\\\\Alice.ico", source);
+        TestAssert.Contains("Assets\\\\LightLaunchpad.ico", source);
         TestAssert.Contains("LoadImageW", source);
         TestAssert.Contains("CreateJobObjectW", source);
         TestAssert.Contains("JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE", source);
         TestAssert.Contains("AssignProcessToJobObject", source);
         TestAssert.Contains("param(", script);
-        TestAssert.Contains("LightLaunchpad.App\\Assets\\Alice.ico", script);
+        TestAssert.Contains("LightLaunchpad.App\\Assets\\LightLaunchpad.ico", script);
         TestAssert.Contains("GetTempPath", script);
         TestAssert.Contains("lightlaunchpad-native-", script);
     }
@@ -133,6 +133,7 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("SHGFI_SYSICONINDEX", source);
         TestAssert.DoesNotContain("SHGFI_USEFILEATTRIBUTES", source);
         TestAssert.DoesNotContain("Assets\\\\Alice.ico", source);
+        TestAssert.Contains("Assets\\\\LightLaunchpad.ico", source);
     }
 
     public static void NativeUiSource_SupportsDragSortingAndLayoutPersistence()
@@ -418,6 +419,9 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("SpotlightGlassAlpha", source);
         TestAssert.Contains("ShowSpotlightWithAnimation", source);
         TestAssert.Contains("std::pow(1.0 - progress, 3.0)", source);
+        TestAssert.Contains("CreateRoundedRectangleGeometry", source);
+        TestAssert.Contains("PushLayer", source);
+        TestAssert.Contains("FillRectInSpotlightClip", source);
         TestAssert.Contains("DrawGlassBackground", source);
         TestAssert.Contains("DrawSoftWindowEdge", source);
         TestAssert.Contains("-ldwmapi", script);
@@ -429,6 +433,8 @@ public sealed class HostedAppModeSourceTests
 
         TestAssert.Contains("ActivateSearchInput", source);
         TestAssert.Contains("BuildSearchCandidateText", source);
+        TestAssert.Contains("BuildPinyinSearchText", source);
+        TestAssert.Contains("KnownPinyinForChar", source);
         TestAssert.Contains("FuzzyMatchScore", source);
         TestAssert.Contains("SearchScore", source);
         TestAssert.Contains("CompleteSearchFromSelection", source);
@@ -461,9 +467,15 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("CountNonDraggedItemsBefore", source);
         TestAssert.Contains("DragPreviewSlotForItem", source);
         TestAssert.Contains("ApplyDragAvoidanceOffset", source);
+        TestAssert.Contains("DragReflowSmoothing", source);
+        TestAssert.Contains("UpdateStableDropTarget", source);
+        TestAssert.Contains("DragIconAlphaForItem", source);
+        TestAssert.Contains("g_selectedSourcePaths = movedPaths;", source);
         TestAssert.Contains("visualTileRect", source);
         TestAssert.Contains("if (ShouldHideTileForDragPreview(item))", source);
         TestAssert.Contains("DragPreviewSlotForItem(item)", source);
+        TestAssert.DoesNotContain("RGB(80, 190, 255)", source);
+        TestAssert.DoesNotContain("RGB(160, 225, 255)", source);
     }
 
     public static void NativeUiBuildScript_ProducesNativeUiExecutable()

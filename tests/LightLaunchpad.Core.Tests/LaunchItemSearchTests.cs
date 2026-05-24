@@ -31,4 +31,20 @@ public sealed class LaunchItemSearchTests
 
         TestAssert.SequenceEqual(new[] { "B", "A" }, results.Select(item => item.DisplayName));
     }
+
+    public static void Filter_MatchesChineseAppsByPinyinAndInitials()
+    {
+        var items = new[]
+        {
+            new LaunchItem("微信", @"C:\WeChat.lnk", null, LaunchItemKind.Shortcut),
+            new LaunchItem("支付宝", @"C:\Alipay.lnk", null, LaunchItemKind.Shortcut),
+            new LaunchItem("Visual Studio Code", @"C:\Code.lnk", null, LaunchItemKind.Shortcut)
+        };
+
+        var fullPinyinResults = LaunchItemSearch.Filter(items, "weixin").ToList();
+        var initialResults = LaunchItemSearch.Filter(items, "zfb").ToList();
+
+        TestAssert.SequenceEqual(new[] { "微信" }, fullPinyinResults.Select(item => item.DisplayName));
+        TestAssert.SequenceEqual(new[] { "支付宝" }, initialResults.Select(item => item.DisplayName));
+    }
 }

@@ -22,6 +22,7 @@ internal static class Program
             (nameof(InternetShortcutFileTests.Read_ParsesSteamUrlIconFileAndIndex), InternetShortcutFileTests.Read_ParsesSteamUrlIconFileAndIndex),
             (nameof(LaunchItemSearchTests.Filter_RanksPrefixMatchesBeforeContainsMatches), LaunchItemSearchTests.Filter_RanksPrefixMatchesBeforeContainsMatches),
             (nameof(LaunchItemSearchTests.Filter_ReturnsAllItemsWhenQueryIsBlank), LaunchItemSearchTests.Filter_ReturnsAllItemsWhenQueryIsBlank),
+            (nameof(LaunchItemSearchTests.Filter_MatchesChineseAppsByPinyinAndInitials), LaunchItemSearchTests.Filter_MatchesChineseAppsByPinyinAndInitials),
             (nameof(VuiImportParserTests.Parse_ExtractsDecodedPathsAndSkipsEmptyValues), VuiImportParserTests.Parse_ExtractsDecodedPathsAndSkipsEmptyValues),
             (nameof(VuiImportParserTests.Parse_DeduplicatesNormalizedPaths), VuiImportParserTests.Parse_DeduplicatesNormalizedPaths),
             (nameof(LayoutServiceTests.Load_CreatesDefaultLayoutWhenMissing), LayoutServiceTests.Load_CreatesDefaultLayoutWhenMissing),

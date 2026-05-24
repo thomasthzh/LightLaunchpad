@@ -11,7 +11,7 @@
         Topmost="True"
         UseLayoutRounding="True"
         SnapsToDevicePixels="True"
-        Icon="Assets/Alice.gif"
+        Icon="Assets/LightLaunchpad.ico"
         PreviewKeyDown="Window_PreviewKeyDown"
         PreviewMouseWheel="Window_PreviewMouseWheel"
         Loaded="Window_Loaded">

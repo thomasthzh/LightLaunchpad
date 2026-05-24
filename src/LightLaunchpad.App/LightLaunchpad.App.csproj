@@ -11,12 +11,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
-    <ApplicationIcon>Assets\Alice.ico</ApplicationIcon>
+    <ApplicationIcon>Assets\LightLaunchpad.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
-    <Resource Include="Assets\Alice.gif" />
-    <Content Include="Assets\Alice.ico">
+    <Content Include="Assets\LightLaunchpad.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

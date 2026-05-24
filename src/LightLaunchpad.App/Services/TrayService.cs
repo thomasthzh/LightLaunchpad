@@ -28,7 +28,7 @@ public sealed class TrayService : IDisposable
 
     private static System.Drawing.Icon LoadTrayIcon()
     {
-        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Alice.ico");
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "LightLaunchpad.ico");
         return File.Exists(iconPath)
             ? new System.Drawing.Icon(iconPath)
             : System.Drawing.SystemIcons.Application;

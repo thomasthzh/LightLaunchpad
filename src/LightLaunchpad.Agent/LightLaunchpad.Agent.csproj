@@ -9,11 +9,11 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <ApplicationIcon>..\LightLaunchpad.App\Assets\Alice.ico</ApplicationIcon>
+    <ApplicationIcon>..\LightLaunchpad.App\Assets\LightLaunchpad.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="..\LightLaunchpad.App\Assets\Alice.ico" Link="Assets\Alice.ico">
+    <Content Include="..\LightLaunchpad.App\Assets\LightLaunchpad.ico" Link="Assets\LightLaunchpad.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

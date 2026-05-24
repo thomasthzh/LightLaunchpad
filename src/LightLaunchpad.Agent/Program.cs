@@ -279,7 +279,7 @@ internal sealed class AgentApplication : IDisposable
 
     private static IntPtr LoadAgentIcon()
     {
-        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Alice.ico");
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "LightLaunchpad.ico");
         if (File.Exists(iconPath))
         {
             var icon = LoadImage(IntPtr.Zero, iconPath, 1, 0, 0, 0x00000010 | 0x00000040 | 0x00008000);

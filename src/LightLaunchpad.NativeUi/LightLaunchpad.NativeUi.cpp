@@ -75,6 +75,9 @@ constexpr int SpotlightCornerRadius = 30;
 constexpr BYTE SpotlightGlassAlpha = 232;
 constexpr int SpotlightAnimationSteps = 9;
 constexpr int SpotlightAnimationOffset = 18;
+constexpr UINT_PTR DragAnimationTimerId = 0x4C5601;
+constexpr int DragTargetSettleMs = 55;
+constexpr double DragReflowSmoothing = 0.24;
 const GUID NativeIID_IImageList = { 0x46eb5926, 0x582e, 0x4017, { 0x9f, 0xdf, 0xe8, 0x99, 0x8d, 0xaa, 0x09, 0x50 } };
 
 enum AccentState
@@ -199,6 +202,13 @@ struct RegionDropTarget
     bool valid = false;
 };
 
+struct DragVisualOffset
+{
+    std::wstring sourcePath;
+    double dx = 0.0;
+    double dy = 0.0;
+};
+
 enum class DragMode
 {
     None,
@@ -234,11 +244,14 @@ std::vector<std::wstring> g_dragSourcePaths;
 POINT g_dragStart = {};
 POINT g_dragCurrent = {};
 DropTarget g_dropTarget;
+DropTarget g_pendingDropTarget;
+DWORD g_pendingDropTargetSince = 0;
 RegionDropTarget g_regionDropTarget;
 bool g_selectionBoxActive = false;
 bool g_selectionBoxAdditive = false;
 POINT g_selectionBoxStart = {};
 POINT g_selectionBoxCurrent = {};
+std::vector<DragVisualOffset> g_dragVisualOffsets;
 std::vector<std::wstring> g_contextItemPaths;
 std::wstring g_contextRegionId;
 std::vector<std::wstring> g_contextRegionIds;
@@ -257,6 +270,7 @@ void RebuildFiltered();
 void DestroyDirectRenderer();
 void ActivateSearchInput();
 bool InitializeDirectRenderer();
+std::wstring BuildPinyinSearchText(const std::wstring& text);
 void DrawSearchSurface(HDC dc, const RECT& client);
 void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client);
 int CalculateColumnCount(const RECT& client);
@@ -1641,9 +1655,211 @@ void ReloadData()
         g_selectedRegionIds.end());
 }
 
+bool IsCjkCharacter(wchar_t ch)
+{
+    return (ch >= 0x4E00 && ch <= 0x9FFF)
+        || (ch >= 0x3400 && ch <= 0x4DBF);
+}
+
+std::wstring KnownPinyinForChar(wchar_t ch)
+{
+    switch (ch)
+    {
+    case L'爱': return L"ai";
+    case L'百': return L"bai";
+    case L'宝': return L"bao";
+    case L'编': return L"bian";
+    case L'哔': return L"bi";
+    case L'便': return L"bian";
+    case L'表': return L"biao";
+    case L'博': return L"bo";
+    case L'播': return L"bo";
+    case L'财': return L"cai";
+    case L'程': return L"cheng";
+    case L'词': return L"ci";
+    case L'达': return L"da";
+    case L'大': return L"da";
+    case L'店': return L"dian";
+    case L'东': return L"dong";
+    case L'抖': return L"dou";
+    case L'钉': return L"ding";
+    case L'度': return L"du";
+    case L'多': return L"duo";
+    case L'飞': return L"fei";
+    case L'付': return L"fu";
+    case L'蜂': return L"feng";
+    case L'狗': return L"gou";
+    case L'管': return L"guan";
+    case L'光': return L"guang";
+    case L'广': return L"guang";
+    case L'果': return L"guo";
+    case L'盒': return L"he";
+    case L'红': return L"hong";
+    case L'狐': return L"hu";
+    case L'乎': return L"hu";
+    case L'虎': return L"hu";
+    case L'花': return L"hua";
+    case L'画': return L"hua";
+    case L'会': return L"hui";
+    case L'火': return L"huo";
+    case L'机': return L"ji";
+    case L'辑': return L"ji";
+    case L'家': return L"jia";
+    case L'加': return L"jia";
+    case L'剪': return L"jian";
+    case L'记': return L"ji";
+    case L'件': return L"jian";
+    case L'金': return L"jin";
+    case L'京': return L"jing";
+    case L'快': return L"kuai";
+    case L'酷': return L"ku";
+    case L'克': return L"ke";
+    case L'夸': return L"kua";
+    case L'控': return L"kong";
+    case L'览': return L"lan";
+    case L'狸': return L"li";
+    case L'哩': return L"li";
+    case L'理': return L"li";
+    case L'雷': return L"lei";
+    case L'乐': return L"le";
+    case L'联': return L"lian";
+    case L'聊': return L"liao";
+    case L'流': return L"liu";
+    case L'龙': return L"long";
+    case L'猫': return L"mao";
+    case L'美': return L"mei";
+    case L'梦': return L"meng";
+    case L'米': return L"mi";
+    case L'密': return L"mi";
+    case L'民': return L"min";
+    case L'墨': return L"mo";
+    case L'目': return L"mu";
+    case L'脑': return L"nao";
+    case L'能': return L"neng";
+    case L'盘': return L"pan";
+    case L'片': return L"pian";
+    case L'频': return L"pin";
+    case L'拼': return L"pin";
+    case L'屏': return L"ping";
+    case L'企': return L"qi";
+    case L'奇': return L"qi";
+    case L'器': return L"qi";
+    case L'签': return L"qian";
+    case L'全': return L"quan";
+    case L'软': return L"ruan";
+    case L'绒': return L"rong";
+    case L'森': return L"sen";
+    case L'商': return L"shang";
+    case L'书': return L"shu";
+    case L'输': return L"shu";
+    case L'搜': return L"sou";
+    case L'速': return L"su";
+    case L'台': return L"tai";
+    case L'淘': return L"tao";
+    case L'腾': return L"teng";
+    case L'天': return L"tian";
+    case L'条': return L"tiao";
+    case L'图': return L"tu";
+    case L'团': return L"tuan";
+    case L'网': return L"wang";
+    case L'微': return L"wei";
+    case L'文': return L"wen";
+    case L'无': return L"wu";
+    case L'息': return L"xi";
+    case L'侠': return L"xia";
+    case L'下': return L"xia";
+    case L'小': return L"xiao";
+    case L'星': return L"xing";
+    case L'型': return L"xing";
+    case L'信': return L"xin";
+    case L'行': return L"xing";
+    case L'讯': return L"xun";
+    case L'迅': return L"xun";
+    case L'牙': return L"ya";
+    case L'压': return L"ya";
+    case L'音': return L"yin";
+    case L'影': return L"ying";
+    case L'易': return L"yi";
+    case L'艺': return L"yi";
+    case L'银': return L"yin";
+    case L'有': return L"you";
+    case L'游': return L"you";
+    case L'鱼': return L"yu";
+    case L'语': return L"yu";
+    case L'云': return L"yun";
+    case L'业': return L"ye";
+    case L'支': return L"zhi";
+    case L'知': return L"zhi";
+    case L'中': return L"zhong";
+    case L'助': return L"zhu";
+    case L'桌': return L"zhuo";
+    case L'字': return L"zi";
+    default: return {};
+    }
+}
+
+wchar_t GbkPinyinInitial(wchar_t ch)
+{
+    char bytes[2] = {};
+    const int count = WideCharToMultiByte(936, 0, &ch, 1, bytes, 2, nullptr, nullptr);
+    if (count != 2) return 0;
+
+    const int high = static_cast<unsigned char>(bytes[0]);
+    const int low = static_cast<unsigned char>(bytes[1]);
+    const int code = (high - 160) * 100 + (low - 160);
+    static const int ranges[] = {
+        1601, 1637, 1833, 2078, 2274, 2302, 2433, 2594, 2787, 3106, 3212, 3472,
+        3635, 3722, 3730, 3858, 4027, 4086, 4390, 4558, 4684, 4925, 5249, 5590
+    };
+    static const wchar_t letters[] = L"ABCDEFGHJKLMNOPQRSTWXYZ";
+    for (int i = 0; i < ARRAYSIZE(ranges) - 1; ++i)
+    {
+        if (code >= ranges[i] && code < ranges[i + 1])
+        {
+            return static_cast<wchar_t>(std::towlower(letters[i]));
+        }
+    }
+
+    return 0;
+}
+
+std::wstring BuildPinyinSearchText(const std::wstring& text)
+{
+    std::wstring full;
+    std::wstring initials;
+    for (wchar_t ch : text)
+    {
+        if (!IsCjkCharacter(ch)) continue;
+
+        const std::wstring known = KnownPinyinForChar(ch);
+        if (!known.empty())
+        {
+            full += known;
+            initials.push_back(known.front());
+            continue;
+        }
+
+        const wchar_t initial = GbkPinyinInitial(ch);
+        if (initial)
+        {
+            full.push_back(initial);
+            initials.push_back(initial);
+        }
+    }
+
+    if (full.empty() && initials.empty()) return {};
+    return full + L" " + initials;
+}
+
 std::wstring BuildSearchCandidateText(const LaunchItem& item)
 {
-    return item.displayName + L" " + GetFileStem(item.sourcePath) + L" " + item.sourcePath;
+    const std::wstring displayPinyin = BuildPinyinSearchText(item.displayName);
+    const std::wstring stemPinyin = BuildPinyinSearchText(GetFileStem(item.sourcePath));
+    return item.displayName
+        + L" " + GetFileStem(item.sourcePath)
+        + L" " + displayPinyin
+        + L" " + stemPinyin
+        + L" " + item.sourcePath;
 }
 
 std::vector<std::wstring> SearchTokens(const std::wstring& query)
@@ -1926,6 +2142,32 @@ void LoadItemIcon(LaunchItem& item)
 
 HICON LoadTrayIcon()
 {
+    wchar_t modulePath[MAX_PATH] = L"";
+    if (GetModuleFileNameW(nullptr, modulePath, MAX_PATH))
+    {
+        for (int i = lstrlenW(modulePath) - 1; i >= 0; --i)
+        {
+            if (modulePath[i] == L'\\' || modulePath[i] == L'/')
+            {
+                modulePath[i + 1] = L'\0';
+                break;
+            }
+        }
+
+        wchar_t iconPath[MAX_PATH] = L"";
+        CopyText(iconPath, MAX_PATH, modulePath);
+        lstrcatW(iconPath, L"Assets\\LightLaunchpad.ico");
+        if (GetFileAttributesW(iconPath) != INVALID_FILE_ATTRIBUTES)
+        {
+            HICON icon = reinterpret_cast<HICON>(
+                LoadImageW(nullptr, iconPath, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE | LR_SHARED));
+            if (icon)
+            {
+                return icon;
+            }
+        }
+    }
+
     return LoadIconW(nullptr, IDI_APPLICATION);
 }
 
@@ -2350,6 +2592,41 @@ DropTarget FindDropTarget(POINT point)
     return {};
 }
 
+bool SameDropTarget(const DropTarget& left, const DropTarget& right)
+{
+    if (left.valid != right.valid) return false;
+    if (!left.valid) return true;
+    return left.order == right.order
+        && CompareStringOrdinal(left.regionId.c_str(), -1, right.regionId.c_str(), -1, TRUE) == CSTR_EQUAL;
+}
+
+void UpdateStableDropTarget(POINT point)
+{
+    const DropTarget candidate = FindDropTarget(point);
+    if (!g_dropTarget.valid || SameDropTarget(candidate, g_dropTarget))
+    {
+        g_dropTarget = candidate;
+        g_pendingDropTarget = {};
+        g_pendingDropTargetSince = 0;
+        return;
+    }
+
+    const DWORD now = GetTickCount();
+    if (!SameDropTarget(candidate, g_pendingDropTarget))
+    {
+        g_pendingDropTarget = candidate;
+        g_pendingDropTargetSince = now;
+        return;
+    }
+
+    if (now - g_pendingDropTargetSince >= DragTargetSettleMs)
+    {
+        g_dropTarget = candidate;
+        g_pendingDropTarget = {};
+        g_pendingDropTargetSince = 0;
+    }
+}
+
 RegionDropTarget FindRegionDropTarget(POINT point)
 {
     for (const auto& regionHit : g_regionHits)
@@ -2385,7 +2662,10 @@ void ResetDragState()
     g_regionDragId.clear();
     g_dragSourcePaths.clear();
     g_dropTarget = {};
+    g_pendingDropTarget = {};
+    g_pendingDropTargetSince = 0;
     g_regionDropTarget = {};
+    g_dragVisualOffsets.clear();
 }
 
 void BeginDrag(HWND hwnd, POINT point)
@@ -2396,6 +2676,10 @@ void BeginDrag(HWND hwnd, POINT point)
     g_dragCurrent = point;
     g_dragSourcePaths = ResolveDragSourcePaths(g_items[g_filtered[g_dragFilteredIndex]]);
     g_dropTarget = FindDropTarget(point);
+    g_pendingDropTarget = {};
+    g_pendingDropTargetSince = 0;
+    g_dragVisualOffsets.clear();
+    SetTimer(hwnd, DragAnimationTimerId, 16, nullptr);
     SetCapture(hwnd);
 }
 
@@ -2407,6 +2691,7 @@ void BeginRegionDrag(HWND hwnd, POINT point)
     g_dragCurrent = point;
     g_regionDragId = g_pendingRegionDragId;
     g_regionDropTarget = FindRegionDropTarget(point);
+    SetTimer(hwnd, DragAnimationTimerId, 16, nullptr);
     SetCapture(hwnd);
 }
 
@@ -2420,20 +2705,33 @@ void UpdateDrag(POINT point)
     }
     else
     {
-        g_dropTarget = FindDropTarget(point);
+        UpdateStableDropTarget(point);
     }
 }
 
 void CompleteDrag(HWND hwnd)
 {
+    const std::vector<std::wstring> movedPaths = g_dragSourcePaths;
     if (g_dragActive && g_dropTarget.valid && !g_dragSourcePaths.empty())
     {
         MoveItemsToTarget(g_dragSourcePaths, g_dropTarget);
         SortItems();
         SaveLayout();
         RebuildFiltered();
+        g_selectedSourcePaths = movedPaths;
+        g_selectedRegionIds.clear();
+        g_selectedFilteredIndex = -1;
+        for (int i = 0; i < static_cast<int>(g_filtered.size()); ++i)
+        {
+            if (ContainsPath(movedPaths, g_items[g_filtered[i]].sourcePath))
+            {
+                g_selectedFilteredIndex = i;
+                break;
+            }
+        }
     }
 
+    KillTimer(hwnd, DragAnimationTimerId);
     if (GetCapture() == hwnd)
     {
         ReleaseCapture();
@@ -2452,6 +2750,7 @@ void CompleteRegionDrag(HWND hwnd)
         RebuildFiltered();
     }
 
+    KillTimer(hwnd, DragAnimationTimerId);
     if (GetCapture() == hwnd)
     {
         ReleaseCapture();
@@ -2462,6 +2761,7 @@ void CompleteRegionDrag(HWND hwnd)
 
 void CancelDrag(HWND hwnd)
 {
+    KillTimer(hwnd, DragAnimationTimerId);
     if (GetCapture() == hwnd)
     {
         ReleaseCapture();
@@ -2475,6 +2775,14 @@ bool ShouldUseDragAvoidancePreview()
     return g_dragActive
         && g_dragMode == DragMode::Items
         && g_dropTarget.valid
+        && g_searchText.empty()
+        && !g_dragSourcePaths.empty();
+}
+
+bool ShouldTrackDragAvoidancePreview()
+{
+    return g_dragActive
+        && g_dragMode == DragMode::Items
         && g_searchText.empty()
         && !g_dragSourcePaths.empty();
 }
@@ -2524,24 +2832,64 @@ int DragPreviewSlotForItem(const LaunchItem& item)
     return previewSlot;
 }
 
+DragVisualOffset& VisualOffsetForItem(const std::wstring& sourcePath)
+{
+    auto found = std::find_if(g_dragVisualOffsets.begin(), g_dragVisualOffsets.end(), [&](const DragVisualOffset& offset) {
+        return SamePath(offset.sourcePath, sourcePath);
+    });
+    if (found != g_dragVisualOffsets.end())
+    {
+        return *found;
+    }
+
+    g_dragVisualOffsets.push_back({ sourcePath, 0.0, 0.0 });
+    return g_dragVisualOffsets.back();
+}
+
+bool IsDropHintItem(const LaunchItem& item)
+{
+    if (!ShouldUseDragAvoidancePreview()) return false;
+    if (ContainsPath(g_dragSourcePaths, item.sourcePath)) return false;
+    if (CompareStringOrdinal(item.regionId.c_str(), -1, g_dropTarget.regionId.c_str(), -1, TRUE) != CSTR_EQUAL) return false;
+
+    const int remainingCount = CountItemsInRegion(item.regionId, g_dragSourcePaths);
+    if (remainingCount <= 0) return false;
+    const int slot = CountNonDraggedItemsBefore(item.regionId, item.order);
+    const int hintSlot = std::clamp(g_dropTarget.order, 0, remainingCount - 1);
+    return slot == hintSlot;
+}
+
+BYTE DragIconAlphaForItem(const LaunchItem& item)
+{
+    return IsDropHintItem(item) ? 132 : 255;
+}
+
 void ApplyDragAvoidanceOffset(RECT& visualTileRect, const LaunchItem& item, int tileSize, int gap, int columns)
 {
-    if (!ShouldUseDragAvoidancePreview()) return;
-    if (ShouldHideTileForDragPreview(item)) return;
+    if (!ShouldTrackDragAvoidancePreview()) return;
+    if (ContainsPath(g_dragSourcePaths, item.sourcePath)) return;
 
-    const int currentSlot = ItemSlotInRegion(item);
-    const int previewSlot = DragPreviewSlotForItem(item);
-    if (currentSlot == previewSlot) return;
+    int targetDx = 0;
+    int targetDy = 0;
+    if (ShouldUseDragAvoidancePreview())
+    {
+        const int currentSlot = ItemSlotInRegion(item);
+        const int previewSlot = DragPreviewSlotForItem(item);
+        const int stride = tileSize + gap;
+        const int currentColumn = currentSlot % columns;
+        const int currentRow = currentSlot / columns;
+        const int previewColumn = previewSlot % columns;
+        const int previewRow = previewSlot / columns;
+        targetDx = (previewColumn - currentColumn) * stride;
+        targetDy = (previewRow - currentRow) * stride;
+    }
 
-    const int stride = tileSize + gap;
-    const int currentColumn = currentSlot % columns;
-    const int currentRow = currentSlot / columns;
-    const int previewColumn = previewSlot % columns;
-    const int previewRow = previewSlot / columns;
-    OffsetRect(
-        &visualTileRect,
-        (previewColumn - currentColumn) * stride,
-        (previewRow - currentRow) * stride);
+    auto& offset = VisualOffsetForItem(item.sourcePath);
+    offset.dx += (targetDx - offset.dx) * DragReflowSmoothing;
+    offset.dy += (targetDy - offset.dy) * DragReflowSmoothing;
+    if (std::abs(targetDx - offset.dx) < 0.45) offset.dx = targetDx;
+    if (std::abs(targetDy - offset.dy) < 0.45) offset.dy = targetDy;
+    OffsetRect(&visualTileRect, static_cast<int>(std::round(offset.dx)), static_cast<int>(std::round(offset.dy)));
 }
 
 void DrawRoundedRect(HDC dc, const RECT& rect, COLORREF fill, COLORREF stroke, int radius)
@@ -2637,16 +2985,33 @@ void DrawGlassBackground(ID2D1DCRenderTarget* target, const RECT& client)
     {
         const auto panel = D2D1::RoundedRect(D2DRect(client), static_cast<float>(SpotlightCornerRadius), static_cast<float>(SpotlightCornerRadius));
         if (baseBrush) target->FillRoundedRectangle(panel, baseBrush);
-        if (topHighlightBrush)
+
+        ID2D1RoundedRectangleGeometry* clipGeometry = nullptr;
+        ID2D1Layer* clipLayer = nullptr;
+        if (g_d2dFactory
+            && SUCCEEDED(g_d2dFactory->CreateRoundedRectangleGeometry(panel, &clipGeometry))
+            && SUCCEEDED(target->CreateLayer(nullptr, &clipLayer)))
         {
-            RECT topGlow = { client.left + 1, client.top + 1, client.right - 1, client.top + std::max<LONG>(96, (client.bottom - client.top) / 4) };
-            target->FillRectangle(D2DRect(topGlow), topHighlightBrush);
+            D2D1_LAYER_PARAMETERS layerParameters = D2D1::LayerParameters();
+            layerParameters.contentBounds = D2D1::InfiniteRect();
+            layerParameters.geometricMask = clipGeometry;
+            layerParameters.maskAntialiasMode = D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
+            layerParameters.opacity = 1.0f;
+            target->PushLayer(layerParameters, clipLayer);
+            if (topHighlightBrush)
+            {
+                RECT topGlow = { client.left, client.top, client.right, client.top + std::max<LONG>(96, (client.bottom - client.top) / 4) };
+                target->FillRectangle(D2DRect(topGlow), topHighlightBrush);
+            }
+            if (lowerTintBrush)
+            {
+                RECT lower = { client.left, client.top + (client.bottom - client.top) / 2, client.right, client.bottom };
+                target->FillRectangle(D2DRect(lower), lowerTintBrush);
+            }
+            target->PopLayer();
         }
-        if (lowerTintBrush)
-        {
-            RECT lower = { client.left + 1, client.top + (client.bottom - client.top) / 2, client.right - 1, client.bottom - 1 };
-            target->FillRectangle(D2DRect(lower), lowerTintBrush);
-        }
+        SafeRelease(clipLayer);
+        SafeRelease(clipGeometry);
     }
     else
     {
@@ -2662,6 +3027,28 @@ void DrawGlassBackground(ID2D1DCRenderTarget* target, const RECT& client)
     SafeRelease(baseBrush);
     SafeRelease(topHighlightBrush);
     SafeRelease(lowerTintBrush);
+}
+
+void FillRectInSpotlightClip(HDC dc, const RECT& client, const RECT& fillRect, HBRUSH brush)
+{
+    const int saved = SaveDC(dc);
+    HRGN clip = CreateRoundRectRgn(
+        client.left,
+        client.top,
+        client.right + 1,
+        client.bottom + 1,
+        SpotlightCornerRadius * 2,
+        SpotlightCornerRadius * 2);
+    if (clip)
+    {
+        SelectClipRgn(dc, clip);
+    }
+    FillRect(dc, &fillRect, brush);
+    if (clip)
+    {
+        DeleteObject(clip);
+    }
+    RestoreDC(dc, saved);
 }
 
 void DrawGlassBackground(HDC dc, const RECT& client)
@@ -2685,7 +3072,14 @@ void DrawGlassBackground(HDC dc, const RECT& client)
     const LONG highlightHeight = std::max<LONG>(80, (client.bottom - client.top) / 5);
     RECT topGlow = { client.left, client.top, client.right, client.top + highlightHeight };
     HBRUSH glow = CreateSolidBrush(spotlight ? RGB(72, 82, 96) : RGB(38, 46, 58));
-    FillRect(dc, &topGlow, glow);
+    if (spotlight)
+    {
+        FillRectInSpotlightClip(dc, client, topGlow, glow);
+    }
+    else
+    {
+        FillRect(dc, &topGlow, glow);
+    }
     DeleteObject(glow);
 }
 
@@ -2803,6 +3197,7 @@ struct PendingIconDraw
     int x = 0;
     int y = 0;
     int size = 0;
+    BYTE alpha = 255;
 };
 
 bool GetIconOpaqueBounds(HICON icon, RECT& bounds, int& width, int& height)
@@ -2885,14 +3280,48 @@ bool GetCachedIconOpaqueBounds(HICON icon, RECT& bounds, int& width, int& height
     return hasBounds;
 }
 
-void DrawFittedIcon(HDC dc, int x, int y, HICON icon, int size)
+bool DrawIconWithAlpha(HDC dc, int x, int y, HICON icon, int size, BYTE alpha)
+{
+    if (alpha == 255)
+    {
+        return DrawIconEx(dc, x, y, icon, size, size, 0, nullptr, DI_NORMAL) != FALSE;
+    }
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = size;
+    info.bmiHeader.biHeight = -size;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HDC iconDc = CreateCompatibleDC(dc);
+    bool drawn = false;
+    if (bitmap && iconDc && bits)
+    {
+        std::memset(bits, 0, static_cast<size_t>(size) * static_cast<size_t>(size) * sizeof(DWORD));
+        HGDIOBJ oldBitmap = SelectObject(iconDc, bitmap);
+        DrawIconEx(iconDc, 0, 0, icon, size, size, 0, nullptr, DI_NORMAL);
+        BLENDFUNCTION blend = { AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
+        drawn = AlphaBlend(dc, x, y, size, size, iconDc, 0, 0, size, size, blend) != FALSE;
+        SelectObject(iconDc, oldBitmap);
+    }
+
+    if (bitmap) DeleteObject(bitmap);
+    if (iconDc) DeleteDC(iconDc);
+    return drawn;
+}
+
+void DrawFittedIcon(HDC dc, int x, int y, HICON icon, int size, BYTE alpha = 255)
 {
     RECT opaqueBounds = {};
     int sourceWidth = 0;
     int sourceHeight = 0;
     if (!GetCachedIconOpaqueBounds(icon, opaqueBounds, sourceWidth, sourceHeight))
     {
-        DrawIconEx(dc, x, y, icon, size, size, 0, nullptr, DI_NORMAL);
+        DrawIconWithAlpha(dc, x, y, icon, size, alpha);
         return;
     }
 
@@ -2900,7 +3329,7 @@ void DrawFittedIcon(HDC dc, int x, int y, HICON icon, int size)
     const int cropHeight = opaqueBounds.bottom - opaqueBounds.top;
     if (cropWidth <= 0 || cropHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0)
     {
-        DrawIconEx(dc, x, y, icon, size, size, 0, nullptr, DI_NORMAL);
+        DrawIconWithAlpha(dc, x, y, icon, size, alpha);
         return;
     }
 
@@ -2908,7 +3337,7 @@ void DrawFittedIcon(HDC dc, int x, int y, HICON icon, int size)
         || cropHeight < static_cast<int>(sourceHeight * 0.86);
     if (!hasMeaningfulPadding)
     {
-        DrawIconEx(dc, x, y, icon, size, size, 0, nullptr, DI_NORMAL);
+        DrawIconWithAlpha(dc, x, y, icon, size, alpha);
         return;
     }
 
@@ -2937,7 +3366,7 @@ void DrawFittedIcon(HDC dc, int x, int y, HICON icon, int size)
         const int targetY = y + (size - targetHeight) / 2;
         const int previousMode = SetStretchBltMode(dc, HALFTONE);
         SetBrushOrgEx(dc, 0, 0, nullptr);
-        BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        BLENDFUNCTION blend = { AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
         drawn = AlphaBlend(
             dc,
             targetX,
@@ -2959,7 +3388,7 @@ void DrawFittedIcon(HDC dc, int x, int y, HICON icon, int size)
 
     if (!drawn)
     {
-        DrawIconEx(dc, x, y, icon, size, size, 0, nullptr, DI_NORMAL);
+        DrawIconWithAlpha(dc, x, y, icon, size, alpha);
     }
 }
 
@@ -2974,7 +3403,7 @@ void DrawDragFeedback(HDC dc)
             if (CompareStringOrdinal(regionHit.regionId.c_str(), -1, g_regionDropTarget.regionId.c_str(), -1, TRUE) != CSTR_EQUAL) continue;
             const int y = g_regionDropTarget.insertAfter ? regionHit.headerBounds.bottom + 3 : regionHit.headerBounds.top - 3;
             RECT marker = { regionHit.headerBounds.left, y, regionHit.headerBounds.right, y + 6 };
-            DrawRoundedRect(dc, marker, RGB(80, 190, 255), RGB(160, 225, 255), 4);
+            DrawRoundedRect(dc, marker, RGB(78, 88, 102), RGB(142, 154, 170), 4);
             break;
         }
 
@@ -2987,44 +3416,8 @@ void DrawDragFeedback(HDC dc)
 
     if (!g_dropTarget.valid) return;
 
-    RECT marker = {};
-    bool hasMarker = false;
-    for (const auto& hit : g_hits)
-    {
-        if (hit.itemIndex < 0 || hit.itemIndex >= static_cast<int>(g_filtered.size())) continue;
-        const auto& item = g_items[g_filtered[hit.itemIndex]];
-        if (CompareStringOrdinal(item.regionId.c_str(), -1, g_dropTarget.regionId.c_str(), -1, TRUE) != CSTR_EQUAL) continue;
-        if (item.order >= g_dropTarget.order)
-        {
-            marker = { hit.bounds.left - 3, hit.bounds.top + 8, hit.bounds.left + 3, hit.bounds.bottom - 8 };
-            hasMarker = true;
-            break;
-        }
-
-        marker = { hit.bounds.right + 4, hit.bounds.top + 8, hit.bounds.right + 10, hit.bounds.bottom - 8 };
-        hasMarker = true;
-    }
-
-    if (!hasMarker)
-    {
-        for (const auto& regionHit : g_regionHits)
-        {
-            if (CompareStringOrdinal(regionHit.regionId.c_str(), -1, g_dropTarget.regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
-            {
-                marker = { regionHit.bounds.left + 10, regionHit.bounds.top + 34, regionHit.bounds.right - 10, regionHit.bounds.top + 40 };
-                hasMarker = true;
-                break;
-            }
-        }
-    }
-
-    if (hasMarker)
-    {
-        DrawRoundedRect(dc, marker, RGB(80, 190, 255), RGB(160, 225, 255), 4);
-    }
-
     RECT ghost = { g_dragCurrent.x + 16, g_dragCurrent.y + 16, g_dragCurrent.x + 162, g_dragCurrent.y + 58 };
-    DrawRoundedRect(dc, ghost, RGB(42, 56, 76), RGB(120, 185, 255), 12);
+    DrawRoundedRect(dc, ghost, RGB(42, 52, 66), RGB(132, 148, 168), 12);
     if (g_dragFilteredIndex >= 0 && g_dragFilteredIndex < static_cast<int>(g_filtered.size()))
     {
         RECT text = { ghost.left + 12, ghost.top + 4, ghost.right - 12, ghost.bottom - 4 };
@@ -3163,11 +3556,12 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
                     const int icon = g_settings.iconSize;
                     const int iconX = visualTileRect.left + (tileSize - icon) / 2;
                     const int iconY = visualTileRect.top + 14;
-                    pendingIcons.push_back({ item.icon, iconX, iconY, icon });
+                    pendingIcons.push_back({ item.icon, iconX, iconY, icon, DragIconAlphaForItem(item) });
                 }
 
                 RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
-                DrawTextDirect(target, g_tileTextFormat, item.displayName, labelRect, RGB(238, 244, 252), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP);
+                const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
+                DrawTextDirect(target, g_tileTextFormat, item.displayName, labelRect, labelColor, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP);
                 g_hits.push_back({ visualTileRect, filteredIndex });
             }
 
@@ -3197,7 +3591,7 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
     SelectClipRgn(dc, clip);
     for (const auto& icon : pendingIcons)
     {
-        DrawFittedIcon(dc, icon.x, icon.y, icon.icon, icon.size);
+        DrawFittedIcon(dc, icon.x, icon.y, icon.icon, icon.size, icon.alpha);
     }
     DrawDragFeedback(dc);
     DrawSelectionBox(dc);
@@ -3292,12 +3686,13 @@ void PaintContent(HDC dc, const RECT& client)
                     const int icon = g_settings.iconSize;
                     const int iconX = visualTileRect.left + (tileSize - icon) / 2;
                     const int iconY = visualTileRect.top + 14;
-                    DrawFittedIcon(dc, iconX, iconY, item.icon, icon);
+                    DrawFittedIcon(dc, iconX, iconY, item.icon, icon, DragIconAlphaForItem(item));
                 }
 
                 SelectObject(dc, tileFont);
                 RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
-                DrawTextClipped(dc, item.displayName, labelRect, DT_CENTER | DT_WORDBREAK | DT_END_ELLIPSIS, RGB(238, 244, 252));
+                const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
+                DrawTextClipped(dc, item.displayName, labelRect, DT_CENTER | DT_WORDBREAK | DT_END_ELLIPSIS, labelColor);
                 g_hits.push_back({ visualTileRect, filteredIndex });
             }
 
@@ -4211,6 +4606,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_PAINT:
         PaintWindow(hwnd);
         return 0;
+    case WM_TIMER:
+        if (wParam == DragAnimationTimerId && g_dragActive)
+        {
+            if (g_dragMode == DragMode::Items)
+            {
+                UpdateStableDropTarget(g_dragCurrent);
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, message, wParam, lParam);
     case WM_MOUSEWHEEL:
         g_scrollOffset -= static_cast<int>(std::round((GET_WHEEL_DELTA_WPARAM(wParam) / static_cast<double>(WHEEL_DELTA)) * WheelScrollStep()));
         ClampScroll();
@@ -4444,10 +4850,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         if (reinterpret_cast<HWND>(lParam) != hwnd && g_dragActive)
         {
+            KillTimer(hwnd, DragAnimationTimerId);
             ResetDragState();
         }
         return 0;
     case WM_DESTROY:
+        KillTimer(hwnd, DragAnimationTimerId);
         RemoveTrayIcon();
         UnregisterHotKey(hwnd, HotkeyId);
         DestroyDirectRenderer();

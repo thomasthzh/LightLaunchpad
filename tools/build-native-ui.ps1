@@ -71,6 +71,6 @@ finally {
 }
 
 New-Item -ItemType Directory -Force -Path (Join-Path $outputDirectoryFull "Assets") | Out-Null
-Copy-Item (Join-Path $repoRoot "src\LightLaunchpad.App\Assets\Alice.ico") (Join-Path $outputDirectoryFull "Assets\Alice.ico") -Force
+Copy-Item (Join-Path $repoRoot "src\LightLaunchpad.App\Assets\LightLaunchpad.ico") (Join-Path $outputDirectoryFull "Assets\LightLaunchpad.ico") -Force
 
 Get-Item (Join-Path $outputDirectoryFull "LightLaunchpad.NativeUi.exe")
