@@ -55,6 +55,10 @@
 #define DWMSBT_TRANSIENTWINDOW 3
 #endif
 
+#ifndef DWMSBT_NONE
+#define DWMSBT_NONE 1
+#endif
+
 namespace
 {
 constexpr int HotkeyId = 0x4C55;
@@ -177,6 +181,9 @@ struct LaunchItem
     int order = 0;
     HICON icon = nullptr;
     uint64_t iconLastUsed = 0;
+    std::wstring displayNameLower;
+    std::wstring searchCandidateText;
+    std::wstring searchCandidateLower;
 };
 
 struct HitTile
@@ -242,6 +249,8 @@ std::vector<RegionHit> g_regionHits;
 std::vector<std::wstring> g_selectedSourcePaths;
 std::vector<std::wstring> g_selectedRegionIds;
 std::wstring g_searchText;
+std::wstring g_completionBaseText;
+std::wstring g_completionCandidateText;
 bool g_searchInputActive = false;
 int g_selectedFilteredIndex = -1;
 int g_scrollOffset = 0;
@@ -286,6 +295,8 @@ void DestroyDirectRenderer();
 void ActivateSearchInput();
 bool InitializeDirectRenderer();
 std::wstring BuildPinyinSearchText(const std::wstring& text);
+void UpdateSearchIndex(LaunchItem& item);
+void RebuildSearchIndex();
 void DrawSearchSurface(HDC dc, const RECT& client);
 void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client);
 int CalculateColumnCount(const RECT& client);
@@ -317,6 +328,12 @@ std::wstring ToLower(std::wstring value)
 bool ContainsIgnoreCase(const std::wstring& text, const std::wstring& query)
 {
     return ToLower(text).find(ToLower(query)) != std::wstring::npos;
+}
+
+bool StartsWithIgnoreCase(const std::wstring& text, const std::wstring& prefix)
+{
+    if (prefix.size() > text.size()) return false;
+    return CompareStringOrdinal(text.c_str(), static_cast<int>(prefix.size()), prefix.c_str(), static_cast<int>(prefix.size()), TRUE) == CSTR_EQUAL;
 }
 
 std::wstring Trim(std::wstring value)
@@ -374,6 +391,30 @@ RECT SearchTextRect(const RECT& searchRect)
 std::wstring SearchDisplayText()
 {
     return g_searchText;
+}
+
+bool IsSearchCompletionActive()
+{
+    return !g_completionCandidateText.empty();
+}
+
+void ClearSearchCompletion()
+{
+    g_completionBaseText.clear();
+    g_completionCandidateText.clear();
+}
+
+std::wstring SearchCompletionTail()
+{
+    if (!IsSearchCompletionActive()) return L"";
+    if (StartsWithIgnoreCase(g_completionCandidateText, g_searchText))
+    {
+        return g_completionCandidateText.substr(g_searchText.size());
+    }
+
+    return g_searchText.empty()
+        ? g_completionCandidateText
+        : L"  " + g_completionCandidateText;
 }
 
 int TileSize()
@@ -1437,6 +1478,8 @@ void RenameItem(const std::wstring& sourcePath)
     if (name.empty()) return;
 
     found->displayName = name;
+    UpdateSearchIndex(*found);
+    ClearSearchCompletion();
     SaveLayout();
     RebuildFiltered();
     InvalidateRect(g_hwnd, nullptr, TRUE);
@@ -1681,6 +1724,7 @@ void ReloadData()
     LoadLayout();
     AddMissingLaunchpadFolderItems();
     SortItems();
+    RebuildSearchIndex();
 
     if (previousIconSize == g_settings.iconSize)
     {
@@ -1940,6 +1984,21 @@ std::wstring BuildSearchCandidateText(const LaunchItem& item)
         + L" " + item.sourcePath;
 }
 
+void UpdateSearchIndex(LaunchItem& item)
+{
+    item.displayNameLower = ToLower(item.displayName);
+    item.searchCandidateText = BuildSearchCandidateText(item);
+    item.searchCandidateLower = ToLower(item.searchCandidateText);
+}
+
+void RebuildSearchIndex()
+{
+    for (auto& item : g_items)
+    {
+        UpdateSearchIndex(item);
+    }
+}
+
 std::vector<std::wstring> SearchTokens(const std::wstring& query)
 {
     std::vector<std::wstring> tokens;
@@ -1988,6 +2047,26 @@ int BoundaryMatchIndex(const std::wstring& text, const std::wstring& token)
     return -1;
 }
 
+int BoundaryMatchIndexLower(const std::wstring& lowerText, const std::wstring& lowerToken)
+{
+    if (lowerToken.empty()) return 0;
+    size_t position = lowerText.find(lowerToken);
+    while (position != std::wstring::npos)
+    {
+        if (position == 0)
+        {
+            return 0;
+        }
+        const wchar_t previous = lowerText[position - 1];
+        if (std::iswspace(previous) || previous == L'-' || previous == L'_' || previous == L'.' || previous == L'\\' || previous == L'/')
+        {
+            return static_cast<int>(position);
+        }
+        position = lowerText.find(lowerToken, position + 1);
+    }
+    return -1;
+}
+
 int FuzzyMatchScore(const std::wstring& text, const std::wstring& token)
 {
     if (token.empty()) return 0;
@@ -2017,13 +2096,40 @@ int FuzzyMatchScore(const std::wstring& text, const std::wstring& token)
     return score + static_cast<int>(lowerText.size() - lowerToken.size());
 }
 
+int FuzzyMatchScoreLower(const std::wstring& lowerText, const std::wstring& lowerToken)
+{
+    if (lowerToken.empty()) return 0;
+    int score = 0;
+    int lastMatched = -1;
+    size_t searchFrom = 0;
+    for (wchar_t ch : lowerToken)
+    {
+        const size_t found = lowerText.find(ch, searchFrom);
+        if (found == std::wstring::npos)
+        {
+            return 1000000;
+        }
+        if (lastMatched >= 0)
+        {
+            score += static_cast<int>(found) - lastMatched - 1;
+        }
+        else
+        {
+            score += static_cast<int>(found);
+        }
+        lastMatched = static_cast<int>(found);
+        searchFrom = found + 1;
+    }
+    return score + static_cast<int>(lowerText.size() - lowerToken.size());
+}
+
 int SearchScore(const LaunchItem& item, const std::wstring& query)
 {
     const auto tokens = SearchTokens(query);
     if (tokens.empty()) return 0;
 
-    const auto display = ToLower(item.displayName);
-    const auto candidate = ToLower(BuildSearchCandidateText(item));
+    const auto& display = item.displayNameLower;
+    const auto& candidate = item.searchCandidateLower;
     int total = 0;
     for (const auto& rawToken : tokens)
     {
@@ -2039,7 +2145,7 @@ int SearchScore(const LaunchItem& item, const std::wstring& query)
         }
         else
         {
-            const int boundary = BoundaryMatchIndex(item.displayName, rawToken);
+            const int boundary = BoundaryMatchIndexLower(display, token);
             if (boundary >= 0)
             {
                 tokenScore = 20 + boundary;
@@ -2058,8 +2164,8 @@ int SearchScore(const LaunchItem& item, const std::wstring& query)
                 }
                 else
                 {
-                    const int displayFuzzy = FuzzyMatchScore(item.displayName, rawToken);
-                    const int candidateFuzzy = FuzzyMatchScore(BuildSearchCandidateText(item), rawToken);
+                    const int displayFuzzy = FuzzyMatchScoreLower(display, token);
+                    const int candidateFuzzy = FuzzyMatchScoreLower(candidate, token);
                     tokenScore = std::min(120 + displayFuzzy, 220 + candidateFuzzy);
                 }
             }
@@ -2391,7 +2497,7 @@ void ApplyGlassBackdrop()
     blur.fEnable = TRUE;
     DwmEnableBlurBehindWindow(g_hwnd, &blur);
 
-    const DWORD backdrop = DWMSBT_TRANSIENTWINDOW;
+    const DWORD backdrop = IsSpotlightMode() ? DWMSBT_NONE : DWMSBT_TRANSIENTWINDOW;
     DwmSetWindowAttribute(g_hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
     const DWORD borderColor = DWMWA_COLOR_NONE;
     DwmSetWindowAttribute(g_hwnd, DWMWA_BORDER_COLOR, &borderColor, sizeof(borderColor));
@@ -3068,92 +3174,123 @@ D2D1_ROUNDED_RECT SpotlightRoundedRect(const RECT& client, float inset)
         radius);
 }
 
-RECT InsetSpotlightRect(const RECT& client, int inset)
+void RenderSpotlightGlassDirect2D(ID2D1DCRenderTarget* target, const RECT& client)
 {
-    return {
-        client.left + inset,
-        client.top + inset,
-        client.right - inset,
-        client.bottom - inset
+    target->Clear(D2DColor(RGB(34, 42, 52)));
+
+    ID2D1GradientStopCollection* glassStops = nullptr;
+    ID2D1LinearGradientBrush* glassBrush = nullptr;
+    D2D1_GRADIENT_STOP stops[] = {
+        { 0.0f, D2DColorAlpha(RGB(88, 104, 120), 0.82f) },
+        { 0.46f, D2DColorAlpha(RGB(58, 70, 84), 0.78f) },
+        { 1.0f, D2DColorAlpha(RGB(34, 44, 58), 0.84f) }
     };
+    if (SUCCEEDED(target->CreateGradientStopCollection(stops, ARRAYSIZE(stops), &glassStops)) && glassStops)
+    {
+        const auto props = D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(client.left), static_cast<float>(client.top)),
+            D2D1::Point2F(static_cast<float>(client.right), static_cast<float>(client.bottom)));
+        target->CreateLinearGradientBrush(props, glassStops, &glassBrush);
+    }
+
+    const auto panel = SpotlightRoundedRect(client, 0.0f);
+    if (glassBrush)
+    {
+        target->FillRoundedRectangle(panel, glassBrush);
+    }
+
+    ID2D1GradientStopCollection* sheenStops = nullptr;
+    ID2D1LinearGradientBrush* sheenBrush = nullptr;
+    D2D1_GRADIENT_STOP sheen[] = {
+        { 0.0f, D2DColorAlpha(RGB(255, 255, 255), 0.18f) },
+        { 0.32f, D2DColorAlpha(RGB(255, 255, 255), 0.055f) },
+        { 1.0f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) }
+    };
+    if (SUCCEEDED(target->CreateGradientStopCollection(sheen, ARRAYSIZE(sheen), &sheenStops)) && sheenStops)
+    {
+        const auto props = D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(client.left), static_cast<float>(client.top)),
+            D2D1::Point2F(static_cast<float>(client.left), static_cast<float>(client.bottom)));
+        target->CreateLinearGradientBrush(props, sheenStops, &sheenBrush);
+    }
+    if (sheenBrush)
+    {
+        target->FillRoundedRectangle(panel, sheenBrush);
+    }
+
+    SafeRelease(sheenBrush);
+    SafeRelease(sheenStops);
+    SafeRelease(glassBrush);
+    SafeRelease(glassStops);
+}
+
+void RenderLaunchpadBackdropDirect2D(ID2D1DCRenderTarget* target, const RECT& client)
+{
+    target->Clear(D2DColor(RGB(24, 29, 38)));
+
+    ID2D1SolidColorBrush* baseBrush = nullptr;
+    ID2D1SolidColorBrush* topHighlightBrush = nullptr;
+    target->CreateSolidColorBrush(D2DColorAlpha(RGB(38, 46, 58), 0.72f), &baseBrush);
+    target->CreateSolidColorBrush(D2DColorAlpha(RGB(255, 255, 255), 0.08f), &topHighlightBrush);
+    if (baseBrush) target->FillRectangle(D2DRect(client), baseBrush);
+    if (topHighlightBrush)
+    {
+        const LONG highlightHeight = std::max<LONG>(80, (client.bottom - client.top) / 5);
+        RECT topGlow = { client.left, client.top, client.right, client.top + highlightHeight };
+        target->FillRectangle(D2DRect(topGlow), topHighlightBrush);
+    }
+    SafeRelease(baseBrush);
+    SafeRelease(topHighlightBrush);
 }
 
 void DrawGlassBackground(ID2D1DCRenderTarget* target, const RECT& client)
 {
-    const bool spotlight = IsSpotlightMode();
-    target->Clear(D2DColor(spotlight ? RGB(18, 22, 30) : RGB(24, 29, 38)));
-
-    ID2D1SolidColorBrush* baseBrush = nullptr;
-    ID2D1SolidColorBrush* topHighlightBrush = nullptr;
-    ID2D1SolidColorBrush* lowerTintBrush = nullptr;
-    target->CreateSolidColorBrush(D2DColorAlpha(spotlight ? RGB(44, 52, 64) : RGB(38, 46, 58), spotlight ? 0.82f : 0.72f), &baseBrush);
-    target->CreateSolidColorBrush(D2DColorAlpha(RGB(255, 255, 255), spotlight ? 0.16f : 0.08f), &topHighlightBrush);
-    target->CreateSolidColorBrush(D2DColorAlpha(RGB(12, 18, 28), spotlight ? 0.22f : 0.0f), &lowerTintBrush);
-
-    if (spotlight)
+    if (IsSpotlightMode())
     {
-        const auto panel = SpotlightRoundedRect(client, static_cast<float>(SpotlightPanelInset));
-        if (baseBrush) target->FillRoundedRectangle(panel, baseBrush);
-
-        ID2D1RoundedRectangleGeometry* clipGeometry = nullptr;
-        ID2D1Layer* clipLayer = nullptr;
-        if (g_d2dFactory
-            && SUCCEEDED(g_d2dFactory->CreateRoundedRectangleGeometry(panel, &clipGeometry))
-            && SUCCEEDED(target->CreateLayer(nullptr, &clipLayer)))
-        {
-            D2D1_LAYER_PARAMETERS layerParameters = D2D1::LayerParameters();
-            layerParameters.contentBounds = D2D1::InfiniteRect();
-            layerParameters.geometricMask = clipGeometry;
-            layerParameters.maskAntialiasMode = D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
-            layerParameters.opacity = 1.0f;
-            target->PushLayer(layerParameters, clipLayer);
-            if (topHighlightBrush)
-            {
-                RECT topGlow = { client.left, client.top, client.right, client.top + std::max<LONG>(96, (client.bottom - client.top) / 4) };
-                target->FillRectangle(D2DRect(topGlow), topHighlightBrush);
-            }
-            if (lowerTintBrush)
-            {
-                RECT lower = { client.left, client.top + (client.bottom - client.top) / 2, client.right, client.bottom };
-                target->FillRectangle(D2DRect(lower), lowerTintBrush);
-            }
-            target->PopLayer();
-        }
-        SafeRelease(clipLayer);
-        SafeRelease(clipGeometry);
-    }
-    else
-    {
-        if (baseBrush) target->FillRectangle(D2DRect(client), baseBrush);
-        if (topHighlightBrush)
-        {
-            const LONG highlightHeight = std::max<LONG>(80, (client.bottom - client.top) / 5);
-            RECT topGlow = { client.left, client.top, client.right, client.top + highlightHeight };
-            target->FillRectangle(D2DRect(topGlow), topHighlightBrush);
-        }
+        RenderSpotlightGlassDirect2D(target, client);
+        return;
     }
 
-    SafeRelease(baseBrush);
-    SafeRelease(topHighlightBrush);
-    SafeRelease(lowerTintBrush);
+    RenderLaunchpadBackdropDirect2D(target, client);
 }
 
-void FillRectInSpotlightClip(HDC dc, const RECT& client, const RECT& fillRect, HBRUSH brush)
+void RenderSpotlightGlassGdi(HDC dc, const RECT& client)
 {
     const int saved = SaveDC(dc);
-    const RECT clipRect = InsetSpotlightRect(client, SpotlightPanelInset);
-    HRGN clip = CreateRoundRectRgn(
-        clipRect.left,
-        clipRect.top,
-        clipRect.right + 1,
-        clipRect.bottom + 1,
-        std::max(1, (SpotlightCornerRadius - SpotlightPanelInset) * 2),
-        std::max(1, (SpotlightCornerRadius - SpotlightPanelInset) * 2));
+    const int radius = std::max(1, SpotlightCornerRadius * 2);
+    HRGN clip = CreateRoundRectRgn(client.left, client.top, client.right + 1, client.bottom + 1, radius, radius);
     if (clip)
     {
         SelectClipRgn(dc, clip);
     }
-    FillRect(dc, &fillRect, brush);
+
+    TRIVERTEX vertices[3] = {};
+    vertices[0].x = client.left;
+    vertices[0].y = client.top;
+    vertices[0].Red = 88 << 8;
+    vertices[0].Green = 104 << 8;
+    vertices[0].Blue = 120 << 8;
+    vertices[0].Alpha = 0xFFFF;
+
+    vertices[1].x = client.right;
+    vertices[1].y = client.top + ((client.bottom - client.top) * 46 / 100);
+    vertices[1].Red = 58 << 8;
+    vertices[1].Green = 70 << 8;
+    vertices[1].Blue = 84 << 8;
+    vertices[1].Alpha = 0xFFFF;
+
+    vertices[2].x = client.right;
+    vertices[2].y = client.bottom;
+    vertices[2].Red = 34 << 8;
+    vertices[2].Green = 44 << 8;
+    vertices[2].Blue = 58 << 8;
+    vertices[2].Alpha = 0xFFFF;
+
+    GRADIENT_RECT upper = { 0, 1 };
+    GRADIENT_RECT lower = { 1, 2 };
+    GradientFill(dc, vertices, 3, &upper, 1, GRADIENT_FILL_RECT_V);
+    GradientFill(dc, vertices, 3, &lower, 1, GRADIENT_FILL_RECT_V);
+
     if (clip)
     {
         DeleteObject(clip);
@@ -3164,34 +3301,20 @@ void FillRectInSpotlightClip(HDC dc, const RECT& client, const RECT& fillRect, H
 void DrawGlassBackground(HDC dc, const RECT& client)
 {
     const bool spotlight = IsSpotlightMode();
-    HBRUSH background = CreateSolidBrush(spotlight ? RGB(44, 52, 64) : RGB(24, 29, 38));
     if (spotlight)
     {
-        const RECT panel = InsetSpotlightRect(client, SpotlightPanelInset);
-        HGDIOBJ oldBrush = SelectObject(dc, background);
-        HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
-        const int panelRadius = std::max(1, (SpotlightCornerRadius - SpotlightPanelInset) * 2);
-        RoundRect(dc, panel.left, panel.top, panel.right, panel.bottom, panelRadius, panelRadius);
-        SelectObject(dc, oldPen);
-        SelectObject(dc, oldBrush);
+        RenderSpotlightGlassGdi(dc, client);
+        return;
     }
-    else
-    {
-        FillRect(dc, &client, background);
-    }
+
+    HBRUSH background = CreateSolidBrush(spotlight ? RGB(44, 52, 64) : RGB(24, 29, 38));
+    FillRect(dc, &client, background);
     DeleteObject(background);
 
     const LONG highlightHeight = std::max<LONG>(80, (client.bottom - client.top) / 5);
     RECT topGlow = { client.left, client.top, client.right, client.top + highlightHeight };
     HBRUSH glow = CreateSolidBrush(spotlight ? RGB(72, 82, 96) : RGB(38, 46, 58));
-    if (spotlight)
-    {
-        FillRectInSpotlightClip(dc, client, topGlow, glow);
-    }
-    else
-    {
-        FillRect(dc, &topGlow, glow);
-    }
+    FillRect(dc, &topGlow, glow);
     DeleteObject(glow);
 }
 
@@ -3297,28 +3420,91 @@ void DrawTextDirect(
     SafeRelease(brush);
 }
 
+float MeasureTextWidthDirect(IDWriteTextFormat* format, const std::wstring& text)
+{
+    if (!g_dwriteFactory || !format || text.empty()) return 0.0f;
+
+    IDWriteTextLayout* layout = nullptr;
+    HRESULT hr = g_dwriteFactory->CreateTextLayout(
+        text.c_str(),
+        static_cast<UINT32>(text.size()),
+        format,
+        4096.0f,
+        64.0f,
+        &layout);
+    if (FAILED(hr) || !layout) return 0.0f;
+
+    DWRITE_TEXT_METRICS metrics = {};
+    layout->GetMetrics(&metrics);
+    SafeRelease(layout);
+    return metrics.widthIncludingTrailingWhitespace;
+}
+
+int MeasureTextWidthGdi(HDC dc, const std::wstring& text)
+{
+    if (text.empty()) return 0;
+    SIZE size = {};
+    GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &size);
+    return size.cx;
+}
+
+RECT SearchCompletionHighlightRect(const RECT& textRect, int prefixWidth)
+{
+    const int left = std::clamp(textRect.left + prefixWidth, textRect.left, textRect.right - 8);
+    return { left, textRect.top - 2, textRect.right, textRect.bottom - 5 };
+}
+
 void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client)
 {
     const RECT searchRect = SearchRect(client);
+    const RECT textRect = SearchTextRect(searchRect);
     DrawRoundedRectDirect(target, searchRect, RGB(232, 238, 244), g_searchInputActive ? RGB(118, 196, 255) : RGB(120, 136, 154), 22.0f);
     DrawTextDirect(
         target,
         g_searchTextFormat,
         SearchDisplayText(),
-        SearchTextRect(searchRect),
+        textRect,
         g_searchText.empty() ? RGB(110, 120, 132) : RGB(21, 26, 34),
         DWRITE_TEXT_ALIGNMENT_LEADING,
         DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
         DWRITE_WORD_WRAPPING_NO_WRAP);
+
+    const std::wstring tail = SearchCompletionTail();
+    if (!tail.empty())
+    {
+        const int prefixWidth = static_cast<int>(std::ceil(MeasureTextWidthDirect(g_searchTextFormat, SearchDisplayText())));
+        RECT highlightRect = SearchCompletionHighlightRect(textRect, prefixWidth);
+        DrawRoundedRectDirect(target, highlightRect, RGB(58, 140, 255), RGB(58, 140, 255), 7.0f);
+        RECT tailText = { highlightRect.left + 8, textRect.top, highlightRect.right - 8, textRect.bottom };
+        DrawTextDirect(
+            target,
+            g_searchTextFormat,
+            tail,
+            tailText,
+            RGB(255, 255, 255),
+            DWRITE_TEXT_ALIGNMENT_LEADING,
+            DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+            DWRITE_WORD_WRAPPING_NO_WRAP);
+    }
 }
 
 void DrawSearchSurface(HDC dc, const RECT& client)
 {
     HFONT searchFont = CreateFontW(26, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     const RECT searchRect = SearchRect(client);
+    const RECT textRect = SearchTextRect(searchRect);
     DrawRoundedRect(dc, searchRect, RGB(232, 238, 244), g_searchInputActive ? RGB(118, 196, 255) : RGB(120, 136, 154), 22);
     HGDIOBJ oldFont = SelectObject(dc, searchFont);
-    DrawTextClipped(dc, SearchDisplayText(), SearchTextRect(searchRect), DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_searchText.empty() ? RGB(110, 120, 132) : RGB(21, 26, 34));
+    DrawTextClipped(dc, SearchDisplayText(), textRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_searchText.empty() ? RGB(110, 120, 132) : RGB(21, 26, 34));
+    const std::wstring tail = SearchCompletionTail();
+    if (!tail.empty())
+    {
+        const int prefixWidth = MeasureTextWidthGdi(dc, SearchDisplayText());
+        RECT highlightRect = SearchCompletionHighlightRect(textRect, prefixWidth);
+        DrawRoundedRect(dc, highlightRect, RGB(58, 140, 255), RGB(58, 140, 255), 7);
+        RECT tailText = { highlightRect.left + 8, textRect.top, highlightRect.right - 8, textRect.bottom };
+        DrawTextClipped(dc, tail, tailText, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(255, 255, 255));
+    }
     SelectObject(dc, oldFont);
     DeleteObject(searchFont);
 }
@@ -3589,6 +3775,66 @@ void DrawSubtleSelectionOutline(HDC dc, const RECT& rect)
     DeleteObject(outerPen);
 }
 
+struct RenderLayoutMetrics
+{
+    int tileSize = 0;
+    int gap = 0;
+    int left = 0;
+    int right = 0;
+    int columns = 1;
+    int initialY = 0;
+    RECT contentClip = {};
+    bool groupByRegion = true;
+};
+
+RenderLayoutMetrics CreateRenderLayoutMetrics(const RECT& client)
+{
+    RenderLayoutMetrics metrics = {};
+    metrics.tileSize = TileSize();
+    metrics.gap = TileGap();
+    metrics.left = 44;
+    metrics.right = client.right - 44;
+    metrics.columns = CalculateColumnCount(client);
+    metrics.initialY = 114 - g_scrollOffset;
+    metrics.contentClip = { 0, ContentClipTop(), client.right, client.bottom };
+    metrics.groupByRegion = g_searchText.empty();
+    return metrics;
+}
+
+void ResetRenderHitState()
+{
+    g_hits.clear();
+    g_regionHits.clear();
+}
+
+void RenderFrameDirect2D(ID2D1DCRenderTarget* target, const RECT& client)
+{
+    DrawGlassBackground(target, client);
+    DrawSearchSurface(target, client);
+}
+
+void RenderFrameGdi(HDC dc, const RECT& client)
+{
+    DrawGlassBackground(dc, client);
+    DrawSearchSurface(dc, client);
+}
+
+void RenderDeferredIconOverlay(HDC dc, const RECT& client, const std::vector<PendingIconDraw>& pendingIcons)
+{
+    int savedDc = SaveDC(dc);
+    HRGN clip = CreateRectRgn(0, ContentClipTop(), client.right, client.bottom);
+    SelectClipRgn(dc, clip);
+    for (const auto& icon : pendingIcons)
+    {
+        DrawFittedIcon(dc, icon.x, icon.y, icon.icon, icon.size, icon.alpha);
+    }
+    DrawDragFeedback(dc);
+    DrawSelectionBox(dc);
+    SelectClipRgn(dc, nullptr);
+    DeleteObject(clip);
+    RestoreDC(dc, savedDc);
+}
+
 bool PaintContentDirect2D(HDC dc, const RECT& client)
 {
     if (!InitializeDirectRenderer()) return false;
@@ -3608,32 +3854,24 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
         return false;
     }
 
-    g_hits.clear();
-    g_regionHits.clear();
+    ResetRenderHitState();
     std::vector<PendingIconDraw> pendingIcons;
+    const RenderLayoutMetrics metrics = CreateRenderLayoutMetrics(client);
 
     target->BeginDraw();
-    DrawGlassBackground(target, client);
-    DrawSearchSurface(target, client);
+    RenderFrameDirect2D(target, client);
 
-    const RECT contentClip = { 0, ContentClipTop(), client.right, client.bottom };
-    target->PushAxisAlignedClip(D2DRect(contentClip), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    target->PushAxisAlignedClip(D2DRect(metrics.contentClip), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-    const int tileSize = TileSize();
-    const int gap = TileGap();
-    const int left = 44;
-    const int right = client.right - 44;
-    const int columns = CalculateColumnCount(client);
     int column = 0;
-    int x = left;
-    int y = 114 - g_scrollOffset;
+    int x = metrics.left;
+    int y = metrics.initialY;
     std::wstring activeRegion;
-    const bool groupByRegion = g_searchText.empty();
     int contentBottom = y;
 
     if (g_filtered.empty())
     {
-        RECT emptyRect = { left, y + 60, right, y + 120 };
+        RECT emptyRect = { metrics.left, y + 60, metrics.right, y + 120 };
         DrawTextDirect(target, g_headerTextFormat, L"No matching apps", emptyRect, RGB(210, 220, 235), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
         g_contentHeight = client.bottom;
     }
@@ -3642,27 +3880,27 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
         for (int filteredIndex = 0; filteredIndex < static_cast<int>(g_filtered.size()); ++filteredIndex)
         {
             auto& item = g_items[g_filtered[filteredIndex]];
-            if (groupByRegion && activeRegion != item.regionId)
+            if (metrics.groupByRegion && activeRegion != item.regionId)
             {
                 if (column != 0)
                 {
-                    y += tileSize + gap;
+                    y += metrics.tileSize + metrics.gap;
                     column = 0;
-                    x = left;
+                    x = metrics.left;
                 }
                 activeRegion = item.regionId;
-                RECT headerRect = { left + 8, y, right, y + 28 };
+                RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
                 if (IsRegionSelected(activeRegion))
                 {
-                    RECT selectedRect = { left, y - 4, right, y + 32 };
+                    RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
                     DrawRoundedRectDirect(target, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10.0f);
                 }
                 DrawTextDirect(target, g_headerTextFormat, RegionName(activeRegion), headerRect, RGB(220, 232, 248), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
-                g_regionHits.push_back({ { left, y, right, y + 38 }, { left, y, right, y + 38 }, activeRegion });
+                g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, activeRegion });
                 y += 38;
             }
 
-            RECT tileRect = { x, y, x + tileSize, y + tileSize };
+            RECT tileRect = { x, y, x + metrics.tileSize, y + metrics.tileSize };
             RECT visualTileRect = tileRect;
             bool hideTileForDrag = false;
             if (ShouldHideTileForDragPreview(item))
@@ -3671,12 +3909,12 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
             }
             else
             {
-                ApplyDragAvoidanceOffset(visualTileRect, item, tileSize, gap, columns);
+                ApplyDragAvoidanceOffset(visualTileRect, item, metrics.tileSize, metrics.gap, metrics.columns);
             }
 
             if (!hideTileForDrag && !g_regionHits.empty() && CompareStringOrdinal(g_regionHits.back().regionId.c_str(), -1, item.regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
             {
-                g_regionHits.back().bounds.bottom = std::max(g_regionHits.back().bounds.bottom, visualTileRect.bottom + gap);
+                g_regionHits.back().bounds.bottom = std::max(g_regionHits.back().bounds.bottom, visualTileRect.bottom + metrics.gap);
             }
             if (!hideTileForDrag && visualTileRect.bottom >= ContentClipTop() && visualTileRect.top <= client.bottom)
             {
@@ -3686,7 +3924,7 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
                 if (item.icon)
                 {
                     const int icon = g_settings.iconSize;
-                    const int iconX = visualTileRect.left + (tileSize - icon) / 2;
+                    const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
                     const int iconY = visualTileRect.top + 14;
                     pendingIcons.push_back({ item.icon, iconX, iconY, icon, DragIconAlphaForItem(item) });
                 }
@@ -3697,15 +3935,15 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
                 g_hits.push_back({ visualTileRect, filteredIndex });
             }
 
-            x += tileSize + gap;
+            x += metrics.tileSize + metrics.gap;
             column++;
-            if (column >= columns)
+            if (column >= metrics.columns)
             {
                 column = 0;
-                x = left;
-                y += tileSize + gap;
+                x = metrics.left;
+                y += metrics.tileSize + metrics.gap;
             }
-            contentBottom = std::max(contentBottom, static_cast<int>(visualTileRect.bottom) + gap + g_scrollOffset);
+            contentBottom = std::max(contentBottom, static_cast<int>(visualTileRect.bottom) + metrics.gap + g_scrollOffset);
         }
 
         g_contentHeight = contentBottom + 44;
@@ -3718,53 +3956,34 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
     SafeRelease(target);
     if (FAILED(drawn)) return false;
 
-    int savedDc = SaveDC(dc);
-    HRGN clip = CreateRectRgn(0, ContentClipTop(), client.right, client.bottom);
-    SelectClipRgn(dc, clip);
-    for (const auto& icon : pendingIcons)
-    {
-        DrawFittedIcon(dc, icon.x, icon.y, icon.icon, icon.size, icon.alpha);
-    }
-    DrawDragFeedback(dc);
-    DrawSelectionBox(dc);
-    SelectClipRgn(dc, nullptr);
-    DeleteObject(clip);
-    RestoreDC(dc, savedDc);
+    RenderDeferredIconOverlay(dc, client, pendingIcons);
     TrimResidentIcons();
     return true;
 }
 
 void PaintContent(HDC dc, const RECT& client)
 {
-    g_hits.clear();
-    g_regionHits.clear();
-    DrawGlassBackground(dc, client);
+    ResetRenderHitState();
+    const RenderLayoutMetrics metrics = CreateRenderLayoutMetrics(client);
+    RenderFrameGdi(dc, client);
 
     HFONT tileFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     HFONT headerFont = CreateFontW(18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
-    DrawSearchSurface(dc, client);
-
     const int savedDc = SaveDC(dc);
-    HRGN contentClip = CreateRectRgn(0, ContentClipTop(), client.right, client.bottom);
+    HRGN contentClip = CreateRectRgn(metrics.contentClip.left, metrics.contentClip.top, metrics.contentClip.right, metrics.contentClip.bottom);
     SelectClipRgn(dc, contentClip);
 
-    const int tileSize = TileSize();
-    const int gap = TileGap();
-    const int left = 44;
-    const int right = client.right - 44;
-    const int columns = CalculateColumnCount(client);
     int column = 0;
-    int x = left;
-    int y = 114 - g_scrollOffset;
+    int x = metrics.left;
+    int y = metrics.initialY;
     std::wstring activeRegion;
-    const bool groupByRegion = g_searchText.empty();
     int contentBottom = y;
 
     SelectObject(dc, headerFont);
     if (g_filtered.empty())
     {
-        RECT emptyRect = { left, y + 60, right, y + 120 };
+        RECT emptyRect = { metrics.left, y + 60, metrics.right, y + 120 };
         DrawTextClipped(dc, L"No matching apps", emptyRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, RGB(210, 220, 235));
         g_contentHeight = client.bottom;
     }
@@ -3773,27 +3992,27 @@ void PaintContent(HDC dc, const RECT& client)
         for (int filteredIndex = 0; filteredIndex < static_cast<int>(g_filtered.size()); ++filteredIndex)
         {
             auto& item = g_items[g_filtered[filteredIndex]];
-            if (groupByRegion && activeRegion != item.regionId)
+            if (metrics.groupByRegion && activeRegion != item.regionId)
             {
                 if (column != 0)
                 {
-                    y += tileSize + gap;
+                    y += metrics.tileSize + metrics.gap;
                     column = 0;
-                    x = left;
+                    x = metrics.left;
                 }
                 activeRegion = item.regionId;
-                RECT headerRect = { left + 8, y, right, y + 28 };
+                RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
                 if (IsRegionSelected(activeRegion))
                 {
-                    RECT selectedRect = { left, y - 4, right, y + 32 };
+                    RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
                     DrawRoundedRect(dc, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10);
                 }
                 DrawTextClipped(dc, RegionName(activeRegion), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(220, 232, 248));
-                g_regionHits.push_back({ { left, y, right, y + 38 }, { left, y, right, y + 38 }, activeRegion });
+                g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, activeRegion });
                 y += 38;
             }
 
-            RECT tileRect = { x, y, x + tileSize, y + tileSize };
+            RECT tileRect = { x, y, x + metrics.tileSize, y + metrics.tileSize };
             RECT visualTileRect = tileRect;
             bool hideTileForDrag = false;
             if (ShouldHideTileForDragPreview(item))
@@ -3802,12 +4021,12 @@ void PaintContent(HDC dc, const RECT& client)
             }
             else
             {
-                ApplyDragAvoidanceOffset(visualTileRect, item, tileSize, gap, columns);
+                ApplyDragAvoidanceOffset(visualTileRect, item, metrics.tileSize, metrics.gap, metrics.columns);
             }
 
             if (!hideTileForDrag && !g_regionHits.empty() && CompareStringOrdinal(g_regionHits.back().regionId.c_str(), -1, item.regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
             {
-                g_regionHits.back().bounds.bottom = std::max(g_regionHits.back().bounds.bottom, visualTileRect.bottom + gap);
+                g_regionHits.back().bounds.bottom = std::max(g_regionHits.back().bounds.bottom, visualTileRect.bottom + metrics.gap);
             }
             if (!hideTileForDrag && visualTileRect.bottom >= ContentClipTop() && visualTileRect.top <= client.bottom)
             {
@@ -3817,7 +4036,7 @@ void PaintContent(HDC dc, const RECT& client)
                 if (item.icon)
                 {
                     const int icon = g_settings.iconSize;
-                    const int iconX = visualTileRect.left + (tileSize - icon) / 2;
+                    const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
                     const int iconY = visualTileRect.top + 14;
                     DrawFittedIcon(dc, iconX, iconY, item.icon, icon, DragIconAlphaForItem(item));
                 }
@@ -3829,15 +4048,15 @@ void PaintContent(HDC dc, const RECT& client)
                 g_hits.push_back({ visualTileRect, filteredIndex });
             }
 
-            x += tileSize + gap;
+            x += metrics.tileSize + metrics.gap;
             column++;
-            if (column >= columns)
+            if (column >= metrics.columns)
             {
                 column = 0;
-                x = left;
-                y += tileSize + gap;
+                x = metrics.left;
+                y += metrics.tileSize + metrics.gap;
             }
-            contentBottom = std::max(contentBottom, static_cast<int>(visualTileRect.bottom) + gap + g_scrollOffset);
+            contentBottom = std::max(contentBottom, static_cast<int>(visualTileRect.bottom) + metrics.gap + g_scrollOffset);
         }
 
         g_contentHeight = contentBottom + 44;
@@ -3971,6 +4190,10 @@ void SelectFilteredIndex(int index)
     g_selectedFilteredIndex = std::clamp(index, 0, static_cast<int>(g_filtered.size()) - 1);
     const auto& item = g_items[g_filtered[g_selectedFilteredIndex]];
     SetSingleSelection(item.sourcePath);
+    if (IsSearchCompletionActive())
+    {
+        g_completionCandidateText = item.displayName;
+    }
     ScrollSelectedIntoView();
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
@@ -3991,31 +4214,32 @@ void MoveSelectionVertical(int delta)
 
 void CompleteSearchFromSelection(HWND hwnd, bool reverse)
 {
-    if (g_filtered.empty()) return;
+    if (g_filtered.empty())
+    {
+        ClearSearchCompletion();
+        return;
+    }
     if (g_selectedFilteredIndex < 0)
     {
         g_selectedFilteredIndex = 0;
     }
-    if (reverse && g_selectedFilteredIndex > 0)
+    if (!IsSearchCompletionActive())
     {
-        g_selectedFilteredIndex--;
+        g_completionBaseText = g_searchText;
+    }
+    else
+    {
+        const int count = static_cast<int>(g_filtered.size());
+        const int delta = reverse ? -1 : 1;
+        g_selectedFilteredIndex = (g_selectedFilteredIndex + delta + count) % count;
     }
 
     const std::wstring selectedPath = g_items[g_filtered[g_selectedFilteredIndex]].sourcePath;
-    g_searchText = g_items[g_filtered[g_selectedFilteredIndex]].displayName;
-    g_scrollOffset = 0;
-    RebuildFiltered();
-    for (int i = 0; i < static_cast<int>(g_filtered.size()); ++i)
-    {
-        if (SamePath(g_items[g_filtered[i]].sourcePath, selectedPath))
-        {
-            g_selectedFilteredIndex = i;
-            break;
-        }
-    }
+    g_completionCandidateText = g_items[g_filtered[g_selectedFilteredIndex]].displayName;
+    SetSingleSelection(selectedPath);
     ActivateSearchInput();
     ScrollSelectedIntoView();
-    InvalidateRect(hwnd, nullptr, TRUE);
+    InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 std::wstring GetControlText(HWND hwnd, int controlId, int maxChars = 2048)
@@ -4956,6 +5180,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_CHAR:
         ActivateSearchInput();
+        if (IsSearchCompletionActive())
+        {
+            ClearSearchCompletion();
+        }
         if (wParam == VK_BACK)
         {
             if (!g_searchText.empty()) g_searchText.pop_back();
@@ -4966,6 +5194,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         g_scrollOffset = 0;
         RebuildFiltered();
+        ClearSearchCompletion();
         InvalidateRect(hwnd, nullptr, TRUE);
         return 0;
     case WM_SIZE:

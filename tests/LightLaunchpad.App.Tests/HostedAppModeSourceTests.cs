@@ -425,11 +425,13 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("SpotlightGlassAlpha", source);
         TestAssert.Contains("ShowSpotlightWithAnimation", source);
         TestAssert.Contains("std::pow(1.0 - progress, 3.0)", source);
-        TestAssert.Contains("CreateRoundedRectangleGeometry", source);
-        TestAssert.Contains("PushLayer", source);
-        TestAssert.Contains("FillRectInSpotlightClip", source);
+        TestAssert.Contains("RenderSpotlightGlassDirect2D", source);
+        TestAssert.Contains("RenderSpotlightGlassGdi", source);
+        TestAssert.Contains("CreateGradientStopCollection", source);
+        TestAssert.Contains("GradientFill", source);
         TestAssert.Contains("DrawGlassBackground", source);
         TestAssert.Contains("DrawSoftWindowEdge", source);
+        TestAssert.DoesNotContain("FillRectInSpotlightClip", source);
         TestAssert.Contains("-ldwmapi", script);
     }
 
@@ -461,11 +463,35 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("BuildPinyinSearchText", source);
         TestAssert.Contains("KnownPinyinForChar", source);
         TestAssert.Contains("FuzzyMatchScore", source);
+        TestAssert.Contains("UpdateSearchIndex", source);
+        TestAssert.Contains("RebuildSearchIndex", source);
+        TestAssert.Contains("searchCandidateLower", source);
+        TestAssert.Contains("displayNameLower", source);
         TestAssert.Contains("SearchScore", source);
         TestAssert.Contains("CompleteSearchFromSelection", source);
+        TestAssert.Contains("SearchCompletionTail", source);
+        TestAssert.Contains("g_completionCandidateText", source);
+        TestAssert.Contains("SearchCompletionHighlightRect", source);
+        TestAssert.Contains("RGB(58, 140, 255)", source);
         TestAssert.Contains("VK_TAB", source);
         TestAssert.Contains("std::stable_sort(g_filtered.begin(), g_filtered.end()", source);
-        TestAssert.Contains("const bool groupByRegion = g_searchText.empty()", source);
+        TestAssert.Contains("metrics.groupByRegion = g_searchText.empty()", source);
+        TestAssert.DoesNotContain("ToLower(BuildSearchCandidateText(item))", source);
+    }
+
+    public static void NativeUiSource_SplitsRenderingPipeline()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("struct RenderLayoutMetrics", source);
+        TestAssert.Contains("CreateRenderLayoutMetrics", source);
+        TestAssert.Contains("ResetRenderHitState", source);
+        TestAssert.Contains("RenderFrameDirect2D", source);
+        TestAssert.Contains("RenderFrameGdi", source);
+        TestAssert.Contains("RenderDeferredIconOverlay", source);
+        TestAssert.Contains("const RenderLayoutMetrics metrics = CreateRenderLayoutMetrics(client)", source);
+        TestAssert.Contains("RenderFrameDirect2D(target, client)", source);
+        TestAssert.Contains("RenderFrameGdi(dc, client)", source);
     }
 
     public static void NativeUiSource_UsesQuietSelectionBoxAndScrollsWhileSelecting()
