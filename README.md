@@ -2,7 +2,7 @@
 
 轻量、优雅、美观的 Windows 启动台。
 
-LightLaunchpad 用原生 Win32 绘制启动台和聚焦窗口，后台占用低，打开迅速，交互干净。主程序是 `LightLaunchpad.NativeUi.exe`；旧的 `LightLaunchpad.App.exe` 不再作为发布主线更新。
+LightLaunchpad 用原生 Win32 绘制启动台和聚焦窗口，后台占用低，打开迅速，交互干净。
 
 ## 下载
 
