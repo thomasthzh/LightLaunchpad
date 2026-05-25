@@ -273,7 +273,9 @@ public sealed class HostedAppModeSourceTests
 
         TestAssert.Contains("ApplySpotlightWindowRegion", source);
         TestAssert.Contains("SpotlightTransparentKey", source);
-        TestAssert.Contains("LWA_ALPHA | LWA_COLORKEY", source);
+        TestAssert.Contains("UpdateLayeredWindow", source);
+        TestAssert.Contains("ULW_ALPHA", source);
+        TestAssert.Contains("ApplySpotlightPerPixelAlpha", source);
         TestAssert.Contains("const DWORD cornerPreference = IsSpotlightMode() ? DWMWCP_DONOTROUND : DWMWCP_ROUND;", source);
         TestAssert.Contains("SetWindowRgn(g_hwnd, nullptr, TRUE)", source);
         TestAssert.DoesNotContain("SetWindowRgn(g_hwnd, region, TRUE)", source);
@@ -387,6 +389,7 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("AC_SRC_ALPHA", source);
         TestAssert.Contains("DrawFittedIcon(dc, icon.x", source);
         TestAssert.Contains("DrawFittedIcon(dc, iconX", source);
+        TestAssert.Contains("return 255;", source);
         TestAssert.Contains("-lmsimg32", script);
     }
 
@@ -423,7 +426,15 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("DWMWA_BORDER_COLOR", source);
         TestAssert.Contains("DWMWA_COLOR_NONE", source);
         TestAssert.Contains("const DWORD cornerPreference = IsSpotlightMode() ? DWMWCP_DONOTROUND : DWMWCP_ROUND;", source);
-        TestAssert.Contains("SetLayeredWindowAttributes(g_hwnd, SpotlightTransparentKey, alpha, LWA_ALPHA | LWA_COLORKEY)", source);
+        TestAssert.Contains("UpdateLayeredWindow(g_hwnd", source);
+        TestAssert.Contains("ULW_ALPHA", source);
+        TestAssert.Contains("ApplySpotlightPerPixelAlpha", source);
+        TestAssert.Contains("RoundedRectCoverage", source);
+        TestAssert.Contains("targetAlpha * coverage", source);
+        TestAssert.Contains("g_spotlightPaintOpacity", source);
+        TestAssert.Contains("SpotlightLayerBuffer", source);
+        TestAssert.Contains("PaintSpotlightLayeredWindow(false)", source);
+        TestAssert.DoesNotContain("SetLayeredWindowAttributes(g_hwnd, SpotlightTransparentKey, alpha, LWA_ALPHA | LWA_COLORKEY)", source);
         TestAssert.Contains("CreateRoundRectRgn", source);
         TestAssert.Contains("SetWindowRgn(g_hwnd, nullptr, TRUE)", source);
         TestAssert.DoesNotContain("SetWindowRgn(g_hwnd, region, TRUE)", source);
@@ -441,6 +452,7 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("CreateRadialGradientBrush", source);
         TestAssert.Contains("RenderSpotlightGlassGdi", source);
         TestAssert.Contains("CreateGradientStopCollection", source);
+        TestAssert.Contains("glowBrush", source);
         TestAssert.Contains("GradientFill", source);
         TestAssert.Contains("DrawGlassBackground", source);
         TestAssert.Contains("DrawSoftWindowEdge", source);
@@ -459,6 +471,7 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("TrimHiddenFootprint", source);
         TestAssert.Contains("ReleaseItemIcon", source);
         TestAssert.Contains("ReleaseAllResidentIcons", source);
+        TestAssert.Contains("ReleaseSpotlightLayerBuffer", source);
         TestAssert.Contains("DestroyDirectRenderer", source);
         TestAssert.Contains("CoFreeUnusedLibrariesEx", source);
         TestAssert.Contains("SetProcessWorkingSetSize", source);

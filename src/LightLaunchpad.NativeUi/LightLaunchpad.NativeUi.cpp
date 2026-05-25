@@ -246,6 +246,20 @@ enum class DragMode
     Region
 };
 
+struct SpotlightLayerBuffer
+{
+    int width = 0;
+    int height = 0;
+    HDC baseDc = nullptr;
+    HDC fullDc = nullptr;
+    HBITMAP baseBitmap = nullptr;
+    HBITMAP fullBitmap = nullptr;
+    HGDIOBJ oldBaseBitmap = nullptr;
+    HGDIOBJ oldFullBitmap = nullptr;
+    void* baseBits = nullptr;
+    void* fullBits = nullptr;
+};
+
 HINSTANCE g_instance = nullptr;
 HWND g_hwnd = nullptr;
 HWND g_settingsHwnd = nullptr;
@@ -291,20 +305,28 @@ int g_modalDialogDepth = 0;
 uint64_t g_iconUseCounter = 0;
 std::vector<int> g_filterScores;
 ID2D1Factory* g_d2dFactory = nullptr;
+ID2D1DCRenderTarget* g_d2dDcRenderTarget = nullptr;
 IDWriteFactory* g_dwriteFactory = nullptr;
 IDWriteTextFormat* g_searchTextFormat = nullptr;
 IDWriteTextFormat* g_tileTextFormat = nullptr;
 IDWriteTextFormat* g_headerTextFormat = nullptr;
 HFONT g_uiFont = nullptr;
+bool g_spotlightLayerBasePass = false;
+BYTE g_spotlightPaintOpacity = 255;
+bool g_spotlightLayerDirty = true;
+SpotlightLayerBuffer g_spotlightLayerBuffer;
 
 bool ShowTextInputDialog(const std::wstring& title, const std::wstring& label, const std::wstring& initialValue, std::wstring& result);
 void RegisterCurrentHotkey();
 void ShowSettingsWindow();
 void RebuildFiltered();
 void DestroyDirectRenderer();
+bool IsSpotlightBaseLayerPass();
 void ActivateSearchInput();
 bool InitializeDirectRenderer();
 bool IsSpotlightMode();
+bool PaintSpotlightLayeredWindow(bool repaint = true);
+void ReleaseSpotlightLayerBuffer();
 std::wstring BuildPinyinSearchText(const std::wstring& text);
 void UpdateSearchIndex(LaunchItem& item);
 void RebuildSearchIndex();
@@ -1340,6 +1362,7 @@ void DestroyDirectRenderer();
 void TrimHiddenFootprint()
 {
     ReleaseAllResidentIcons();
+    ReleaseSpotlightLayerBuffer();
     DestroyDirectRenderer();
     CoFreeUnusedLibrariesEx(0, 0);
     HeapCompact(GetProcessHeap(), 0);
@@ -2484,7 +2507,13 @@ void SetSpotlightLayeredOpacity(BYTE alpha)
         {
             SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED);
         }
-        SetLayeredWindowAttributes(g_hwnd, SpotlightTransparentKey, alpha, LWA_ALPHA | LWA_COLORKEY);
+        g_spotlightPaintOpacity = SpotlightGlassAlpha > 0
+            ? static_cast<BYTE>(std::clamp(static_cast<int>(std::round(alpha * 255.0 / SpotlightGlassAlpha)), 0, 255))
+            : alpha;
+        if (IsWindowVisible(g_hwnd))
+        {
+            PaintSpotlightLayeredWindow(false);
+        }
         return;
     }
 
@@ -2493,6 +2522,11 @@ void SetSpotlightLayeredOpacity(BYTE alpha)
         SetLayeredWindowAttributes(g_hwnd, 0, 255, LWA_ALPHA);
         SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, style & ~WS_EX_LAYERED);
     }
+}
+
+bool IsSpotlightBaseLayerPass()
+{
+    return g_spotlightLayerBasePass;
 }
 
 void ApplyGlassBackdrop()
@@ -3114,7 +3148,8 @@ bool IsDropHintItem(const LaunchItem& item)
 
 BYTE DragIconAlphaForItem(const LaunchItem& item)
 {
-    return IsDropHintItem(item) ? 132 : 255;
+    (void)item;
+    return 255;
 }
 
 void ApplyDragAvoidanceOffset(RECT& visualTileRect, const LaunchItem& item, int tileSize, int gap, int columns)
@@ -3200,6 +3235,7 @@ bool InitializeDirectRenderer()
 
 void DestroyDirectRenderer()
 {
+    SafeRelease(g_d2dDcRenderTarget);
     SafeRelease(g_searchTextFormat);
     SafeRelease(g_tileTextFormat);
     SafeRelease(g_headerTextFormat);
@@ -3254,6 +3290,29 @@ bool IsPointInsideRoundedRect(POINT point, const RECT& rect, int radius)
     const int dx = point.x - cx;
     const int dy = point.y - cy;
     return dx * dx + dy * dy <= r * r;
+}
+
+double RoundedRectCoverage(int x, int y, const RECT& rect, int radius)
+{
+    const double width = static_cast<double>(rect.right - rect.left);
+    const double height = static_cast<double>(rect.bottom - rect.top);
+    if (width <= 0.0 || height <= 0.0) return 0.0;
+
+    const double r = std::max(1.0, std::min<double>(radius, std::min(width, height) * 0.5));
+    const double centerX = (static_cast<double>(rect.left) + static_cast<double>(rect.right)) * 0.5;
+    const double centerY = (static_cast<double>(rect.top) + static_cast<double>(rect.bottom)) * 0.5;
+    const double halfW = width * 0.5;
+    const double halfH = height * 0.5;
+    const double px = static_cast<double>(x) + 0.5;
+    const double py = static_cast<double>(y) + 0.5;
+    const double qx = std::abs(px - centerX) - (halfW - r);
+    const double qy = std::abs(py - centerY) - (halfH - r);
+    const double outsideX = std::max(qx, 0.0);
+    const double outsideY = std::max(qy, 0.0);
+    const double outsideDistance = std::sqrt(outsideX * outsideX + outsideY * outsideY);
+    const double insideDistance = std::min(std::max(qx, qy), 0.0);
+    const double signedDistance = outsideDistance + insideDistance - r;
+    return std::clamp(0.5 - signedDistance, 0.0, 1.0);
 }
 
 bool IsPointInsideSpotlightGlass(POINT point)
@@ -3508,12 +3567,14 @@ void DrawRoundedRectDirect(ID2D1DCRenderTarget* target, const RECT& rect, COLORR
 
 void DrawSearchGlassSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool active)
 {
+    const auto rounded = D2D1::RoundedRect(D2DRect(rect), static_cast<float>(SpotlightSearchCornerRadius), static_cast<float>(SpotlightSearchCornerRadius));
+
     ID2D1GradientStopCollection* fillStops = nullptr;
     ID2D1LinearGradientBrush* fillBrush = nullptr;
     D2D1_GRADIENT_STOP stops[] = {
-        { 0.0f, D2DColorAlpha(RGB(118, 138, 154), active ? 0.48f : 0.40f) },
-        { 0.52f, D2DColorAlpha(RGB(66, 82, 100), active ? 0.46f : 0.36f) },
-        { 1.0f, D2DColorAlpha(RGB(34, 46, 62), active ? 0.50f : 0.40f) }
+        { 0.0f, D2DColorAlpha(RGB(124, 148, 168), active ? 0.38f : 0.32f) },
+        { 0.52f, D2DColorAlpha(RGB(62, 80, 100), active ? 0.34f : 0.28f) },
+        { 1.0f, D2DColorAlpha(RGB(22, 32, 48), active ? 0.42f : 0.34f) }
     };
     if (SUCCEEDED(target->CreateGradientStopCollection(stops, ARRAYSIZE(stops), &fillStops)) && fillStops)
     {
@@ -3523,19 +3584,51 @@ void DrawSearchGlassSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool 
         target->CreateLinearGradientBrush(props, fillStops, &fillBrush);
     }
 
-    const auto rounded = D2D1::RoundedRect(D2DRect(rect), static_cast<float>(SpotlightSearchCornerRadius), static_cast<float>(SpotlightSearchCornerRadius));
     if (fillBrush)
     {
         target->FillRoundedRectangle(rounded, fillBrush);
     }
 
+    ID2D1GradientStopCollection* glowStops = nullptr;
+    ID2D1RadialGradientBrush* glowBrush = nullptr;
+    D2D1_GRADIENT_STOP glow[] = {
+        { 0.0f, D2DColorAlpha(active ? RGB(126, 196, 255) : RGB(210, 230, 246), active ? 0.14f : 0.06f) },
+        { 0.62f, D2DColorAlpha(RGB(116, 154, 188), active ? 0.04f : 0.02f) },
+        { 1.0f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) }
+    };
+    if (SUCCEEDED(target->CreateGradientStopCollection(glow, ARRAYSIZE(glow), &glowStops)) && glowStops)
+    {
+        const auto props = D2D1::RadialGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(rect.left) + (rect.right - rect.left) * 0.20f, static_cast<float>(rect.top) + (rect.bottom - rect.top) * 0.28f),
+            D2D1::Point2F(0.0f, 0.0f),
+            static_cast<float>(rect.right - rect.left) * 0.54f,
+            static_cast<float>(rect.bottom - rect.top) * 1.12f);
+        target->CreateRadialGradientBrush(props, glowStops, &glowBrush);
+    }
+    if (glowBrush)
+    {
+        target->FillRoundedRectangle(rounded, glowBrush);
+    }
+
     ID2D1SolidColorBrush* strokeBrush = nullptr;
-    target->CreateSolidColorBrush(D2DColorAlpha(active ? RGB(146, 206, 255) : RGB(178, 206, 228), active ? 0.62f : 0.28f), &strokeBrush);
+    ID2D1SolidColorBrush* innerBrush = nullptr;
+    target->CreateSolidColorBrush(D2DColorAlpha(active ? RGB(164, 216, 255) : RGB(214, 234, 246), active ? 0.48f : 0.22f), &strokeBrush);
+    target->CreateSolidColorBrush(D2DColorAlpha(RGB(255, 255, 255), active ? 0.10f : 0.06f), &innerBrush);
     if (strokeBrush)
     {
-        target->DrawRoundedRectangle(rounded, strokeBrush, active ? 1.35f : 1.0f);
+        target->DrawRoundedRectangle(rounded, strokeBrush, active ? 1.20f : 0.90f);
     }
+    if (innerBrush)
+    {
+        target->DrawRoundedRectangle(D2D1::RoundedRect(
+            D2D1::RectF(static_cast<float>(rect.left) + 2.0f, static_cast<float>(rect.top) + 2.0f, static_cast<float>(rect.right) - 2.0f, static_cast<float>(rect.bottom) - 2.0f),
+            static_cast<float>(SpotlightSearchCornerRadius - 2),
+            static_cast<float>(SpotlightSearchCornerRadius - 2)), innerBrush, 1.0f);
+    }
+    SafeRelease(innerBrush);
     SafeRelease(strokeBrush);
+    SafeRelease(glowBrush);
+    SafeRelease(glowStops);
     SafeRelease(fillBrush);
     SafeRelease(fillStops);
 }
@@ -3624,6 +3717,7 @@ void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client)
     const RECT searchRect = SearchRect(client);
     const RECT textRect = SearchTextRect(searchRect);
     DrawSearchGlassSurface(target, searchRect, g_searchInputActive);
+    if (IsSpotlightBaseLayerPass()) return;
     DrawTextDirect(
         target,
         g_searchTextFormat,
@@ -3659,6 +3753,11 @@ void DrawSearchSurface(HDC dc, const RECT& client)
     const RECT searchRect = SearchRect(client);
     const RECT textRect = SearchTextRect(searchRect);
     DrawSearchGlassSurface(dc, searchRect, g_searchInputActive);
+    if (IsSpotlightBaseLayerPass())
+    {
+        DeleteObject(searchFont);
+        return;
+    }
     HGDIOBJ oldFont = SelectObject(dc, searchFont);
     DrawTextClipped(dc, SearchDisplayText(), textRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_searchText.empty() ? RGB(158, 172, 188) : RGB(236, 244, 252));
     const std::wstring tail = SearchCompletionTail();
@@ -4005,24 +4104,27 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
 {
     if (!InitializeDirectRenderer()) return false;
 
-    ID2D1DCRenderTarget* target = nullptr;
-    auto props = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_DEFAULT,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
-    if (FAILED(g_d2dFactory->CreateDCRenderTarget(&props, &target)) || !target)
+    if (!g_d2dDcRenderTarget)
     {
-        return false;
+        auto props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+        if (FAILED(g_d2dFactory->CreateDCRenderTarget(&props, &g_d2dDcRenderTarget)) || !g_d2dDcRenderTarget)
+        {
+            return false;
+        }
     }
 
+    ID2D1DCRenderTarget* target = g_d2dDcRenderTarget;
     if (FAILED(target->BindDC(dc, &client)))
     {
-        SafeRelease(target);
         return false;
     }
 
     ResetRenderHitState();
     std::vector<PendingIconDraw> pendingIcons;
     const RenderLayoutMetrics metrics = CreateRenderLayoutMetrics(client);
+    const bool baseLayerOnly = IsSpotlightBaseLayerPass();
 
     target->BeginDraw();
     RenderFrameDirect2D(target, client);
@@ -4038,7 +4140,10 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
     if (g_filtered.empty())
     {
         RECT emptyRect = { metrics.left, y + 60, metrics.right, y + 120 };
-        DrawTextDirect(target, g_headerTextFormat, L"No matching apps", emptyRect, RGB(210, 220, 235), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
+        if (!baseLayerOnly)
+        {
+            DrawTextDirect(target, g_headerTextFormat, L"No matching apps", emptyRect, RGB(210, 220, 235), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
+        }
         g_contentHeight = client.bottom;
     }
     else
@@ -4061,7 +4166,10 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
                     RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
                     DrawRoundedRectDirect(target, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10.0f);
                 }
-                DrawTextDirect(target, g_headerTextFormat, RegionName(activeRegion), headerRect, RGB(220, 232, 248), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
+                if (!baseLayerOnly)
+                {
+                    DrawTextDirect(target, g_headerTextFormat, RegionName(activeRegion), headerRect, RGB(220, 232, 248), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
+                }
                 g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, activeRegion });
                 y += 38;
             }
@@ -4086,18 +4194,21 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
             {
                 const bool selected = filteredIndex == g_selectedFilteredIndex || IsSelected(item.sourcePath);
                 DrawAppTileSurface(target, visualTileRect, selected);
-                LoadItemIcon(item);
-                if (item.icon)
+                if (!baseLayerOnly)
                 {
-                    const int icon = g_settings.iconSize;
-                    const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
-                    const int iconY = visualTileRect.top + 14;
-                    pendingIcons.push_back({ item.icon, iconX, iconY, icon, DragIconAlphaForItem(item) });
-                }
+                    LoadItemIcon(item);
+                    if (item.icon)
+                    {
+                        const int icon = g_settings.iconSize;
+                        const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
+                        const int iconY = visualTileRect.top + 14;
+                        pendingIcons.push_back({ item.icon, iconX, iconY, icon, DragIconAlphaForItem(item) });
+                    }
 
-                RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
-                const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
-                DrawTextDirect(target, g_tileTextFormat, item.displayName, labelRect, labelColor, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP);
+                    RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
+                    const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
+                    DrawTextDirect(target, g_tileTextFormat, item.displayName, labelRect, labelColor, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP);
+                }
                 g_hits.push_back({ visualTileRect, filteredIndex });
             }
 
@@ -4119,10 +4230,16 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
     DrawSoftWindowEdge(target, client);
 
     const HRESULT drawn = target->EndDraw();
-    SafeRelease(target);
-    if (FAILED(drawn)) return false;
+    if (FAILED(drawn))
+    {
+        SafeRelease(g_d2dDcRenderTarget);
+        return false;
+    }
 
-    RenderDeferredIconOverlay(dc, client, pendingIcons);
+    if (!baseLayerOnly)
+    {
+        RenderDeferredIconOverlay(dc, client, pendingIcons);
+    }
     TrimResidentIcons();
     return true;
 }
@@ -4131,6 +4248,7 @@ void PaintContent(HDC dc, const RECT& client)
 {
     ResetRenderHitState();
     const RenderLayoutMetrics metrics = CreateRenderLayoutMetrics(client);
+    const bool baseLayerOnly = IsSpotlightBaseLayerPass();
     RenderFrameGdi(dc, client);
 
     HFONT tileFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
@@ -4150,7 +4268,10 @@ void PaintContent(HDC dc, const RECT& client)
     if (g_filtered.empty())
     {
         RECT emptyRect = { metrics.left, y + 60, metrics.right, y + 120 };
-        DrawTextClipped(dc, L"No matching apps", emptyRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, RGB(210, 220, 235));
+        if (!baseLayerOnly)
+        {
+            DrawTextClipped(dc, L"No matching apps", emptyRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, RGB(210, 220, 235));
+        }
         g_contentHeight = client.bottom;
     }
     else
@@ -4173,7 +4294,10 @@ void PaintContent(HDC dc, const RECT& client)
                     RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
                     DrawRoundedRect(dc, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10);
                 }
-                DrawTextClipped(dc, RegionName(activeRegion), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(220, 232, 248));
+                if (!baseLayerOnly)
+                {
+                    DrawTextClipped(dc, RegionName(activeRegion), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(220, 232, 248));
+                }
                 g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, activeRegion });
                 y += 38;
             }
@@ -4198,19 +4322,22 @@ void PaintContent(HDC dc, const RECT& client)
             {
                 const bool selected = filteredIndex == g_selectedFilteredIndex || IsSelected(item.sourcePath);
                 DrawAppTileSurface(dc, visualTileRect, selected);
-                LoadItemIcon(item);
-                if (item.icon)
+                if (!baseLayerOnly)
                 {
-                    const int icon = g_settings.iconSize;
-                    const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
-                    const int iconY = visualTileRect.top + 14;
-                    DrawFittedIcon(dc, iconX, iconY, item.icon, icon, DragIconAlphaForItem(item));
-                }
+                    LoadItemIcon(item);
+                    if (item.icon)
+                    {
+                        const int icon = g_settings.iconSize;
+                        const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
+                        const int iconY = visualTileRect.top + 14;
+                        DrawFittedIcon(dc, iconX, iconY, item.icon, icon, DragIconAlphaForItem(item));
+                    }
 
-                SelectObject(dc, tileFont);
-                RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
-                const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
-                DrawTextClipped(dc, item.displayName, labelRect, DT_CENTER | DT_WORDBREAK | DT_END_ELLIPSIS, labelColor);
+                    SelectObject(dc, tileFont);
+                    RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
+                    const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
+                    DrawTextClipped(dc, item.displayName, labelRect, DT_CENTER | DT_WORDBREAK | DT_END_ELLIPSIS, labelColor);
+                }
                 g_hits.push_back({ visualTileRect, filteredIndex });
             }
 
@@ -4228,8 +4355,11 @@ void PaintContent(HDC dc, const RECT& client)
         g_contentHeight = contentBottom + 44;
     }
 
-    DrawDragFeedback(dc);
-    DrawSelectionBox(dc);
+    if (!baseLayerOnly)
+    {
+        DrawDragFeedback(dc);
+        DrawSelectionBox(dc);
+    }
     SelectClipRgn(dc, nullptr);
     DeleteObject(contentClip);
     RestoreDC(dc, savedDc);
@@ -4240,8 +4370,187 @@ void PaintContent(HDC dc, const RECT& client)
     DeleteObject(headerFont);
 }
 
+void ReleaseSpotlightLayerBuffer()
+{
+    if (g_spotlightLayerBuffer.baseDc && g_spotlightLayerBuffer.oldBaseBitmap)
+    {
+        SelectObject(g_spotlightLayerBuffer.baseDc, g_spotlightLayerBuffer.oldBaseBitmap);
+    }
+    if (g_spotlightLayerBuffer.fullDc && g_spotlightLayerBuffer.oldFullBitmap)
+    {
+        SelectObject(g_spotlightLayerBuffer.fullDc, g_spotlightLayerBuffer.oldFullBitmap);
+    }
+    if (g_spotlightLayerBuffer.baseBitmap) DeleteObject(g_spotlightLayerBuffer.baseBitmap);
+    if (g_spotlightLayerBuffer.fullBitmap) DeleteObject(g_spotlightLayerBuffer.fullBitmap);
+    if (g_spotlightLayerBuffer.baseDc) DeleteDC(g_spotlightLayerBuffer.baseDc);
+    if (g_spotlightLayerBuffer.fullDc) DeleteDC(g_spotlightLayerBuffer.fullDc);
+    g_spotlightLayerBuffer = {};
+    g_spotlightLayerDirty = true;
+}
+
+bool EnsureSpotlightLayerBuffer(int width, int height)
+{
+    if (width <= 0 || height <= 0) return false;
+    if (g_spotlightLayerBuffer.baseDc
+        && g_spotlightLayerBuffer.fullDc
+        && g_spotlightLayerBuffer.baseBitmap
+        && g_spotlightLayerBuffer.fullBitmap
+        && g_spotlightLayerBuffer.baseBits
+        && g_spotlightLayerBuffer.fullBits
+        && g_spotlightLayerBuffer.width == width
+        && g_spotlightLayerBuffer.height == height)
+    {
+        return true;
+    }
+
+    ReleaseSpotlightLayerBuffer();
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    HDC screenDc = GetDC(nullptr);
+    if (!screenDc) return false;
+
+    g_spotlightLayerBuffer.baseDc = CreateCompatibleDC(screenDc);
+    g_spotlightLayerBuffer.fullDc = CreateCompatibleDC(screenDc);
+    g_spotlightLayerBuffer.baseBitmap = CreateDIBSection(screenDc, &info, DIB_RGB_COLORS, &g_spotlightLayerBuffer.baseBits, nullptr, 0);
+    g_spotlightLayerBuffer.fullBitmap = CreateDIBSection(screenDc, &info, DIB_RGB_COLORS, &g_spotlightLayerBuffer.fullBits, nullptr, 0);
+    ReleaseDC(nullptr, screenDc);
+
+    if (!g_spotlightLayerBuffer.baseDc
+        || !g_spotlightLayerBuffer.fullDc
+        || !g_spotlightLayerBuffer.baseBitmap
+        || !g_spotlightLayerBuffer.fullBitmap
+        || !g_spotlightLayerBuffer.baseBits
+        || !g_spotlightLayerBuffer.fullBits)
+    {
+        ReleaseSpotlightLayerBuffer();
+        return false;
+    }
+
+    g_spotlightLayerBuffer.oldBaseBitmap = SelectObject(g_spotlightLayerBuffer.baseDc, g_spotlightLayerBuffer.baseBitmap);
+    g_spotlightLayerBuffer.oldFullBitmap = SelectObject(g_spotlightLayerBuffer.fullDc, g_spotlightLayerBuffer.fullBitmap);
+    g_spotlightLayerBuffer.width = width;
+    g_spotlightLayerBuffer.height = height;
+    g_spotlightLayerDirty = true;
+    return true;
+}
+
+bool PixelDiffers(DWORD left, DWORD right)
+{
+    const int lb = static_cast<int>(left & 0xFF);
+    const int lg = static_cast<int>((left >> 8) & 0xFF);
+    const int lr = static_cast<int>((left >> 16) & 0xFF);
+    const int rb = static_cast<int>(right & 0xFF);
+    const int rg = static_cast<int>((right >> 8) & 0xFF);
+    const int rr = static_cast<int>((right >> 16) & 0xFF);
+    return std::abs(lb - rb) + std::abs(lg - rg) + std::abs(lr - rr) > 12;
+}
+
+DWORD PremultiplyPixel(DWORD pixel, BYTE alpha)
+{
+    if (alpha == 0) return 0;
+    if (alpha == 255) return (pixel & 0x00FFFFFF) | 0xFF000000;
+
+    const BYTE b = static_cast<BYTE>(((pixel & 0xFF) * alpha + 127) / 255);
+    const BYTE g = static_cast<BYTE>(((((pixel >> 8) & 0xFF) * alpha + 127) / 255));
+    const BYTE r = static_cast<BYTE>(((((pixel >> 16) & 0xFF) * alpha + 127) / 255));
+    return (static_cast<DWORD>(alpha) << 24)
+        | (static_cast<DWORD>(r) << 16)
+        | (static_cast<DWORD>(g) << 8)
+        | b;
+}
+
+void ApplySpotlightPerPixelAlpha(DWORD* basePixels, DWORD* fullPixels, int width, int height)
+{
+    if (!basePixels || !fullPixels || width <= 0 || height <= 0) return;
+    RECT client = { 0, 0, width, height };
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            const size_t index = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
+            const double coverage = RoundedRectCoverage(x, y, client, SpotlightCornerRadius);
+            if (coverage <= 0.0)
+            {
+                fullPixels[index] = 0;
+                continue;
+            }
+
+            const BYTE targetAlpha = PixelDiffers(basePixels[index], fullPixels[index]) ? 255 : SpotlightGlassAlpha;
+            const BYTE alpha = static_cast<BYTE>(std::clamp(static_cast<int>(std::round(targetAlpha * coverage)), 0, 255));
+            fullPixels[index] = PremultiplyPixel(fullPixels[index], alpha);
+        }
+    }
+}
+
+bool PaintIntoDib(HDC dc, const RECT& client, bool glassBaseOnly)
+{
+    g_spotlightLayerBasePass = glassBaseOnly;
+    const bool drawn = PaintContentDirect2D(dc, client);
+    if (!drawn)
+    {
+        PaintContent(dc, client);
+    }
+    g_spotlightLayerBasePass = false;
+    return true;
+}
+
+bool PaintSpotlightLayeredWindow(bool repaint)
+{
+    if (!g_hwnd || !IsSpotlightMode()) return false;
+
+    RECT client = {};
+    GetClientRect(g_hwnd, &client);
+    const int width = std::max(1, static_cast<int>(client.right - client.left));
+    const int height = std::max(1, static_cast<int>(client.bottom - client.top));
+    if (!EnsureSpotlightLayerBuffer(width, height)) return false;
+
+    if (repaint || g_spotlightLayerDirty)
+    {
+        const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * sizeof(DWORD);
+        std::memset(g_spotlightLayerBuffer.baseBits, 0, bytes);
+        std::memset(g_spotlightLayerBuffer.fullBits, 0, bytes);
+
+        PaintIntoDib(g_spotlightLayerBuffer.baseDc, client, true);
+        PaintIntoDib(g_spotlightLayerBuffer.fullDc, client, false);
+        ApplySpotlightPerPixelAlpha(
+            reinterpret_cast<DWORD*>(g_spotlightLayerBuffer.baseBits),
+            reinterpret_cast<DWORD*>(g_spotlightLayerBuffer.fullBits),
+            width,
+            height);
+        g_spotlightLayerDirty = false;
+    }
+
+    RECT windowRect = {};
+    GetWindowRect(g_hwnd, &windowRect);
+    POINT dst = { windowRect.left, windowRect.top };
+    POINT src = { 0, 0 };
+    SIZE size = { width, height };
+    BLENDFUNCTION blend = { AC_SRC_OVER, 0, g_spotlightPaintOpacity, AC_SRC_ALPHA };
+    HDC screenDc = GetDC(nullptr);
+    if (!screenDc) return false;
+    const BOOL updated = UpdateLayeredWindow(g_hwnd, screenDc, &dst, &size, g_spotlightLayerBuffer.fullDc, &src, 0, &blend, ULW_ALPHA);
+    ReleaseDC(nullptr, screenDc);
+    return updated != FALSE;
+}
+
 void PaintWindow(HWND hwnd)
 {
+    if (IsSpotlightMode())
+    {
+        PAINTSTRUCT ps = {};
+        BeginPaint(hwnd, &ps);
+        EndPaint(hwnd, &ps);
+        PaintSpotlightLayeredWindow();
+        return;
+    }
+
     PAINTSTRUCT ps = {};
     HDC screenDc = BeginPaint(hwnd, &ps);
     RECT client = {};
@@ -5383,6 +5692,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_SIZE:
         ClampScroll();
+        g_spotlightLayerDirty = true;
         return 0;
     case WM_ACTIVATE:
         if (LOWORD(wParam) == WA_INACTIVE && IsSpotlightMode() && IsWindowVisible(hwnd) && !g_settingsHwnd && g_modalDialogDepth == 0)
@@ -5405,6 +5715,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         KillTimer(hwnd, DragAnimationTimerId);
         RemoveTrayIcon();
         UnregisterHotKey(hwnd, HotkeyId);
+        ReleaseSpotlightLayerBuffer();
         DestroyDirectRenderer();
         if (g_uiFont)
         {
