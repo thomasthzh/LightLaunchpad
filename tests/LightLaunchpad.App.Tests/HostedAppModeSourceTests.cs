@@ -276,6 +276,8 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("UpdateLayeredWindow", source);
         TestAssert.Contains("ULW_ALPHA", source);
         TestAssert.Contains("ApplySpotlightPerPixelAlpha", source);
+        TestAssert.Contains("ContentFeatherCoverage", source);
+        TestAssert.Contains("BlendPixel", source);
         TestAssert.Contains("const DWORD cornerPreference = IsSpotlightMode() ? DWMWCP_DONOTROUND : DWMWCP_ROUND;", source);
         TestAssert.Contains("SetWindowRgn(g_hwnd, nullptr, TRUE)", source);
         TestAssert.DoesNotContain("SetWindowRgn(g_hwnd, region, TRUE)", source);
@@ -390,6 +392,8 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("DrawFittedIcon(dc, icon.x", source);
         TestAssert.Contains("DrawFittedIcon(dc, iconX", source);
         TestAssert.Contains("return 255;", source);
+        TestAssert.Contains("DrawIconBackplateDirect", source);
+        TestAssert.Contains("FillEllipse", source);
         TestAssert.Contains("-lmsimg32", script);
     }
 
@@ -431,6 +435,8 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("ApplySpotlightPerPixelAlpha", source);
         TestAssert.Contains("RoundedRectCoverage", source);
         TestAssert.Contains("targetAlpha * coverage", source);
+        TestAssert.Contains("SpotlightContentFeatherSize", source);
+        TestAssert.Contains("SpotlightGlassAlpha + (255 - SpotlightGlassAlpha) * contentCoverage", source);
         TestAssert.Contains("g_spotlightPaintOpacity", source);
         TestAssert.Contains("SpotlightLayerBuffer", source);
         TestAssert.Contains("PaintSpotlightLayeredWindow(false)", source);

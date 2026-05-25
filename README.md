@@ -8,6 +8,8 @@ LightLaunchpad 现在以 `LightLaunchpad.NativeUi.exe` 为主版本。它走原�
 
 - 低后台占用：隐藏时释放图标、渲染缓冲和 Direct2D 资源。
 - 液态玻璃聚焦：圆角由玻璃本身承担，边缘柔化，背景透明可见。
+- 图标背光：图标背后有轻量液态光垫，悬浮感更自然。
+- 滚动羽化：底部和顶部图标滚入滚出时逐渐融入玻璃，不再被硬切。
 - 内容不透明：玻璃保持通透，图标和文字保持清晰、不发灰、不重影。
 - 快速搜索：支持中文、英文、拼音、首字母、Tab 补全和方向键选择。
 - 启动台整理：支持 region、框选、多选、拖拽排序和稳定落点。
@@ -15,7 +17,7 @@ LightLaunchpad 现在以 `LightLaunchpad.NativeUi.exe` 为主版本。它走原�
 
 ## 使用
 
-下载或解压发布包后运行：
+在 [GitHub Releases](https://github.com/thomasthzh/LightLaunchpad/releases) 下载最新版，解压后运行：
 
 ```text
 LightLaunchpad.NativeUi.exe

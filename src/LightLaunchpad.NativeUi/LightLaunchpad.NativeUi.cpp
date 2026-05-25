@@ -93,6 +93,7 @@ constexpr int SpotlightEdgeLayers = 10;
 constexpr int SpotlightPanelInset = 0;
 constexpr int SpotlightContentInset = 68;
 constexpr int SpotlightContentBottomInset = 34;
+constexpr int SpotlightContentFeatherSize = 44;
 constexpr int SpotlightSearchSideInset = 68;
 constexpr int SpotlightSearchCornerRadius = 24;
 constexpr COLORREF SpotlightTransparentKey = RGB(1, 2, 3);
@@ -3315,6 +3316,22 @@ double RoundedRectCoverage(int x, int y, const RECT& rect, int radius)
     return std::clamp(0.5 - signedDistance, 0.0, 1.0);
 }
 
+double SmoothStep(double start, double end, double value)
+{
+    if (start == end) return value >= end ? 1.0 : 0.0;
+    const double t = std::clamp((value - start) / (end - start), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+double ContentFeatherCoverage(int y, const RECT& contentClip)
+{
+    const double py = static_cast<double>(y) + 0.5;
+    const double feather = static_cast<double>(SpotlightContentFeatherSize);
+    const double top = SmoothStep(static_cast<double>(contentClip.top), static_cast<double>(contentClip.top) + feather, py);
+    const double bottom = 1.0 - SmoothStep(static_cast<double>(contentClip.bottom) - feather, static_cast<double>(contentClip.bottom), py);
+    return std::clamp(std::min(top, bottom), 0.0, 1.0);
+}
+
 bool IsPointInsideSpotlightGlass(POINT point)
 {
     if (!g_hwnd || !IsSpotlightMode()) return true;
@@ -3650,6 +3667,64 @@ void DrawAppTileSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool sele
 {
     if (!selected) return;
     DrawRoundedRectDirect(target, rect, RGB(42, 82, 118), RGB(130, 190, 255), 12.0f);
+}
+
+void DrawIconBackplateDirect(ID2D1DCRenderTarget* target, const RECT& rect, bool selected)
+{
+    if (IsSpotlightBaseLayerPass()) return;
+
+    const float tileWidth = static_cast<float>(rect.right - rect.left);
+    const float icon = static_cast<float>(g_settings.iconSize);
+    const D2D1_POINT_2F center = D2D1::Point2F(
+        static_cast<float>(rect.left) + tileWidth * 0.5f,
+        static_cast<float>(rect.top) + 14.0f + icon * 0.54f);
+
+    ID2D1GradientStopCollection* shadowStops = nullptr;
+    ID2D1RadialGradientBrush* shadowBrush = nullptr;
+    D2D1_GRADIENT_STOP shadow[] = {
+        { 0.0f, D2DColorAlpha(RGB(4, 8, 14), selected ? 0.22f : 0.15f) },
+        { 0.55f, D2DColorAlpha(RGB(4, 8, 14), selected ? 0.10f : 0.060f) },
+        { 1.0f, D2DColorAlpha(RGB(4, 8, 14), 0.0f) }
+    };
+    if (SUCCEEDED(target->CreateGradientStopCollection(shadow, ARRAYSIZE(shadow), &shadowStops)) && shadowStops)
+    {
+        const auto props = D2D1::RadialGradientBrushProperties(
+            D2D1::Point2F(center.x, center.y + icon * 0.16f),
+            D2D1::Point2F(0.0f, 0.0f),
+            icon * 0.78f,
+            icon * 0.64f);
+        target->CreateRadialGradientBrush(props, shadowStops, &shadowBrush);
+    }
+    if (shadowBrush)
+    {
+        target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(center.x, center.y + icon * 0.16f), icon * 0.78f, icon * 0.64f), shadowBrush);
+    }
+
+    ID2D1GradientStopCollection* glowStops = nullptr;
+    ID2D1RadialGradientBrush* glowBrush = nullptr;
+    D2D1_GRADIENT_STOP glow[] = {
+        { 0.0f, D2DColorAlpha(RGB(196, 226, 248), selected ? 0.18f : 0.105f) },
+        { 0.42f, D2DColorAlpha(RGB(126, 170, 206), selected ? 0.080f : 0.040f) },
+        { 1.0f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) }
+    };
+    if (SUCCEEDED(target->CreateGradientStopCollection(glow, ARRAYSIZE(glow), &glowStops)) && glowStops)
+    {
+        const auto props = D2D1::RadialGradientBrushProperties(
+            D2D1::Point2F(center.x - icon * 0.10f, center.y - icon * 0.12f),
+            D2D1::Point2F(0.0f, 0.0f),
+            icon * 0.72f,
+            icon * 0.56f);
+        target->CreateRadialGradientBrush(props, glowStops, &glowBrush);
+    }
+    if (glowBrush)
+    {
+        target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(center.x - icon * 0.10f, center.y - icon * 0.12f), icon * 0.72f, icon * 0.56f), glowBrush);
+    }
+
+    SafeRelease(glowBrush);
+    SafeRelease(glowStops);
+    SafeRelease(shadowBrush);
+    SafeRelease(shadowStops);
 }
 
 void DrawAppTileSurface(HDC dc, const RECT& rect, bool selected)
@@ -4196,6 +4271,7 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
                 DrawAppTileSurface(target, visualTileRect, selected);
                 if (!baseLayerOnly)
                 {
+                    DrawIconBackplateDirect(target, visualTileRect, selected);
                     LoadItemIcon(item);
                     if (item.icon)
                     {
@@ -4466,10 +4542,26 @@ DWORD PremultiplyPixel(DWORD pixel, BYTE alpha)
         | b;
 }
 
+DWORD BlendPixel(DWORD basePixel, DWORD contentPixel, double amount)
+{
+    amount = std::clamp(amount, 0.0, 1.0);
+    const int bb = static_cast<int>(basePixel & 0xFF);
+    const int bg = static_cast<int>((basePixel >> 8) & 0xFF);
+    const int br = static_cast<int>((basePixel >> 16) & 0xFF);
+    const int cb = static_cast<int>(contentPixel & 0xFF);
+    const int cg = static_cast<int>((contentPixel >> 8) & 0xFF);
+    const int cr = static_cast<int>((contentPixel >> 16) & 0xFF);
+    const BYTE b = static_cast<BYTE>(std::clamp(static_cast<int>(std::round(bb + (cb - bb) * amount)), 0, 255));
+    const BYTE g = static_cast<BYTE>(std::clamp(static_cast<int>(std::round(bg + (cg - bg) * amount)), 0, 255));
+    const BYTE r = static_cast<BYTE>(std::clamp(static_cast<int>(std::round(br + (cr - br) * amount)), 0, 255));
+    return (static_cast<DWORD>(r) << 16) | (static_cast<DWORD>(g) << 8) | b;
+}
+
 void ApplySpotlightPerPixelAlpha(DWORD* basePixels, DWORD* fullPixels, int width, int height)
 {
     if (!basePixels || !fullPixels || width <= 0 || height <= 0) return;
     RECT client = { 0, 0, width, height };
+    const RECT contentClip = ContentClipRect(client);
     for (int y = 0; y < height; ++y)
     {
         for (int x = 0; x < width; ++x)
@@ -4482,7 +4574,15 @@ void ApplySpotlightPerPixelAlpha(DWORD* basePixels, DWORD* fullPixels, int width
                 continue;
             }
 
-            const BYTE targetAlpha = PixelDiffers(basePixels[index], fullPixels[index]) ? 255 : SpotlightGlassAlpha;
+            const bool contentPixel = PixelDiffers(basePixels[index], fullPixels[index]);
+            const double contentCoverage = contentPixel ? ContentFeatherCoverage(y, contentClip) : 1.0;
+            if (contentPixel && contentCoverage < 1.0)
+            {
+                fullPixels[index] = BlendPixel(basePixels[index], fullPixels[index], contentCoverage);
+            }
+            const BYTE targetAlpha = contentPixel
+                ? static_cast<BYTE>(std::round(SpotlightGlassAlpha + (255 - SpotlightGlassAlpha) * contentCoverage))
+                : SpotlightGlassAlpha;
             const BYTE alpha = static_cast<BYTE>(std::clamp(static_cast<int>(std::round(targetAlpha * coverage)), 0, 255));
             fullPixels[index] = PremultiplyPixel(fullPixels[index], alpha);
         }
