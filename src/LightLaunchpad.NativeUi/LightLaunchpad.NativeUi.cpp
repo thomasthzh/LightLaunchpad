@@ -6,6 +6,7 @@
 #include <d2d1.h>
 #include <dwmapi.h>
 #include <dwrite.h>
+#include <imm.h>
 #include <objbase.h>
 #include <shellapi.h>
 #include <shobjidl.h>
@@ -88,6 +89,7 @@ constexpr UINT WmTray = WM_APP + 72;
 constexpr wchar_t WindowClassName[] = L"LightLaunchpadNativeUiWindow";
 constexpr wchar_t SettingsWindowClassName[] = L"LightLaunchpadNativeSettingsWindow";
 constexpr wchar_t TextInputWindowClassName[] = L"LightLaunchpadNativeTextInputWindow";
+constexpr wchar_t AppIconResourceName[] = L"IDI_APP";
 constexpr int SpotlightCornerRadius = 34;
 constexpr int SpotlightEdgeLayers = 10;
 constexpr int SpotlightPanelInset = 0;
@@ -105,6 +107,12 @@ constexpr size_t MaxResidentIconCount = 96;
 constexpr UINT_PTR DragAnimationTimerId = 0x4C5601;
 constexpr int DragTargetSettleMs = 55;
 constexpr double DragReflowSmoothing = 0.24;
+constexpr UINT_PTR HotkeyEditSubclassId = 0x4C5602;
+constexpr UINT_PTR TrayIconRetryTimerId = 0x4C5603;
+constexpr UINT_PTR TrayIconPromotionRetryTimerId = 0x4C5604;
+constexpr UINT TrayIconRetryMs = 1000;
+constexpr UINT TrayIconPromotionRetryMs = 1000;
+constexpr int TrayIconPromotionMaxAttempts = 8;
 const GUID NativeIID_IImageList = { 0x46eb5926, 0x582e, 0x4017, { 0x9f, 0xdf, 0xe8, 0x99, 0x8d, 0xaa, 0x09, 0x50 } };
 
 enum AccentState
@@ -148,6 +156,7 @@ enum class SettingsControlId : int
     Save = 3011,
     Apply = 3012,
     Cancel = 3013,
+    ResetSearchOnOpen = 3014,
     FolderLabel = 3020,
     HotkeyLabel = 3021,
     IconSizeLabel = 3022,
@@ -175,6 +184,7 @@ struct Settings
     int appSpacing = 8;
     double wheelSensitivity = 1.0;
     bool startWithWindows = false;
+    bool resetSearchOnOpen = true;
 };
 
 struct Region
@@ -274,6 +284,7 @@ std::vector<RegionHit> g_regionHits;
 std::vector<std::wstring> g_selectedSourcePaths;
 std::vector<std::wstring> g_selectedRegionIds;
 std::wstring g_searchText;
+std::wstring g_searchCompositionText;
 std::wstring g_completionBaseText;
 std::wstring g_completionCandidateText;
 bool g_searchInputActive = false;
@@ -316,12 +327,16 @@ bool g_spotlightLayerBasePass = false;
 BYTE g_spotlightPaintOpacity = 255;
 bool g_spotlightLayerDirty = true;
 SpotlightLayerBuffer g_spotlightLayerBuffer;
+UINT g_taskbarCreatedMessage = 0;
+bool g_trayIconAdded = false;
+int g_trayPromotionAttempts = 0;
 
 bool ShowTextInputDialog(const std::wstring& title, const std::wstring& label, const std::wstring& initialValue, std::wstring& result);
 void RegisterCurrentHotkey();
 void ShowSettingsWindow();
 void RebuildFiltered();
 void DestroyDirectRenderer();
+void RemoveTrayIcon();
 bool IsSpotlightBaseLayerPass();
 void ActivateSearchInput();
 bool InitializeDirectRenderer();
@@ -334,6 +349,8 @@ void RebuildSearchIndex();
 void DrawSearchSurface(HDC dc, const RECT& client);
 void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client);
 int CalculateColumnCount(const RECT& client);
+std::wstring NormalizeHotkeyText(const std::wstring& value);
+void RequestSearchRepaint(HWND hwnd, bool erase);
 
 template <typename T>
 void SafeRelease(T*& value)
@@ -435,14 +452,19 @@ RECT SearchTextRect(const RECT& searchRect)
     return { searchRect.left + 22, searchRect.top, searchRect.right - 22, searchRect.bottom };
 }
 
-std::wstring SearchDisplayText()
+std::wstring SearchCommittedText()
 {
     return g_searchText;
 }
 
+std::wstring SearchDisplayText()
+{
+    return SearchCommittedText() + g_searchCompositionText;
+}
+
 bool IsSearchCompletionActive()
 {
-    return !g_completionCandidateText.empty();
+    return !g_completionCandidateText.empty() && g_searchCompositionText.empty();
 }
 
 void ClearSearchCompletion()
@@ -462,6 +484,13 @@ std::wstring SearchCompletionTail()
     return g_searchText.empty()
         ? g_completionCandidateText
         : L"  " + g_completionCandidateText;
+}
+
+void CommitSearchCompletion()
+{
+    if (!IsSearchCompletionActive()) return;
+    g_searchText = g_completionCandidateText;
+    ClearSearchCompletion();
 }
 
 int TileSize()
@@ -823,7 +852,7 @@ void LoadSettings()
     const auto folder = FindJsonStringValue(json, "LaunchpadFolder");
     if (!folder.empty()) g_settings.launchpadFolder = folder;
     const auto hotkey = FindJsonStringValue(json, "Hotkey");
-    if (!hotkey.empty()) g_settings.hotkey = hotkey;
+    if (!hotkey.empty()) g_settings.hotkey = NormalizeHotkeyText(hotkey);
     const auto displayMode = FindJsonStringValue(json, "DisplayMode");
     if (!displayMode.empty()) g_settings.displayMode = displayMode;
     const auto language = FindJsonStringValue(json, "Language");
@@ -836,6 +865,7 @@ void LoadSettings()
     g_settings.appSpacing = NormalizeAppSpacing(FindJsonNumberValue(json, "AppSpacing", g_settings.appSpacing));
     g_settings.wheelSensitivity = NormalizeWheelSensitivity(FindJsonDoubleValue(json, "WheelSensitivity", g_settings.wheelSensitivity));
     g_settings.startWithWindows = FindJsonBoolValue(json, "StartWithWindows", g_settings.startWithWindows);
+    g_settings.resetSearchOnOpen = FindJsonBoolValue(json, "ResetSearchOnOpen", g_settings.resetSearchOnOpen);
 }
 
 std::wstring IconSizeName()
@@ -860,7 +890,8 @@ bool SaveSettings()
     json += "  \"SpotlightWidth\": " + std::to_string(g_settings.spotlightWidth) + ",\r\n";
     json += "  \"SpotlightHeight\": " + std::to_string(g_settings.spotlightHeight) + ",\r\n";
     json += "  \"AppSpacing\": " + std::to_string(g_settings.appSpacing) + ",\r\n";
-    json += "  \"WheelSensitivity\": " + WideToUtf8(FormatDouble(g_settings.wheelSensitivity)) + "\r\n";
+    json += "  \"WheelSensitivity\": " + WideToUtf8(FormatDouble(g_settings.wheelSensitivity)) + ",\r\n";
+    json += std::string("  \"ResetSearchOnOpen\": ") + (g_settings.resetSearchOnOpen ? "true" : "false") + "\r\n";
     json += "}\r\n";
     return WriteFileUtf8(GetSettingsPath(), json);
 }
@@ -2389,40 +2420,31 @@ void LoadItemIcon(LaunchItem& item)
     }
 }
 
-HICON LoadTrayIcon()
+HICON LoadEmbeddedAppIcon(int width = 0, int height = 0)
 {
-    wchar_t modulePath[MAX_PATH] = L"";
-    if (GetModuleFileNameW(nullptr, modulePath, MAX_PATH))
+    HICON icon = reinterpret_cast<HICON>(
+        LoadImageW(
+            g_instance,
+            AppIconResourceName,
+            IMAGE_ICON,
+            width,
+            height,
+            LR_DEFAULTSIZE | LR_SHARED));
+    if (icon)
     {
-        for (int i = lstrlenW(modulePath) - 1; i >= 0; --i)
-        {
-            if (modulePath[i] == L'\\' || modulePath[i] == L'/')
-            {
-                modulePath[i + 1] = L'\0';
-                break;
-            }
-        }
-
-        wchar_t iconPath[MAX_PATH] = L"";
-        CopyText(iconPath, MAX_PATH, modulePath);
-        lstrcatW(iconPath, L"Assets\\LightLaunchpad.ico");
-        if (GetFileAttributesW(iconPath) != INVALID_FILE_ATTRIBUTES)
-        {
-            HICON icon = reinterpret_cast<HICON>(
-                LoadImageW(nullptr, iconPath, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE | LR_SHARED));
-            if (icon)
-            {
-                return icon;
-            }
-        }
+        return icon;
     }
 
     return LoadIconW(nullptr, IDI_APPLICATION);
 }
 
-void AddTrayIcon()
+HICON LoadTrayIcon()
 {
-    NOTIFYICONDATAW nid = {};
+    return LoadEmbeddedAppIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+}
+
+void PopulateTrayIconData(NOTIFYICONDATAW& nid)
+{
     nid.cbSize = sizeof(nid);
     nid.hWnd = g_hwnd;
     nid.uID = 1;
@@ -2430,7 +2452,157 @@ void AddTrayIcon()
     nid.uCallbackMessage = WmTray;
     nid.hIcon = LoadTrayIcon();
     CopyText(nid.szTip, ARRAYSIZE(nid.szTip), L"LightLaunchpad Native UI");
-    Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+enum class TrayPromotionResult
+{
+    NotFound,
+    AlreadyPromoted,
+    Promoted
+};
+
+std::wstring CurrentExecutablePath()
+{
+    wchar_t exe[MAX_PATH] = L"";
+    const DWORD length = GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
+    if (length == 0 || length >= ARRAYSIZE(exe))
+    {
+        return {};
+    }
+
+    return exe;
+}
+
+bool ReadRegistryString(HKEY key, const wchar_t* name, std::wstring& value)
+{
+    DWORD type = 0;
+    DWORD bytes = 0;
+    if (RegQueryValueExW(key, name, nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS
+        || (type != REG_SZ && type != REG_EXPAND_SZ)
+        || bytes == 0)
+    {
+        return false;
+    }
+
+    std::wstring buffer(bytes / sizeof(wchar_t), L'\0');
+    if (RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(buffer.data()), &bytes) != ERROR_SUCCESS)
+    {
+        return false;
+    }
+
+    while (!buffer.empty() && buffer.back() == L'\0') buffer.pop_back();
+    value = buffer;
+    return true;
+}
+
+bool RegistryDwordEquals(HKEY key, const wchar_t* name, DWORD expected)
+{
+    DWORD type = 0;
+    DWORD value = 0;
+    DWORD bytes = sizeof(value);
+    return RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(&value), &bytes) == ERROR_SUCCESS
+        && type == REG_DWORD
+        && bytes == sizeof(value)
+        && value == expected;
+}
+
+TrayPromotionResult PromoteTrayIconVisibility()
+{
+    const std::wstring executablePath = CurrentExecutablePath();
+    if (executablePath.empty())
+    {
+        return TrayPromotionResult::NotFound;
+    }
+
+    HKEY settingsKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\NotifyIconSettings", 0, KEY_READ, &settingsKey) != ERROR_SUCCESS)
+    {
+        return TrayPromotionResult::NotFound;
+    }
+
+    bool found = false;
+    bool promoted = false;
+    for (DWORD index = 0;; ++index)
+    {
+        wchar_t subkeyName[256] = L"";
+        DWORD subkeyNameLength = ARRAYSIZE(subkeyName);
+        const LONG enumResult = RegEnumKeyExW(settingsKey, index, subkeyName, &subkeyNameLength, nullptr, nullptr, nullptr, nullptr);
+        if (enumResult == ERROR_NO_MORE_ITEMS)
+        {
+            break;
+        }
+        if (enumResult != ERROR_SUCCESS)
+        {
+            continue;
+        }
+
+        HKEY iconKey = nullptr;
+        if (RegOpenKeyExW(settingsKey, subkeyName, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &iconKey) != ERROR_SUCCESS)
+        {
+            continue;
+        }
+
+        std::wstring registeredPath;
+        if (ReadRegistryString(iconKey, L"ExecutablePath", registeredPath)
+            && CompareStringOrdinal(registeredPath.c_str(), -1, executablePath.c_str(), -1, TRUE) == CSTR_EQUAL)
+        {
+            found = true;
+            if (!RegistryDwordEquals(iconKey, L"IsPromoted", 1))
+            {
+                const DWORD value = 1;
+                if (RegSetValueExW(iconKey, L"IsPromoted", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value)) == ERROR_SUCCESS)
+                {
+                    promoted = true;
+                }
+            }
+        }
+
+        RegCloseKey(iconKey);
+    }
+
+    RegCloseKey(settingsKey);
+    if (!found)
+    {
+        return TrayPromotionResult::NotFound;
+    }
+
+    return promoted ? TrayPromotionResult::Promoted : TrayPromotionResult::AlreadyPromoted;
+}
+
+bool AddTrayIcon(bool refreshAfterPromotion = true)
+{
+    NOTIFYICONDATAW nid = {};
+    PopulateTrayIconData(nid);
+    g_trayIconAdded = Shell_NotifyIconW(NIM_ADD, &nid) != FALSE;
+    if (g_trayIconAdded)
+    {
+        nid.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &nid);
+        KillTimer(g_hwnd, TrayIconRetryTimerId);
+        const TrayPromotionResult promotionResult = PromoteTrayIconVisibility();
+        if (promotionResult == TrayPromotionResult::NotFound)
+        {
+            g_trayPromotionAttempts = 0;
+            SetTimer(g_hwnd, TrayIconPromotionRetryTimerId, TrayIconPromotionRetryMs, nullptr);
+        }
+        else
+        {
+            g_trayPromotionAttempts = 0;
+            KillTimer(g_hwnd, TrayIconPromotionRetryTimerId);
+            if (promotionResult == TrayPromotionResult::Promoted && refreshAfterPromotion)
+            {
+                RemoveTrayIcon();
+                return AddTrayIcon(false);
+            }
+        }
+        return true;
+    }
+
+    if (g_hwnd)
+    {
+        SetTimer(g_hwnd, TrayIconRetryTimerId, TrayIconRetryMs, nullptr);
+    }
+    return false;
 }
 
 void RemoveTrayIcon()
@@ -2440,20 +2612,115 @@ void RemoveTrayIcon()
     nid.hWnd = g_hwnd;
     nid.uID = 1;
     Shell_NotifyIconW(NIM_DELETE, &nid);
+    g_trayIconAdded = false;
+    if (g_hwnd)
+    {
+        KillTimer(g_hwnd, TrayIconPromotionRetryTimerId);
+    }
+    g_trayPromotionAttempts = 0;
+}
+
+void ReaddTrayIcon()
+{
+    RemoveTrayIcon();
+    AddTrayIcon();
+}
+
+std::wstring JoinHotkeyParts(const std::vector<std::wstring>& parts)
+{
+    std::wstring value;
+    for (const auto& part : parts)
+    {
+        if (!value.empty()) value += L"+";
+        value += part;
+    }
+    return value;
+}
+
+std::wstring HotkeyKeyName(WPARAM virtualKey)
+{
+    if (virtualKey >= L'A' && virtualKey <= L'Z')
+    {
+        return std::wstring(1, static_cast<wchar_t>(virtualKey));
+    }
+
+    if (virtualKey >= L'0' && virtualKey <= L'9')
+    {
+        return std::wstring(1, static_cast<wchar_t>(virtualKey));
+    }
+
+    return {};
+}
+
+std::wstring NormalizeHotkeyText(const std::wstring& value)
+{
+    const std::wstring trimmed = Trim(value);
+    const std::wstring lowered = ToLower(trimmed);
+    std::vector<std::wstring> parts;
+    if (lowered.find(L"ctrl") != std::wstring::npos || lowered.find(L"control") != std::wstring::npos) parts.push_back(L"Ctrl");
+    if (lowered.find(L"alt") != std::wstring::npos) parts.push_back(L"Alt");
+    if (lowered.find(L"shift") != std::wstring::npos) parts.push_back(L"Shift");
+    if (lowered.find(L"win") != std::wstring::npos || lowered.find(L"windows") != std::wstring::npos) parts.push_back(L"Win");
+
+    const auto plus = trimmed.find_last_of(L'+');
+    const std::wstring keyText = Trim(plus == std::wstring::npos ? trimmed : trimmed.substr(plus + 1));
+    if (keyText.size() == 1)
+    {
+        const wchar_t key = static_cast<wchar_t>(std::towupper(keyText[0]));
+        if ((key >= L'A' && key <= L'Z') || (key >= L'0' && key <= L'9'))
+        {
+            parts.push_back(std::wstring(1, key));
+        }
+    }
+
+    if (parts.empty() || parts.back().size() != 1)
+    {
+        return L"Alt+D";
+    }
+
+    if (parts.size() == 1)
+    {
+        parts.insert(parts.begin(), L"Alt");
+    }
+
+    return JoinHotkeyParts(parts);
+}
+
+std::wstring FormatHotkeyFromKeyPress(WPARAM virtualKey)
+{
+    const std::wstring keyName = HotkeyKeyName(virtualKey);
+    if (keyName.empty())
+    {
+        return {};
+    }
+
+    std::vector<std::wstring> parts;
+    if (GetKeyState(VK_CONTROL) & 0x8000) parts.push_back(L"Ctrl");
+    if (GetKeyState(VK_MENU) & 0x8000) parts.push_back(L"Alt");
+    if (GetKeyState(VK_SHIFT) & 0x8000) parts.push_back(L"Shift");
+    if ((GetKeyState(VK_LWIN) & 0x8000) || (GetKeyState(VK_RWIN) & 0x8000)) parts.push_back(L"Win");
+    if (parts.empty())
+    {
+        return {};
+    }
+
+    parts.push_back(keyName);
+    return JoinHotkeyParts(parts);
 }
 
 void ResolveHotkey(UINT& modifiers, UINT& key)
 {
-    auto normalized = ToLower(g_settings.hotkey);
+    const auto hotkeyText = NormalizeHotkeyText(g_settings.hotkey);
+    auto normalized = ToLower(hotkeyText);
     modifiers = 0;
     key = L'D';
     if (normalized.find(L"alt") != std::wstring::npos) modifiers |= MOD_ALT;
     if (normalized.find(L"ctrl") != std::wstring::npos || normalized.find(L"control") != std::wstring::npos) modifiers |= MOD_CONTROL;
     if (normalized.find(L"shift") != std::wstring::npos) modifiers |= MOD_SHIFT;
     if (normalized.find(L"win") != std::wstring::npos || normalized.find(L"windows") != std::wstring::npos) modifiers |= MOD_WIN;
-    const auto plus = g_settings.hotkey.find_last_of(L'+');
-    wchar_t candidate = plus != std::wstring::npos && plus + 1 < g_settings.hotkey.size()
-        ? static_cast<wchar_t>(std::towupper(g_settings.hotkey[plus + 1]))
+    const auto plus = hotkeyText.find_last_of(L'+');
+    wchar_t candidate = plus != std::wstring::npos && plus + 1 < hotkeyText.size()
+        ? static_cast<wchar_t>(std::towupper(hotkeyText[plus + 1]))
         : L'D';
     if ((candidate >= L'A' && candidate <= L'Z') || (candidate >= L'0' && candidate <= L'9'))
     {
@@ -2478,6 +2745,70 @@ void ActivateSearchInput()
     if (g_hwnd)
     {
         SetFocus(g_hwnd);
+    }
+}
+
+void ResetSearchForOpen()
+{
+    if (!g_settings.resetSearchOnOpen)
+    {
+        return;
+    }
+
+    g_searchText.clear();
+    g_searchCompositionText.clear();
+    ClearSearchCompletion();
+    g_scrollOffset = 0;
+    g_selectedFilteredIndex = -1;
+}
+
+std::wstring ReadImeCompositionString(HWND hwnd, DWORD index)
+{
+    HIMC context = ImmGetContext(hwnd);
+    if (!context)
+    {
+        return {};
+    }
+
+    const LONG byteCount = ImmGetCompositionStringW(context, index, nullptr, 0);
+    if (byteCount <= 0)
+    {
+        ImmReleaseContext(hwnd, context);
+        return {};
+    }
+
+    std::wstring text(static_cast<size_t>(byteCount / sizeof(wchar_t)), L'\0');
+    ImmGetCompositionStringW(context, index, text.data(), byteCount);
+    ImmReleaseContext(hwnd, context);
+    return text;
+}
+
+void UpdateSearchComposition(HWND hwnd, LPARAM compositionFlags)
+{
+    ActivateSearchInput();
+
+    if (compositionFlags & GCS_RESULTSTR)
+    {
+        CommitSearchCompletion();
+        const std::wstring result = ReadImeCompositionString(hwnd, GCS_RESULTSTR);
+        if (!result.empty())
+        {
+            g_searchText += result;
+            g_scrollOffset = 0;
+            RebuildFiltered();
+        }
+
+        g_searchCompositionText.clear();
+        ClearSearchCompletion();
+        RequestSearchRepaint(hwnd, true);
+        return;
+    }
+
+    if (compositionFlags & GCS_COMPSTR)
+    {
+        g_searchCompositionText = ReadImeCompositionString(hwnd, GCS_COMPSTR);
+        ClearSearchCompletion();
+        RequestSearchRepaint(hwnd, false);
     }
 }
 
@@ -2703,6 +3034,7 @@ void HideSpotlightWithAnimation()
 void ShowNativeUi()
 {
     ReloadData();
+    ResetSearchForOpen();
     RebuildFiltered();
     PositionWindow();
     g_searchInputActive = true;
@@ -3332,6 +3664,16 @@ double ContentFeatherCoverage(int y, const RECT& contentClip)
     return std::clamp(std::min(top, bottom), 0.0, 1.0);
 }
 
+double SpotlightContentCoverageForPixel(int y, const RECT& contentClip)
+{
+    if (y < contentClip.top)
+    {
+        return 1.0;
+    }
+
+    return ContentFeatherCoverage(y, contentClip);
+}
+
 bool IsPointInsideSpotlightGlass(POINT point)
 {
     if (!g_hwnd || !IsSpotlightMode()) return true;
@@ -3787,6 +4129,33 @@ RECT SearchCompletionHighlightRect(const RECT& textRect, int prefixWidth)
     return { left, textRect.top - 2, textRect.right, textRect.bottom - 5 };
 }
 
+RECT SearchCaretRect(const RECT& textRect, int prefixWidth)
+{
+    const int x = std::clamp(textRect.left + prefixWidth + 2, textRect.left + 1, textRect.right - 2);
+    return { x, textRect.top + 15, x + 2, textRect.bottom - 15 };
+}
+
+void DrawSearchCaret(ID2D1DCRenderTarget* target, const RECT& textRect, int prefixWidth)
+{
+    if (!g_searchInputActive) return;
+    ID2D1SolidColorBrush* brush = nullptr;
+    target->CreateSolidColorBrush(D2DColor(RGB(245, 250, 255)), &brush);
+    if (brush)
+    {
+        target->FillRectangle(D2DRect(SearchCaretRect(textRect, prefixWidth)), brush);
+    }
+    SafeRelease(brush);
+}
+
+void DrawSearchCaret(HDC dc, const RECT& textRect, int prefixWidth)
+{
+    if (!g_searchInputActive) return;
+    const RECT caret = SearchCaretRect(textRect, prefixWidth);
+    HBRUSH brush = CreateSolidBrush(RGB(245, 250, 255));
+    FillRect(dc, &caret, brush);
+    DeleteObject(brush);
+}
+
 void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client)
 {
     const RECT searchRect = SearchRect(client);
@@ -3820,6 +4189,7 @@ void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client)
             DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
             DWRITE_WORD_WRAPPING_NO_WRAP);
     }
+    DrawSearchCaret(target, textRect, static_cast<int>(std::ceil(MeasureTextWidthDirect(g_searchTextFormat, SearchDisplayText()))));
 }
 
 void DrawSearchSurface(HDC dc, const RECT& client)
@@ -3844,6 +4214,7 @@ void DrawSearchSurface(HDC dc, const RECT& client)
         RECT tailText = { highlightRect.left + 8, textRect.top, highlightRect.right - 8, textRect.bottom };
         DrawTextClipped(dc, tail, tailText, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(255, 255, 255));
     }
+    DrawSearchCaret(dc, textRect, MeasureTextWidthGdi(dc, SearchDisplayText()));
     SelectObject(dc, oldFont);
     DeleteObject(searchFont);
 }
@@ -4575,7 +4946,7 @@ void ApplySpotlightPerPixelAlpha(DWORD* basePixels, DWORD* fullPixels, int width
             }
 
             const bool contentPixel = PixelDiffers(basePixels[index], fullPixels[index]);
-            const double contentCoverage = contentPixel ? ContentFeatherCoverage(y, contentClip) : 1.0;
+            const double contentCoverage = contentPixel ? SpotlightContentCoverageForPixel(y, contentClip) : 1.0;
             if (contentPixel && contentCoverage < 1.0)
             {
                 fullPixels[index] = BlendPixel(basePixels[index], fullPixels[index], contentCoverage);
@@ -4638,6 +5009,18 @@ bool PaintSpotlightLayeredWindow(bool repaint)
     const BOOL updated = UpdateLayeredWindow(g_hwnd, screenDc, &dst, &size, g_spotlightLayerBuffer.fullDc, &src, 0, &blend, ULW_ALPHA);
     ReleaseDC(nullptr, screenDc);
     return updated != FALSE;
+}
+
+void RequestSearchRepaint(HWND hwnd, bool erase)
+{
+    if (IsSpotlightMode() && IsWindowVisible(hwnd))
+    {
+        g_spotlightLayerDirty = true;
+        PaintSpotlightLayeredWindow(true);
+        return;
+    }
+
+    InvalidateRect(hwnd, nullptr, erase ? TRUE : FALSE);
 }
 
 void PaintWindow(HWND hwnd)
@@ -4768,9 +5151,10 @@ void SelectFilteredIndex(int index)
     if (IsSearchCompletionActive())
     {
         g_completionCandidateText = item.displayName;
+        g_searchText = g_completionCandidateText;
     }
     ScrollSelectedIntoView();
-    InvalidateRect(g_hwnd, nullptr, FALSE);
+    RequestSearchRepaint(g_hwnd, false);
 }
 
 void MoveSelectionHorizontal(int delta)
@@ -4811,10 +5195,11 @@ void CompleteSearchFromSelection(HWND hwnd, bool reverse)
 
     const std::wstring selectedPath = g_items[g_filtered[g_selectedFilteredIndex]].sourcePath;
     g_completionCandidateText = g_items[g_filtered[g_selectedFilteredIndex]].displayName;
+    g_searchText = g_completionCandidateText;
     SetSingleSelection(selectedPath);
     ActivateSearchInput();
     ScrollSelectedIntoView();
-    InvalidateRect(hwnd, nullptr, FALSE);
+    RequestSearchRepaint(hwnd, false);
 }
 
 std::wstring GetControlText(HWND hwnd, int controlId, int maxChars = 2048)
@@ -4849,6 +5234,35 @@ HWND ApplyControlFont(HWND control)
     return control;
 }
 
+LRESULT CALLBACK HotkeyEditSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR subclassId, DWORD_PTR data)
+{
+    (void)subclassId;
+    (void)data;
+
+    switch (message)
+    {
+    case WM_GETDLGCODE:
+        return DLGC_WANTALLKEYS;
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+    {
+        const std::wstring hotkey = FormatHotkeyFromKeyPress(wParam);
+        if (!hotkey.empty())
+        {
+            SetWindowTextW(hwnd, hotkey.c_str());
+            SendMessageW(hwnd, EM_SETSEL, hotkey.size(), hotkey.size());
+            return 0;
+        }
+        break;
+    }
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(hwnd, HotkeyEditSubclassProc, HotkeyEditSubclassId);
+        break;
+    }
+
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
 HWND CreateSettingsLabel(HWND parent, SettingsControlId id, int x, int y)
 {
     return ApplyControlFont(CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, x, y + 5, 150, 24, parent, reinterpret_cast<HMENU>(ControlId(id)), g_instance, nullptr));
@@ -4856,7 +5270,12 @@ HWND CreateSettingsLabel(HWND parent, SettingsControlId id, int x, int y)
 
 HWND CreateSettingsEdit(HWND parent, SettingsControlId id, int x, int y, int width)
 {
-    return ApplyControlFont(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, x, y, width, 26, parent, reinterpret_cast<HMENU>(ControlId(id)), g_instance, nullptr));
+    HWND edit = ApplyControlFont(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, x, y, width, 26, parent, reinterpret_cast<HMENU>(ControlId(id)), g_instance, nullptr));
+    if (id == SettingsControlId::Hotkey && edit)
+    {
+        SetWindowSubclass(edit, HotkeyEditSubclassProc, HotkeyEditSubclassId, 0);
+    }
+    return edit;
 }
 
 HWND CreateSettingsCombo(HWND parent, SettingsControlId id, int x, int y, int width)
@@ -4934,6 +5353,7 @@ void ApplyLanguageToSettingsWindow(HWND hwnd)
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::AppSpacingLabel), IsChineseLanguage(language) ? L"APP 间距" : L"App spacing");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::WheelSensitivityLabel), IsChineseLanguage(language) ? L"滚轮灵敏度" : L"Wheel sensitivity");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::StartWithWindows), IsChineseLanguage(language) ? L"随 Windows 启动" : L"Start with Windows");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::ResetSearchOnOpen), IsChineseLanguage(language) ? L"打开时清空搜索栏" : L"Reset search on open");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Save), IsChineseLanguage(language) ? L"保存" : L"Save");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Apply), IsChineseLanguage(language) ? L"应用" : L"Apply");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Cancel), IsChineseLanguage(language) ? L"取消" : L"Cancel");
@@ -4952,6 +5372,7 @@ void PopulateSettingsWindow(HWND hwnd)
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::DisplayMode), CB_SETCURSEL, IsSpotlightMode() ? 1 : 0, 0);
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::Language), CB_SETCURSEL, IsChineseLanguage(g_settings.language) ? 1 : 0, 0);
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::StartWithWindows), BM_SETCHECK, g_settings.startWithWindows ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ResetSearchOnOpen), BM_SETCHECK, g_settings.resetSearchOnOpen ? BST_CHECKED : BST_UNCHECKED, 0);
     ApplyLanguageToSettingsWindow(hwnd);
     SetIconSizeSelection(hwnd);
 }
@@ -4959,7 +5380,7 @@ void PopulateSettingsWindow(HWND hwnd)
 void ReadSettingsWindow(HWND hwnd)
 {
     g_settings.launchpadFolder = Trim(GetControlText(hwnd, ControlId(SettingsControlId::LaunchpadFolder)));
-    g_settings.hotkey = Trim(GetControlText(hwnd, ControlId(SettingsControlId::Hotkey)));
+    g_settings.hotkey = NormalizeHotkeyText(GetControlText(hwnd, ControlId(SettingsControlId::Hotkey)));
     if (g_settings.launchpadFolder.empty())
     {
         const auto profile = GetUserProfilePath();
@@ -4977,6 +5398,7 @@ void ReadSettingsWindow(HWND hwnd)
     g_settings.appSpacing = NormalizeAppSpacing(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::AppSpacing)).c_str()));
     g_settings.wheelSensitivity = NormalizeWheelSensitivity(std::wcstod(GetControlText(hwnd, ControlId(SettingsControlId::WheelSensitivity)).c_str(), nullptr));
     g_settings.startWithWindows = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::StartWithWindows), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    g_settings.resetSearchOnOpen = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ResetSearchOnOpen), BM_GETCHECK, 0, 0) == BST_CHECKED;
 }
 
 void SetStartWithWindows(bool enabled)
@@ -5178,6 +5600,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         CreateSettingsEdit(hwnd, SettingsControlId::WheelSensitivity, inputX, y, 96);
         y += 38;
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, inputX, y, inputW, 24, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::StartWithWindows)), g_instance, nullptr));
+        y += 32;
+        ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, inputX, y, inputW, 24, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::ResetSearchOnOpen)), g_instance, nullptr));
         y += 48;
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, inputX + 48, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Save)), g_instance, nullptr));
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, inputX + 146, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Apply)), g_instance, nullptr));
@@ -5249,7 +5673,7 @@ void ShowSettingsWindow()
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         560,
-        500,
+        540,
         g_hwnd,
         nullptr,
         g_instance,
@@ -5388,6 +5812,21 @@ void ShowTrayMenu()
     DestroyMenu(menu);
 }
 
+void HandleTrayNotification(LPARAM lParam)
+{
+    const UINT event = LOWORD(lParam);
+    if (event == NIN_SELECT || event == WM_LBUTTONUP)
+    {
+        ToggleNativeUi();
+        return;
+    }
+
+    if (event == WM_CONTEXTMENU || event == WM_RBUTTONUP)
+    {
+        ShowTrayMenu();
+    }
+}
+
 std::wstring ExplorerSelectArguments(const std::wstring& sourcePath)
 {
     return L"/select,\"" + sourcePath + L"\"";
@@ -5480,6 +5919,12 @@ void ShowWorkspaceContextMenu(POINT point)
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    if (message == g_taskbarCreatedMessage && g_taskbarCreatedMessage != 0)
+    {
+        ReaddTrayIcon();
+        return 0;
+    }
+
     switch (message)
     {
     case WM_NCHITTEST:
@@ -5546,13 +5991,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (LOWORD(wParam) == WorkspaceClearSelectionCommand) ClearAllSelection();
         return 0;
     case WmTray:
-        if (lParam == WM_LBUTTONUP) ToggleNativeUi();
-        if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) ShowTrayMenu();
+        HandleTrayNotification(lParam);
         return 0;
     case WM_PAINT:
         PaintWindow(hwnd);
         return 0;
     case WM_TIMER:
+        if (wParam == TrayIconRetryTimerId)
+        {
+            AddTrayIcon();
+            return 0;
+        }
+        if (wParam == TrayIconPromotionRetryTimerId)
+        {
+            const TrayPromotionResult promotionResult = PromoteTrayIconVisibility();
+            if (promotionResult == TrayPromotionResult::Promoted)
+            {
+                g_trayPromotionAttempts = 0;
+                KillTimer(hwnd, TrayIconPromotionRetryTimerId);
+                ReaddTrayIcon();
+                return 0;
+            }
+            if (promotionResult == TrayPromotionResult::AlreadyPromoted
+                || ++g_trayPromotionAttempts >= TrayIconPromotionMaxAttempts)
+            {
+                g_trayPromotionAttempts = 0;
+                KillTimer(hwnd, TrayIconPromotionRetryTimerId);
+            }
+            return 0;
+        }
         if (wParam == DragAnimationTimerId && g_dragActive)
         {
             if (g_dragMode == DragMode::Items)
@@ -5771,12 +6238,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         return 0;
+    case WM_IME_COMPOSITION:
+        UpdateSearchComposition(hwnd, lParam);
+        return 0;
+    case WM_IME_ENDCOMPOSITION:
+        g_searchCompositionText.clear();
+        RequestSearchRepaint(hwnd, false);
+        return 0;
+    case WM_IME_CHAR:
+        ActivateSearchInput();
+        CommitSearchCompletion();
+        g_searchCompositionText.clear();
+        if (wParam >= 32)
+        {
+            g_searchText.push_back(static_cast<wchar_t>(wParam));
+            g_scrollOffset = 0;
+            RebuildFiltered();
+        }
+        ClearSearchCompletion();
+        RequestSearchRepaint(hwnd, true);
+        return 0;
     case WM_CHAR:
         ActivateSearchInput();
-        if (IsSearchCompletionActive())
+        if (wParam == VK_TAB)
         {
-            ClearSearchCompletion();
+            return 0;
         }
+        CommitSearchCompletion();
+        g_searchCompositionText.clear();
         if (wParam == VK_BACK)
         {
             if (!g_searchText.empty()) g_searchText.pop_back();
@@ -5788,7 +6277,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         g_scrollOffset = 0;
         RebuildFiltered();
         ClearSearchCompletion();
-        InvalidateRect(hwnd, nullptr, TRUE);
+        RequestSearchRepaint(hwnd, true);
         return 0;
     case WM_SIZE:
         ClampScroll();
@@ -5834,6 +6323,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
 {
     g_instance = instance;
+    g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
     const HRESULT coInitializeResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const bool comInitialized = SUCCEEDED(coInitializeResult);
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"LightLaunchpad.NativeUi.SingleInstance");
@@ -5852,6 +6342,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     wc.hInstance = instance;
     wc.lpfnWndProc = WndProc;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIcon = LoadEmbeddedAppIcon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+    wc.hIconSm = LoadEmbeddedAppIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
     wc.lpszClassName = WindowClassName;
     wc.style = CS_DBLCLKS;
     RegisterClassExW(&wc);

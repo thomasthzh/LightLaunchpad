@@ -152,6 +152,30 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_ImprovesSearchAndTabCompletion),
                 HostedAppModeSourceTests.NativeUiSource_ImprovesSearchAndTabCompletion),
             (
+                nameof(HostedAppModeSourceTests.NativeUiSource_ShowsSearchTypingStateAndImeComposition),
+                HostedAppModeSourceTests.NativeUiSource_ShowsSearchTypingStateAndImeComposition),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_CapturesHotkeyInputInSettings),
+                HostedAppModeSourceTests.NativeUiSource_CapturesHotkeyInputInSettings),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_RepaintsSearchInputImmediately),
+                HostedAppModeSourceTests.NativeUiSource_RepaintsSearchInputImmediately),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_DoesNotFadeSearchChromePixels),
+                HostedAppModeSourceTests.NativeUiSource_DoesNotFadeSearchChromePixels),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_EmbedsTrayIconAndPackagesSingleExe),
+                HostedAppModeSourceTests.NativeUiSource_EmbedsTrayIconAndPackagesSingleExe),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_RestoresTrayIconWhenShellIsReady),
+                HostedAppModeSourceTests.NativeUiSource_RestoresTrayIconWhenShellIsReady),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_HandlesTrayCallbacksFromNotifyIconVersion4),
+                HostedAppModeSourceTests.NativeUiSource_HandlesTrayCallbacksFromNotifyIconVersion4),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_CanResetSearchOnOpenFromSettings),
+                HostedAppModeSourceTests.NativeUiSource_CanResetSearchOnOpenFromSettings),
+            (
                 nameof(HostedAppModeSourceTests.NativeUiSource_UsesQuietSelectionBoxAndScrollsWhileSelecting),
                 HostedAppModeSourceTests.NativeUiSource_UsesQuietSelectionBoxAndScrollsWhileSelecting),
             (

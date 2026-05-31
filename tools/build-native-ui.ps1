@@ -27,6 +27,10 @@ if (-not $windres) {
 }
 
 New-Item -ItemType Directory -Force -Path $outputDirectoryFull | Out-Null
+$staleAssetsDirectory = Join-Path $outputDirectoryFull "Assets"
+if (Test-Path $staleAssetsDirectory) {
+    Remove-Item -LiteralPath $staleAssetsDirectory -Recurse -Force
+}
 New-Item -ItemType Directory -Force -Path $temporaryDirectory | Out-Null
 
 $pushedLocation = $false
@@ -67,6 +71,7 @@ try {
         -ldwmapi `
         -ld2d1 `
         -ldwrite `
+        -limm32 `
         -lole32 `
         -luxtheme `
         -ladvapi32 `
@@ -84,8 +89,5 @@ finally {
     }
     Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }
-
-New-Item -ItemType Directory -Force -Path (Join-Path $outputDirectoryFull "Assets") | Out-Null
-Copy-Item (Join-Path $repoRoot "src\LightLaunchpad.App\Assets\LightLaunchpad.ico") (Join-Path $outputDirectoryFull "Assets\LightLaunchpad.ico") -Force
 
 Get-Item (Join-Path $outputDirectoryFull "LightLaunchpad.NativeUi.exe")

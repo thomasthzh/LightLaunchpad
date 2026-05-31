@@ -132,7 +132,7 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("SHGFI_SYSICONINDEX", source);
         TestAssert.DoesNotContain("SHGFI_USEFILEATTRIBUTES", source);
         TestAssert.DoesNotContain("Assets\\\\Alice.ico", source);
-        TestAssert.Contains("Assets\\\\LightLaunchpad.ico", source);
+        TestAssert.DoesNotContain("Assets\\\\LightLaunchpad.ico", source);
     }
 
     public static void NativeUiSource_SupportsDragSortingAndLayoutPersistence()
@@ -514,6 +514,118 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("std::stable_sort(g_filtered.begin(), g_filtered.end()", source);
         TestAssert.Contains("metrics.groupByRegion = g_searchText.empty()", source);
         TestAssert.DoesNotContain("ToLower(BuildSearchCandidateText(item))", source);
+    }
+
+    public static void NativeUiSource_ShowsSearchTypingStateAndImeComposition()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
+
+        TestAssert.Contains("g_searchCompositionText", source);
+        TestAssert.Contains("SearchCommittedText", source);
+        TestAssert.Contains("SearchDisplayText", source);
+        TestAssert.Contains("SearchCompletionTail", source);
+        TestAssert.Contains("DrawSearchCaret", source);
+        TestAssert.Contains("WM_IME_COMPOSITION", source);
+        TestAssert.Contains("ImmGetCompositionStringW", source);
+        TestAssert.Contains("GCS_COMPSTR", source);
+        TestAssert.Contains("-limm32", script);
+    }
+
+    public static void NativeUiSource_CapturesHotkeyInputInSettings()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("HotkeyEditSubclassProc", source);
+        TestAssert.Contains("SetWindowSubclass", source);
+        TestAssert.Contains("RemoveWindowSubclass", source);
+        TestAssert.Contains("FormatHotkeyFromKeyPress", source);
+        TestAssert.Contains("WM_GETDLGCODE", source);
+        TestAssert.Contains("DLGC_WANTALLKEYS", source);
+        TestAssert.Contains("NormalizeHotkeyText", source);
+        TestAssert.Contains("RegisterCurrentHotkey", source);
+    }
+
+    public static void NativeUiSource_RepaintsSearchInputImmediately()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("RequestSearchRepaint", source);
+        TestAssert.Contains("PaintSpotlightLayeredWindow(true)", source);
+        TestAssert.Contains("RequestSearchRepaint(hwnd, true)", source);
+        TestAssert.Contains("RequestSearchRepaint(hwnd, false)", source);
+    }
+
+    public static void NativeUiSource_DoesNotFadeSearchChromePixels()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("SpotlightContentCoverageForPixel", source);
+        TestAssert.Contains("if (y < contentClip.top)", source);
+        TestAssert.Contains("const double contentCoverage = contentPixel ? SpotlightContentCoverageForPixel(y, contentClip) : 1.0;", source);
+    }
+
+    public static void NativeUiSource_EmbedsTrayIconAndPackagesSingleExe()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var buildScript = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
+
+        TestAssert.Contains("AppIconResourceName", source);
+        TestAssert.Contains("LoadEmbeddedAppIcon", source);
+        TestAssert.Contains("LoadImageW(", source);
+        TestAssert.Contains("g_instance", source);
+        TestAssert.DoesNotContain("LR_LOADFROMFILE", source);
+        TestAssert.DoesNotContain("Assets\\\\LightLaunchpad.ico", source);
+        TestAssert.DoesNotContain("Copy-Item (Join-Path $repoRoot \"src\\LightLaunchpad.App\\Assets\\LightLaunchpad.ico\")", buildScript);
+        TestAssert.DoesNotContain("New-Item -ItemType Directory -Force -Path (Join-Path $outputDirectoryFull \"Assets\")", buildScript);
+    }
+
+    public static void NativeUiSource_RestoresTrayIconWhenShellIsReady()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("TrayIconRetryTimerId", source);
+        TestAssert.Contains("TrayIconPromotionRetryTimerId", source);
+        TestAssert.Contains("g_taskbarCreatedMessage", source);
+        TestAssert.Contains("RegisterWindowMessageW(L\"TaskbarCreated\")", source);
+        TestAssert.Contains("Shell_NotifyIconW(NIM_ADD", source);
+        TestAssert.Contains("Shell_NotifyIconW(NIM_SETVERSION", source);
+        TestAssert.Contains("NOTIFYICON_VERSION_4", source);
+        TestAssert.Contains("PromoteTrayIconVisibility", source);
+        TestAssert.Contains("Control Panel\\\\NotifyIconSettings", source);
+        TestAssert.Contains("ExecutablePath", source);
+        TestAssert.Contains("IsPromoted", source);
+        TestAssert.Contains("RegEnumKeyExW", source);
+        TestAssert.Contains("RegSetValueExW", source);
+        TestAssert.Contains("SetTimer(g_hwnd, TrayIconRetryTimerId", source);
+        TestAssert.Contains("SetTimer(g_hwnd, TrayIconPromotionRetryTimerId", source);
+        TestAssert.Contains("KillTimer(g_hwnd, TrayIconRetryTimerId)", source);
+    }
+
+    public static void NativeUiSource_HandlesTrayCallbacksFromNotifyIconVersion4()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("HandleTrayNotification", source);
+        TestAssert.Contains("const UINT event = LOWORD(lParam);", source);
+        TestAssert.Contains("event == NIN_SELECT", source);
+        TestAssert.Contains("event == WM_CONTEXTMENU", source);
+        TestAssert.Contains("HandleTrayNotification(lParam)", source);
+        TestAssert.DoesNotContain("if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU)", source);
+    }
+
+    public static void NativeUiSource_CanResetSearchOnOpenFromSettings()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("ResetSearchOnOpen", source);
+        TestAssert.Contains("resetSearchOnOpen", source);
+        TestAssert.Contains("ResetSearchForOpen", source);
+        TestAssert.Contains("g_settings.resetSearchOnOpen", source);
+        TestAssert.Contains("\"ResetSearchOnOpen\"", source);
+        TestAssert.Contains("SettingsControlId::ResetSearchOnOpen", source);
+        TestAssert.Contains("BM_GETCHECK", source);
+        TestAssert.Contains("BM_SETCHECK", source);
     }
 
     public static void NativeUiSource_SplitsRenderingPipeline()
