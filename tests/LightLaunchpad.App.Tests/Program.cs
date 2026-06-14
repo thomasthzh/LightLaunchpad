@@ -155,6 +155,9 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_UsesLiquidGlassFocusLensing),
                 HostedAppModeSourceTests.NativeUiSource_UsesLiquidGlassFocusLensing),
             (
+                nameof(HostedAppModeSourceTests.NativeUiSource_UsesBackdropBlurForLiquidGlass),
+                HostedAppModeSourceTests.NativeUiSource_UsesBackdropBlurForLiquidGlass),
+            (
                 nameof(HostedAppModeSourceTests.NativeUiSource_UsesAlignedSearchFocusRefraction),
                 HostedAppModeSourceTests.NativeUiSource_UsesAlignedSearchFocusRefraction),
             (

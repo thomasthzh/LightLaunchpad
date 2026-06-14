@@ -100,7 +100,7 @@ constexpr int SpotlightContentFeatherSize = 44;
 constexpr int SpotlightSearchSideInset = 68;
 constexpr int SpotlightSearchCornerRadius = 24;
 constexpr COLORREF SpotlightTransparentKey = RGB(1, 2, 3);
-constexpr BYTE SpotlightGlassAlpha = 218;
+constexpr BYTE SpotlightGlassAlpha = 200;
 constexpr int SpotlightAnimationSteps = 9;
 constexpr int SpotlightAnimationOffset = 18;
 constexpr int SpotlightCloseAnimationOffset = 12;
@@ -358,6 +358,7 @@ bool PaintSpotlightLayeredWindow(bool repaint = true);
 void ReleaseSpotlightLayerBuffer();
 void ReleaseSpotlightBackdrop();
 bool CaptureSpotlightBackdrop(const RECT& windowRect);
+ID2D1Bitmap* GetSpotlightBackdropD2dBitmap(ID2D1DCRenderTarget* target);
 std::wstring BuildPinyinSearchText(const std::wstring& text);
 void UpdateSearchIndex(LaunchItem& item);
 void RebuildSearchIndex();
@@ -2924,6 +2925,111 @@ void ApplySpotlightWindowRegion(int width, int height)
     InvalidateRect(g_hwnd, &client, FALSE);
 }
 
+
+void BoxBlurHorizontalPass(DWORD* src, DWORD* dst, int width, int height, int radius)
+{
+    if (radius <= 0) return;
+    const int diameter = radius * 2 + 1;
+    for (int y = 0; y < height; ++y)
+    {
+        const int rowOffset = y * width;
+        uint64_t r = 0, g = 0, b = 0, a = 0;
+        int count = 0;
+        for (int x = -radius; x <= radius; ++x)
+        {
+            const int clamped = std::clamp(x, 0, width - 1);
+            const DWORD pixel = src[rowOffset + clamped];
+            b += (pixel >> 0) & 0xFF;
+            g += (pixel >> 8) & 0xFF;
+            r += (pixel >> 16) & 0xFF;
+            a += (pixel >> 24) & 0xFF;
+            count++;
+        }
+        for (int x = 0; x < width; ++x)
+        {
+            dst[rowOffset + x] = static_cast<DWORD>((a / count) << 24 | (r / count) << 16 | (g / count) << 8 | (b / count));
+            const int left = std::max(0, x - radius);
+            const int right = std::min(width - 1, x + radius + 1);
+            if (right < width)
+            {
+                const DWORD addPixel = src[rowOffset + right];
+                b += (addPixel >> 0) & 0xFF;
+                g += (addPixel >> 8) & 0xFF;
+                r += (addPixel >> 16) & 0xFF;
+                a += (addPixel >> 24) & 0xFF;
+                count++;
+            }
+            if (x - radius - 1 >= 0)
+            {
+                const DWORD subPixel = src[rowOffset + left - 1];
+                b -= (subPixel >> 0) & 0xFF;
+                g -= (subPixel >> 8) & 0xFF;
+                r -= (subPixel >> 16) & 0xFF;
+                a -= (subPixel >> 24) & 0xFF;
+                count--;
+            }
+        }
+    }
+}
+
+void BoxBlurVerticalPass(DWORD* src, DWORD* dst, int width, int height, int radius)
+{
+    if (radius <= 0) return;
+    for (int x = 0; x < width; ++x)
+    {
+        uint64_t r = 0, g = 0, b = 0, a = 0;
+        int count = 0;
+        for (int y = -radius; y <= radius; ++y)
+        {
+            const int clamped = std::clamp(y, 0, height - 1);
+            const DWORD pixel = src[clamped * width + x];
+            b += (pixel >> 0) & 0xFF;
+            g += (pixel >> 8) & 0xFF;
+            r += (pixel >> 16) & 0xFF;
+            a += (pixel >> 24) & 0xFF;
+            count++;
+        }
+        for (int y = 0; y < height; ++y)
+        {
+            dst[y * width + x] = static_cast<DWORD>((a / count) << 24 | (r / count) << 16 | (g / count) << 8 | (b / count));
+            const int top = std::max(0, y - radius);
+            const int bottom = std::min(height - 1, y + radius + 1);
+            if (bottom < height)
+            {
+                const DWORD addPixel = src[bottom * width + x];
+                b += (addPixel >> 0) & 0xFF;
+                g += (addPixel >> 8) & 0xFF;
+                r += (addPixel >> 16) & 0xFF;
+                a += (addPixel >> 24) & 0xFF;
+                count++;
+            }
+            if (y - radius - 1 >= 0)
+            {
+                const DWORD subPixel = src[(top - 1) * width + x];
+                b -= (subPixel >> 0) & 0xFF;
+                g -= (subPixel >> 8) & 0xFF;
+                r -= (subPixel >> 16) & 0xFF;
+                a -= (subPixel >> 24) & 0xFF;
+                count--;
+            }
+        }
+    }
+}
+
+void ApplyBoxBlurToBackdrop(int width, int height, int radius)
+{
+    if (!g_spotlightBackdrop.bits || radius <= 0 || width <= 0 || height <= 0) return;
+    const size_t count = static_cast<size_t>(width) * static_cast<size_t>(height);
+    std::vector<DWORD> temp(count);
+    DWORD* pixels = reinterpret_cast<DWORD*>(g_spotlightBackdrop.bits);
+    BoxBlurHorizontalPass(pixels, temp.data(), width, height, radius);
+    BoxBlurVerticalPass(temp.data(), pixels, width, height, radius);
+    BoxBlurHorizontalPass(pixels, temp.data(), width, height, radius);
+    BoxBlurVerticalPass(temp.data(), pixels, width, height, radius);
+    BoxBlurHorizontalPass(pixels, temp.data(), width, height, radius);
+    BoxBlurVerticalPass(temp.data(), pixels, width, height, radius);
+}
+
 void ReleaseSpotlightBackdrop()
 {
     SafeRelease(g_spotlightBackdropD2dBitmap);
@@ -2993,6 +3099,7 @@ bool CaptureSpotlightBackdrop(const RECT& windowRect)
     g_spotlightBackdrop.bitmap = bitmap;
     g_spotlightBackdrop.oldBitmap = oldBitmap;
     g_spotlightBackdrop.bits = bits;
+    ApplyBoxBlurToBackdrop(width, height, 12);
     g_spotlightLayerDirty = true;
     return true;
 }
@@ -3787,10 +3894,10 @@ void DrawLiquidGlassSpecularSheen(ID2D1DCRenderTarget* target, const D2D1_ROUNDE
     ID2D1GradientStopCollection* sheenStops = nullptr;
     ID2D1LinearGradientBrush* sheenBrush = nullptr;
     D2D1_GRADIENT_STOP stops[] = {
-        { 0.0f, D2DColorAlpha(RGB(246, 252, 255), 0.20f) },
-        { 0.16f, D2DColorAlpha(RGB(176, 218, 255), 0.075f) },
+        { 0.0f, D2DColorAlpha(RGB(246, 252, 255), 0.28f) },
+        { 0.16f, D2DColorAlpha(RGB(176, 218, 255), 0.11f) },
         { 0.36f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) },
-        { 0.68f, D2DColorAlpha(RGB(150, 194, 232), 0.045f) },
+        { 0.68f, D2DColorAlpha(RGB(150, 194, 232), 0.065f) },
         { 1.0f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) }
     };
     if (SUCCEEDED(target->CreateGradientStopCollection(stops, ARRAYSIZE(stops), &sheenStops)) && sheenStops)
@@ -3862,8 +3969,8 @@ void DrawLiquidGlassRimLight(ID2D1DCRenderTarget* target, const RECT& client)
             ? RGB(250, 255, 255)
             : (inset < 3 ? RGB(150, 208, 246) : RGB(54, 90, 128));
         const float alpha = inset == 0
-            ? 0.24f
-            : (inset < 3 ? std::max(0.070f, 0.14f - inset * 0.025f) : std::max(0.018f, 0.072f - inset * 0.006f));
+            ? 0.34f
+            : (inset < 3 ? std::max(0.10f, 0.20f - inset * 0.035f) : std::max(0.025f, 0.10f - inset * 0.008f));
         target->CreateSolidColorBrush(D2DColorAlpha(edgeColor, alpha), &brush);
         if (brush)
         {
@@ -3878,13 +3985,20 @@ void RenderSpotlightGlassDirect2D(ID2D1DCRenderTarget* target, const RECT& clien
 {
     target->Clear(D2DColor(SpotlightTransparentKey));
 
+    ID2D1Bitmap* backdrop = GetSpotlightBackdropD2dBitmap(target);
+    if (backdrop)
+    {
+        const auto destRect = D2D1::RectF(static_cast<float>(client.left), static_cast<float>(client.top), static_cast<float>(client.right), static_cast<float>(client.bottom));
+        target->DrawBitmap(backdrop, &destRect, 0.52f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    }
+
     ID2D1GradientStopCollection* glassStops = nullptr;
     ID2D1LinearGradientBrush* glassBrush = nullptr;
     D2D1_GRADIENT_STOP stops[] = {
-        { 0.0f, D2DColorAlpha(RGB(76, 94, 116), 0.58f) },
-        { 0.32f, D2DColorAlpha(RGB(42, 58, 80), 0.64f) },
-        { 0.72f, D2DColorAlpha(RGB(18, 32, 54), 0.73f) },
-        { 1.0f, D2DColorAlpha(RGB(7, 17, 32), 0.80f) }
+        { 0.0f, D2DColorAlpha(RGB(76, 94, 116), 0.38f) },
+        { 0.32f, D2DColorAlpha(RGB(42, 58, 80), 0.44f) },
+        { 0.72f, D2DColorAlpha(RGB(18, 32, 54), 0.53f) },
+        { 1.0f, D2DColorAlpha(RGB(7, 17, 32), 0.60f) }
     };
     if (SUCCEEDED(target->CreateGradientStopCollection(stops, ARRAYSIZE(stops), &glassStops)) && glassStops)
     {

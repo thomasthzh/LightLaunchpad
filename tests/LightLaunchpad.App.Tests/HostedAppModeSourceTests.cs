@@ -500,6 +500,18 @@ public sealed class HostedAppModeSourceTests
         TestAssert.DoesNotContain("ID2D1Effect", source);
     }
 
+    public static void NativeUiSource_UsesBackdropBlurForLiquidGlass()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("ApplyBoxBlurToBackdrop", source);
+        TestAssert.Contains("BoxBlurHorizontalPass", source);
+        TestAssert.Contains("BoxBlurVerticalPass", source);
+        TestAssert.Contains("GetSpotlightBackdropD2dBitmap(target)", source);
+        TestAssert.Contains("target->DrawBitmap(backdrop", source);
+        TestAssert.Contains("D2D1_BITMAP_INTERPOLATION_MODE_LINEAR", source);
+    }
+
     public static void NativeUiSource_UsesAlignedSearchFocusRefraction()
     {
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
