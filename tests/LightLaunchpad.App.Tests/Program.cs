@@ -149,6 +149,15 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_UsesGlassBackdropAndSoftEdges),
                 HostedAppModeSourceTests.NativeUiSource_UsesGlassBackdropAndSoftEdges),
             (
+                nameof(HostedAppModeSourceTests.NativeUiSource_UsesLiquidGlassOpticalLayers),
+                HostedAppModeSourceTests.NativeUiSource_UsesLiquidGlassOpticalLayers),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_UsesLiquidGlassFocusLensing),
+                HostedAppModeSourceTests.NativeUiSource_UsesLiquidGlassFocusLensing),
+            (
+                nameof(HostedAppModeSourceTests.NativeUiSource_UsesAlignedSearchFocusRefraction),
+                HostedAppModeSourceTests.NativeUiSource_UsesAlignedSearchFocusRefraction),
+            (
                 nameof(HostedAppModeSourceTests.NativeUiSource_ImprovesSearchAndTabCompletion),
                 HostedAppModeSourceTests.NativeUiSource_ImprovesSearchAndTabCompletion),
             (

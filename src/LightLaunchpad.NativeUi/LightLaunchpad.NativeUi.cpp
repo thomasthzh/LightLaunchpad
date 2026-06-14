@@ -92,6 +92,7 @@ constexpr wchar_t TextInputWindowClassName[] = L"LightLaunchpadNativeTextInputWi
 constexpr wchar_t AppIconResourceName[] = L"IDI_APP";
 constexpr int SpotlightCornerRadius = 34;
 constexpr int SpotlightEdgeLayers = 10;
+constexpr int SpotlightGlassRimLayers = 9;
 constexpr int SpotlightPanelInset = 0;
 constexpr int SpotlightContentInset = 68;
 constexpr int SpotlightContentBottomInset = 34;
@@ -271,6 +272,16 @@ struct SpotlightLayerBuffer
     void* fullBits = nullptr;
 };
 
+struct SpotlightBackdropCapture
+{
+    int width = 0;
+    int height = 0;
+    HDC dc = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ oldBitmap = nullptr;
+    void* bits = nullptr;
+};
+
 HINSTANCE g_instance = nullptr;
 HWND g_hwnd = nullptr;
 HWND g_settingsHwnd = nullptr;
@@ -322,11 +333,13 @@ IDWriteFactory* g_dwriteFactory = nullptr;
 IDWriteTextFormat* g_searchTextFormat = nullptr;
 IDWriteTextFormat* g_tileTextFormat = nullptr;
 IDWriteTextFormat* g_headerTextFormat = nullptr;
+ID2D1Bitmap* g_spotlightBackdropD2dBitmap = nullptr;
 HFONT g_uiFont = nullptr;
 bool g_spotlightLayerBasePass = false;
 BYTE g_spotlightPaintOpacity = 255;
 bool g_spotlightLayerDirty = true;
 SpotlightLayerBuffer g_spotlightLayerBuffer;
+SpotlightBackdropCapture g_spotlightBackdrop;
 UINT g_taskbarCreatedMessage = 0;
 bool g_trayIconAdded = false;
 int g_trayPromotionAttempts = 0;
@@ -343,6 +356,8 @@ bool InitializeDirectRenderer();
 bool IsSpotlightMode();
 bool PaintSpotlightLayeredWindow(bool repaint = true);
 void ReleaseSpotlightLayerBuffer();
+void ReleaseSpotlightBackdrop();
+bool CaptureSpotlightBackdrop(const RECT& windowRect);
 std::wstring BuildPinyinSearchText(const std::wstring& text);
 void UpdateSearchIndex(LaunchItem& item);
 void RebuildSearchIndex();
@@ -1395,6 +1410,7 @@ void TrimHiddenFootprint()
 {
     ReleaseAllResidentIcons();
     ReleaseSpotlightLayerBuffer();
+    ReleaseSpotlightBackdrop();
     DestroyDirectRenderer();
     CoFreeUnusedLibrariesEx(0, 0);
     HeapCompact(GetProcessHeap(), 0);
@@ -2908,6 +2924,79 @@ void ApplySpotlightWindowRegion(int width, int height)
     InvalidateRect(g_hwnd, &client, FALSE);
 }
 
+void ReleaseSpotlightBackdrop()
+{
+    SafeRelease(g_spotlightBackdropD2dBitmap);
+    if (g_spotlightBackdrop.dc && g_spotlightBackdrop.oldBitmap)
+    {
+        SelectObject(g_spotlightBackdrop.dc, g_spotlightBackdrop.oldBitmap);
+    }
+    if (g_spotlightBackdrop.bitmap) DeleteObject(g_spotlightBackdrop.bitmap);
+    if (g_spotlightBackdrop.dc) DeleteDC(g_spotlightBackdrop.dc);
+    g_spotlightBackdrop = {};
+    g_spotlightLayerDirty = true;
+}
+
+bool CaptureSpotlightBackdrop(const RECT& windowRect)
+{
+    ReleaseSpotlightBackdrop();
+
+    const int width = std::max(1, static_cast<int>(windowRect.right - windowRect.left));
+    const int height = std::max(1, static_cast<int>(windowRect.bottom - windowRect.top));
+
+    HDC screenDc = GetDC(nullptr);
+    if (!screenDc) return false;
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    HDC captureDc = CreateCompatibleDC(screenDc);
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(screenDc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!captureDc || !bitmap || !bits)
+    {
+        if (bitmap) DeleteObject(bitmap);
+        if (captureDc) DeleteDC(captureDc);
+        ReleaseDC(nullptr, screenDc);
+        return false;
+    }
+
+    HGDIOBJ oldBitmap = SelectObject(captureDc, bitmap);
+    const BOOL copied = BitBlt(
+        captureDc,
+        0,
+        0,
+        width,
+        height,
+        screenDc,
+        windowRect.left,
+        windowRect.top,
+        SRCCOPY | CAPTUREBLT);
+    ReleaseDC(nullptr, screenDc);
+
+    if (!copied)
+    {
+        SelectObject(captureDc, oldBitmap);
+        DeleteObject(bitmap);
+        DeleteDC(captureDc);
+        return false;
+    }
+
+    g_spotlightBackdrop.width = width;
+    g_spotlightBackdrop.height = height;
+    g_spotlightBackdrop.dc = captureDc;
+    g_spotlightBackdrop.bitmap = bitmap;
+    g_spotlightBackdrop.oldBitmap = oldBitmap;
+    g_spotlightBackdrop.bits = bits;
+    g_spotlightLayerDirty = true;
+    return true;
+}
+
 void PositionWindow()
 {
     RECT work = {};
@@ -3037,6 +3126,16 @@ void ShowNativeUi()
     ResetSearchForOpen();
     RebuildFiltered();
     PositionWindow();
+    if (IsSpotlightMode())
+    {
+        RECT windowRect = {};
+        GetWindowRect(g_hwnd, &windowRect);
+        CaptureSpotlightBackdrop(windowRect);
+    }
+    else
+    {
+        ReleaseSpotlightBackdrop();
+    }
     g_searchInputActive = true;
     PrewarmNativeUiForShow();
     if (IsSpotlightMode())
@@ -3568,6 +3667,7 @@ bool InitializeDirectRenderer()
 
 void DestroyDirectRenderer()
 {
+    SafeRelease(g_spotlightBackdropD2dBitmap);
     SafeRelease(g_d2dDcRenderTarget);
     SafeRelease(g_searchTextFormat);
     SafeRelease(g_tileTextFormat);
@@ -3682,6 +3782,98 @@ bool IsPointInsideSpotlightGlass(POINT point)
     return IsPointInsideRoundedRect(point, client, SpotlightCornerRadius);
 }
 
+void DrawLiquidGlassSpecularSheen(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& panel, const RECT& client)
+{
+    ID2D1GradientStopCollection* sheenStops = nullptr;
+    ID2D1LinearGradientBrush* sheenBrush = nullptr;
+    D2D1_GRADIENT_STOP stops[] = {
+        { 0.0f, D2DColorAlpha(RGB(246, 252, 255), 0.20f) },
+        { 0.16f, D2DColorAlpha(RGB(176, 218, 255), 0.075f) },
+        { 0.36f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) },
+        { 0.68f, D2DColorAlpha(RGB(150, 194, 232), 0.045f) },
+        { 1.0f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) }
+    };
+    if (SUCCEEDED(target->CreateGradientStopCollection(stops, ARRAYSIZE(stops), &sheenStops)) && sheenStops)
+    {
+        const float width = static_cast<float>(client.right - client.left);
+        const float height = static_cast<float>(client.bottom - client.top);
+        const auto props = D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(client.left) + width * 0.03f, static_cast<float>(client.top) - height * 0.06f),
+            D2D1::Point2F(static_cast<float>(client.right) - width * 0.10f, static_cast<float>(client.top) + height * 0.62f));
+        target->CreateLinearGradientBrush(props, sheenStops, &sheenBrush);
+    }
+
+    if (sheenBrush)
+    {
+        target->FillRoundedRectangle(panel, sheenBrush);
+    }
+
+    SafeRelease(sheenBrush);
+    SafeRelease(sheenStops);
+}
+
+void DrawLiquidGlassInnerShadow(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& panel, const RECT& client)
+{
+    ID2D1GradientStopCollection* shadowStops = nullptr;
+    ID2D1LinearGradientBrush* shadowBrush = nullptr;
+    D2D1_GRADIENT_STOP stops[] = {
+        { 0.0f, D2DColorAlpha(RGB(3, 8, 18), 0.0f) },
+        { 0.56f, D2DColorAlpha(RGB(3, 8, 18), 0.0f) },
+        { 1.0f, D2DColorAlpha(RGB(3, 8, 18), 0.24f) }
+    };
+    if (SUCCEEDED(target->CreateGradientStopCollection(stops, ARRAYSIZE(stops), &shadowStops)) && shadowStops)
+    {
+        const auto props = D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(client.left), static_cast<float>(client.top)),
+            D2D1::Point2F(static_cast<float>(client.left), static_cast<float>(client.bottom)));
+        target->CreateLinearGradientBrush(props, shadowStops, &shadowBrush);
+    }
+    if (shadowBrush)
+    {
+        target->FillRoundedRectangle(panel, shadowBrush);
+    }
+
+    for (int inset = 1; inset <= 5; ++inset)
+    {
+        ID2D1SolidColorBrush* strokeBrush = nullptr;
+        const float alpha = 0.105f - inset * 0.014f;
+        target->CreateSolidColorBrush(D2DColorAlpha(RGB(2, 7, 16), std::max(0.025f, alpha)), &strokeBrush);
+        if (strokeBrush)
+        {
+            const float edgeInset = static_cast<float>(inset) + 0.5f;
+            target->DrawRoundedRectangle(
+                SpotlightRoundedRect(client, edgeInset),
+                strokeBrush,
+                1.0f);
+        }
+        SafeRelease(strokeBrush);
+    }
+
+    SafeRelease(shadowBrush);
+    SafeRelease(shadowStops);
+}
+
+void DrawLiquidGlassRimLight(ID2D1DCRenderTarget* target, const RECT& client)
+{
+    for (int inset = 0; inset < SpotlightGlassRimLayers; ++inset)
+    {
+        ID2D1SolidColorBrush* brush = nullptr;
+        const COLORREF edgeColor = inset == 0
+            ? RGB(250, 255, 255)
+            : (inset < 3 ? RGB(150, 208, 246) : RGB(54, 90, 128));
+        const float alpha = inset == 0
+            ? 0.24f
+            : (inset < 3 ? std::max(0.070f, 0.14f - inset * 0.025f) : std::max(0.018f, 0.072f - inset * 0.006f));
+        target->CreateSolidColorBrush(D2DColorAlpha(edgeColor, alpha), &brush);
+        if (brush)
+        {
+            const float pixelAlignedInset = static_cast<float>(SpotlightPanelInset + inset) + 0.5f;
+            target->DrawRoundedRectangle(SpotlightRoundedRect(client, pixelAlignedInset), brush, 1.0f);
+        }
+        SafeRelease(brush);
+    }
+}
+
 void RenderSpotlightGlassDirect2D(ID2D1DCRenderTarget* target, const RECT& client)
 {
     target->Clear(D2DColor(SpotlightTransparentKey));
@@ -3689,10 +3881,10 @@ void RenderSpotlightGlassDirect2D(ID2D1DCRenderTarget* target, const RECT& clien
     ID2D1GradientStopCollection* glassStops = nullptr;
     ID2D1LinearGradientBrush* glassBrush = nullptr;
     D2D1_GRADIENT_STOP stops[] = {
-        { 0.0f, D2DColorAlpha(RGB(82, 100, 118), 0.66f) },
-        { 0.35f, D2DColorAlpha(RGB(50, 64, 82), 0.70f) },
-        { 0.72f, D2DColorAlpha(RGB(26, 38, 58), 0.76f) },
-        { 1.0f, D2DColorAlpha(RGB(16, 26, 42), 0.80f) }
+        { 0.0f, D2DColorAlpha(RGB(76, 94, 116), 0.58f) },
+        { 0.32f, D2DColorAlpha(RGB(42, 58, 80), 0.64f) },
+        { 0.72f, D2DColorAlpha(RGB(18, 32, 54), 0.73f) },
+        { 1.0f, D2DColorAlpha(RGB(7, 17, 32), 0.80f) }
     };
     if (SUCCEEDED(target->CreateGradientStopCollection(stops, ARRAYSIZE(stops), &glassStops)) && glassStops)
     {
@@ -3711,9 +3903,9 @@ void RenderSpotlightGlassDirect2D(ID2D1DCRenderTarget* target, const RECT& clien
     ID2D1GradientStopCollection* depthStops = nullptr;
     ID2D1RadialGradientBrush* depthBrush = nullptr;
     D2D1_GRADIENT_STOP depth[] = {
-        { 0.0f, D2DColorAlpha(RGB(128, 154, 178), 0.16f) },
-        { 0.58f, D2DColorAlpha(RGB(70, 96, 124), 0.052f) },
-        { 1.0f, D2DColorAlpha(RGB(6, 14, 26), 0.28f) }
+        { 0.0f, D2DColorAlpha(RGB(112, 154, 188), 0.18f) },
+        { 0.46f, D2DColorAlpha(RGB(62, 102, 136), 0.060f) },
+        { 1.0f, D2DColorAlpha(RGB(4, 12, 26), 0.30f) }
     };
     if (SUCCEEDED(target->CreateGradientStopCollection(depth, ARRAYSIZE(depth), &depthStops)) && depthStops)
     {
@@ -3729,27 +3921,32 @@ void RenderSpotlightGlassDirect2D(ID2D1DCRenderTarget* target, const RECT& clien
         target->FillRoundedRectangle(panel, depthBrush);
     }
 
-    ID2D1GradientStopCollection* sheenStops = nullptr;
-    ID2D1LinearGradientBrush* sheenBrush = nullptr;
-    D2D1_GRADIENT_STOP sheen[] = {
-        { 0.0f, D2DColorAlpha(RGB(238, 248, 255), 0.13f) },
-        { 0.24f, D2DColorAlpha(RGB(196, 220, 240), 0.055f) },
+    ID2D1GradientStopCollection* ambientStops = nullptr;
+    ID2D1RadialGradientBrush* ambientBrush = nullptr;
+    D2D1_GRADIENT_STOP ambient[] = {
+        { 0.0f, D2DColorAlpha(RGB(88, 142, 180), 0.12f) },
+        { 0.42f, D2DColorAlpha(RGB(56, 104, 146), 0.042f) },
         { 1.0f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) }
     };
-    if (SUCCEEDED(target->CreateGradientStopCollection(sheen, ARRAYSIZE(sheen), &sheenStops)) && sheenStops)
+    if (SUCCEEDED(target->CreateGradientStopCollection(ambient, ARRAYSIZE(ambient), &ambientStops)) && ambientStops)
     {
-        const auto props = D2D1::LinearGradientBrushProperties(
-            D2D1::Point2F(static_cast<float>(client.left), static_cast<float>(client.top)),
-            D2D1::Point2F(static_cast<float>(client.left), static_cast<float>(client.bottom)));
-        target->CreateLinearGradientBrush(props, sheenStops, &sheenBrush);
+        const auto props = D2D1::RadialGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(client.left) + (client.right - client.left) * 0.70f, static_cast<float>(client.top) + (client.bottom - client.top) * 0.28f),
+            D2D1::Point2F(0.0f, 0.0f),
+            static_cast<float>(client.right - client.left) * 0.62f,
+            static_cast<float>(client.bottom - client.top) * 0.58f);
+        target->CreateRadialGradientBrush(props, ambientStops, &ambientBrush);
     }
-    if (sheenBrush)
+    if (ambientBrush)
     {
-        target->FillRoundedRectangle(panel, sheenBrush);
+        target->FillRoundedRectangle(panel, ambientBrush);
     }
 
-    SafeRelease(sheenBrush);
-    SafeRelease(sheenStops);
+    DrawLiquidGlassSpecularSheen(target, panel, client);
+    DrawLiquidGlassInnerShadow(target, panel, client);
+
+    SafeRelease(ambientBrush);
+    SafeRelease(ambientStops);
     SafeRelease(depthBrush);
     SafeRelease(depthStops);
     SafeRelease(glassBrush);
@@ -3784,6 +3981,42 @@ void DrawGlassBackground(ID2D1DCRenderTarget* target, const RECT& client)
     }
 
     RenderLaunchpadBackdropDirect2D(target, client);
+}
+
+void RenderSpotlightGlassGdiSpecular(HDC dc, const RECT& client)
+{
+    const int height = client.bottom - client.top;
+    RECT band = {
+        client.left,
+        client.top,
+        client.right,
+        client.top + std::max(58, height * 34 / 100)
+    };
+
+    TRIVERTEX vertices[2] = {};
+    vertices[0].x = band.left;
+    vertices[0].y = band.top;
+    vertices[0].Red = 116 << 8;
+    vertices[0].Green = 144 << 8;
+    vertices[0].Blue = 166 << 8;
+    vertices[0].Alpha = 0xFFFF;
+
+    vertices[1].x = band.right;
+    vertices[1].y = band.bottom;
+    vertices[1].Red = 36 << 8;
+    vertices[1].Green = 52 << 8;
+    vertices[1].Blue = 74 << 8;
+    vertices[1].Alpha = 0xFFFF;
+
+    GRADIENT_RECT upper = { 0, 1 };
+    GradientFill(dc, vertices, 2, &upper, 1, GRADIENT_FILL_RECT_V);
+
+    HPEN topGlint = CreatePen(PS_SOLID, 1, RGB(218, 238, 250));
+    HGDIOBJ oldPen = SelectObject(dc, topGlint);
+    MoveToEx(dc, client.left + SpotlightCornerRadius, client.top + 1, nullptr);
+    LineTo(dc, client.right - SpotlightCornerRadius, client.top + 1);
+    SelectObject(dc, oldPen);
+    DeleteObject(topGlint);
 }
 
 void RenderSpotlightGlassGdi(HDC dc, const RECT& client)
@@ -3826,6 +4059,7 @@ void RenderSpotlightGlassGdi(HDC dc, const RECT& client)
     GRADIENT_RECT lower = { 1, 2 };
     GradientFill(dc, vertices, 3, &upper, 1, GRADIENT_FILL_RECT_V);
     GradientFill(dc, vertices, 3, &lower, 1, GRADIENT_FILL_RECT_V);
+    RenderSpotlightGlassGdiSpecular(dc, client);
 
     if (clip)
     {
@@ -3857,6 +4091,12 @@ void DrawGlassBackground(HDC dc, const RECT& client)
 void DrawSoftWindowEdge(ID2D1DCRenderTarget* target, const RECT& client)
 {
     const bool spotlight = IsSpotlightMode();
+    if (spotlight)
+    {
+        DrawLiquidGlassRimLight(target, client);
+        return;
+    }
+
     const int layers = spotlight ? SpotlightEdgeLayers : 5;
     for (int inset = 0; inset < layers; ++inset)
     {
@@ -3892,12 +4132,14 @@ void DrawSoftWindowEdge(ID2D1DCRenderTarget* target, const RECT& client)
 void DrawSoftWindowEdge(HDC dc, const RECT& client)
 {
     const bool spotlight = IsSpotlightMode();
-    const int layers = spotlight ? SpotlightEdgeLayers : 5;
+    const int layers = spotlight ? SpotlightGlassRimLayers : 5;
     for (int inset = 0; inset < layers; ++inset)
     {
-        const int shade = spotlight ? 126 - inset * 5 : 92 + inset * 18;
+        const int shade = spotlight ? 152 - inset * 8 : 92 + inset * 18;
         const COLORREF color = spotlight
-            ? RGB(std::max(80, shade), std::max(92, shade + 8), std::max(110, shade + 18))
+            ? (inset < 2
+                ? RGB(std::max(120, shade + 28), std::max(148, shade + 34), std::max(166, shade + 42))
+                : RGB(std::max(44, shade - 52), std::max(72, shade - 24), std::max(98, shade + 6)))
             : RGB(shade, shade + 18, shade + 38);
         HPEN pen = CreatePen(PS_SOLID, 1, color);
         HGDIOBJ oldPen = SelectObject(dc, pen);
@@ -3924,16 +4166,623 @@ void DrawRoundedRectDirect(ID2D1DCRenderTarget* target, const RECT& rect, COLORR
     SafeRelease(strokeBrush);
 }
 
+D2D1_RECT_F SpotlightBackdropSourceRectForLens(const RECT& rect, float magnification, float shiftX, float shiftY)
+{
+    const float dstWidth = static_cast<float>(std::max(1L, rect.right - rect.left));
+    const float dstHeight = static_cast<float>(std::max(1L, rect.bottom - rect.top));
+    const float sourceWidth = std::max(1.0f, std::min(static_cast<float>(g_spotlightBackdrop.width), dstWidth / std::max(1.0f, magnification)));
+    const float sourceHeight = std::max(1.0f, std::min(static_cast<float>(g_spotlightBackdrop.height), dstHeight / std::max(1.0f, magnification)));
+    const float centerX = (static_cast<float>(rect.left + rect.right) * 0.5f) + shiftX;
+    const float centerY = (static_cast<float>(rect.top + rect.bottom) * 0.5f) + shiftY;
+    const float maxLeft = std::max(0.0f, static_cast<float>(g_spotlightBackdrop.width) - sourceWidth);
+    const float maxTop = std::max(0.0f, static_cast<float>(g_spotlightBackdrop.height) - sourceHeight);
+    const float left = std::clamp(centerX - sourceWidth * 0.5f, 0.0f, maxLeft);
+    const float top = std::clamp(centerY - sourceHeight * 0.5f, 0.0f, maxTop);
+    return D2D1::RectF(left, top, left + sourceWidth, top + sourceHeight);
+}
+
+RECT SpotlightBackdropSourceRectForLensGdi(const RECT& rect, float magnification, int shiftX, int shiftY)
+{
+    const int dstWidth = std::max<LONG>(1, rect.right - rect.left);
+    const int dstHeight = std::max<LONG>(1, rect.bottom - rect.top);
+    const int sourceWidth = std::max(1, std::min(g_spotlightBackdrop.width, static_cast<int>(std::round(dstWidth / std::max(1.0f, magnification)))));
+    const int sourceHeight = std::max(1, std::min(g_spotlightBackdrop.height, static_cast<int>(std::round(dstHeight / std::max(1.0f, magnification)))));
+    const int centerX = ((rect.left + rect.right) / 2) + shiftX;
+    const int centerY = ((rect.top + rect.bottom) / 2) + shiftY;
+    const int maxLeft = std::max(0, g_spotlightBackdrop.width - sourceWidth);
+    const int maxTop = std::max(0, g_spotlightBackdrop.height - sourceHeight);
+    const int left = std::clamp(centerX - (sourceWidth / 2), 0, maxLeft);
+    const int top = std::clamp(centerY - (sourceHeight / 2), 0, maxTop);
+    return { left, top, left + sourceWidth, top + sourceHeight };
+}
+
+D2D1_RECT_F SpotlightBackdropAlignedSourceRect(const RECT& rect, float offsetX = 0.0f, float offsetY = 0.0f)
+{
+    const float width = static_cast<float>(std::max(1L, rect.right - rect.left));
+    const float height = static_cast<float>(std::max(1L, rect.bottom - rect.top));
+    const float maxLeft = std::max(0.0f, static_cast<float>(g_spotlightBackdrop.width) - width);
+    const float maxTop = std::max(0.0f, static_cast<float>(g_spotlightBackdrop.height) - height);
+    const float left = std::clamp(static_cast<float>(rect.left) + offsetX, 0.0f, maxLeft);
+    const float top = std::clamp(static_cast<float>(rect.top) + offsetY, 0.0f, maxTop);
+    return D2D1::RectF(left, top, left + width, top + height);
+}
+
+RECT SpotlightBackdropAlignedSourceRectGdi(const RECT& rect, int offsetX = 0, int offsetY = 0)
+{
+    const int width = std::max<LONG>(1, rect.right - rect.left);
+    const int height = std::max<LONG>(1, rect.bottom - rect.top);
+    const int maxLeft = std::max(0, g_spotlightBackdrop.width - width);
+    const int maxTop = std::max(0, g_spotlightBackdrop.height - height);
+    const int left = std::clamp(static_cast<int>(rect.left) + offsetX, 0, maxLeft);
+    const int top = std::clamp(static_cast<int>(rect.top) + offsetY, 0, maxTop);
+    return { left, top, left + width, top + height };
+}
+
+ID2D1Bitmap* GetSpotlightBackdropD2dBitmap(ID2D1DCRenderTarget* target)
+{
+    if (!target || !g_spotlightBackdrop.bits || g_spotlightBackdrop.width <= 0 || g_spotlightBackdrop.height <= 0)
+    {
+        return nullptr;
+    }
+
+    if (g_spotlightBackdropD2dBitmap)
+    {
+        return g_spotlightBackdropD2dBitmap;
+    }
+
+    const auto bitmapProps = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+    const UINT32 pitch = static_cast<UINT32>(g_spotlightBackdrop.width * sizeof(DWORD));
+    target->CreateBitmap(
+        D2D1::SizeU(static_cast<UINT32>(g_spotlightBackdrop.width), static_cast<UINT32>(g_spotlightBackdrop.height)),
+        g_spotlightBackdrop.bits,
+        pitch,
+        bitmapProps,
+        &g_spotlightBackdropD2dBitmap);
+    return g_spotlightBackdropD2dBitmap;
+}
+
+void DrawRoundedBackdropBitmap(ID2D1DCRenderTarget* target, ID2D1Bitmap* bitmap, const D2D1_ROUNDED_RECT& rounded, const RECT& dest, const D2D1_RECT_F& source, float opacity)
+{
+    if (!target || !bitmap || !g_d2dFactory) return;
+
+    ID2D1RoundedRectangleGeometry* mask = nullptr;
+    ID2D1Layer* layer = nullptr;
+    if (SUCCEEDED(g_d2dFactory->CreateRoundedRectangleGeometry(rounded, &mask))
+        && SUCCEEDED(target->CreateLayer(nullptr, &layer))
+        && mask
+        && layer)
+    {
+        target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), mask), layer);
+        const auto destRect = D2DRect(dest);
+        target->DrawBitmap(bitmap, &destRect, opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &source);
+        target->PopLayer();
+    }
+
+    SafeRelease(layer);
+    SafeRelease(mask);
+}
+
+void DrawAlignedSearchBackdrop(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, bool active)
+{
+    ID2D1Bitmap* bitmap = GetSpotlightBackdropD2dBitmap(target);
+    if (!bitmap) return;
+
+    DrawRoundedBackdropBitmap(
+        target,
+        bitmap,
+        rounded,
+        rect,
+        SpotlightBackdropAlignedSourceRect(rect),
+        active ? 0.035f : 0.020f);
+}
+
+void DrawAlignedSearchBackdrop(HDC dc, const RECT& rect, bool active)
+{
+    if (!dc || !g_spotlightBackdrop.dc || g_spotlightBackdrop.width <= 0 || g_spotlightBackdrop.height <= 0)
+    {
+        return;
+    }
+
+    const int saved = SaveDC(dc);
+    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, SpotlightSearchCornerRadius * 2, SpotlightSearchCornerRadius * 2);
+    if (clip)
+    {
+        SelectClipRgn(dc, clip);
+    }
+
+    const RECT source = SpotlightBackdropAlignedSourceRectGdi(rect);
+    BLENDFUNCTION blend = { AC_SRC_OVER, 0, static_cast<BYTE>(active ? 9 : 5), 0 };
+    AlphaBlend(
+        dc,
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        g_spotlightBackdrop.dc,
+        source.left,
+        source.top,
+        source.right - source.left,
+        source.bottom - source.top,
+        blend);
+
+    if (clip)
+    {
+        DeleteObject(clip);
+    }
+    RestoreDC(dc, saved);
+}
+
+void DrawSearchLiquidMaterialWash(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, bool active)
+{
+    ID2D1GradientStopCollection* washStops = nullptr;
+    ID2D1LinearGradientBrush* washBrush = nullptr;
+    D2D1_GRADIENT_STOP stops[] = {
+        { 0.0f, D2DColorAlpha(RGB(246, 252, 255), active ? 0.46f : 0.34f) },
+        { 0.36f, D2DColorAlpha(RGB(202, 234, 255), active ? 0.32f : 0.22f) },
+        { 1.0f, D2DColorAlpha(RGB(148, 214, 255), active ? 0.24f : 0.16f) }
+    };
+    if (SUCCEEDED(target->CreateGradientStopCollection(stops, ARRAYSIZE(stops), &washStops)) && washStops)
+    {
+        const auto props = D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.top)),
+            D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.bottom)));
+        target->CreateLinearGradientBrush(props, washStops, &washBrush);
+    }
+    if (washBrush)
+    {
+        target->FillRoundedRectangle(rounded, washBrush);
+    }
+
+    ID2D1GradientStopCollection* bloomStops = nullptr;
+    ID2D1RadialGradientBrush* bloomBrush = nullptr;
+    D2D1_GRADIENT_STOP bloom[] = {
+        { 0.0f, D2DColorAlpha(RGB(255, 255, 255), active ? 0.18f : 0.12f) },
+        { 0.50f, D2DColorAlpha(RGB(190, 230, 255), active ? 0.070f : 0.040f) },
+        { 1.0f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) }
+    };
+    if (SUCCEEDED(target->CreateGradientStopCollection(bloom, ARRAYSIZE(bloom), &bloomStops)) && bloomStops)
+    {
+        const auto props = D2D1::RadialGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(rect.left) + (rect.right - rect.left) * 0.18f, static_cast<float>(rect.top) + (rect.bottom - rect.top) * 0.26f),
+            D2D1::Point2F(0.0f, 0.0f),
+            static_cast<float>(rect.right - rect.left) * 0.54f,
+            static_cast<float>(rect.bottom - rect.top) * 1.18f);
+        target->CreateRadialGradientBrush(props, bloomStops, &bloomBrush);
+    }
+    if (bloomBrush)
+    {
+        target->FillRoundedRectangle(rounded, bloomBrush);
+    }
+
+    SafeRelease(bloomBrush);
+    SafeRelease(bloomStops);
+    SafeRelease(washBrush);
+    SafeRelease(washStops);
+}
+
+void DrawSearchLiquidMaterialWash(HDC dc, const RECT& rect, bool active)
+{
+    HDC washDc = CreateCompatibleDC(dc);
+    if (!washDc) return;
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = std::max<LONG>(1, rect.right - rect.left);
+    info.bmiHeader.biHeight = -std::max<LONG>(1, rect.bottom - rect.top);
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP washBitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!washBitmap || !bits)
+    {
+        if (washBitmap) DeleteObject(washBitmap);
+        DeleteDC(washDc);
+        return;
+    }
+
+    HGDIOBJ oldBitmap = SelectObject(washDc, washBitmap);
+    RECT local = { 0, 0, info.bmiHeader.biWidth, -info.bmiHeader.biHeight };
+    HBRUSH brush = CreateSolidBrush(active ? RGB(222, 242, 255) : RGB(210, 232, 248));
+    FillRect(washDc, &local, brush);
+    DeleteObject(brush);
+
+    const int saved = SaveDC(dc);
+    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, SpotlightSearchCornerRadius * 2, SpotlightSearchCornerRadius * 2);
+    if (clip)
+    {
+        SelectClipRgn(dc, clip);
+    }
+    BLENDFUNCTION blend = { AC_SRC_OVER, 0, static_cast<BYTE>(active ? 78 : 56), 0 };
+    AlphaBlend(dc, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, washDc, 0, 0, local.right, local.bottom, blend);
+    if (clip)
+    {
+        DeleteObject(clip);
+    }
+    RestoreDC(dc, saved);
+
+    SelectObject(washDc, oldBitmap);
+    DeleteObject(washBitmap);
+    DeleteDC(washDc);
+}
+
+void DrawSearchEdgeRefraction(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, bool active)
+{
+    ID2D1Bitmap* bitmap = GetSpotlightBackdropD2dBitmap(target);
+    if (!bitmap || !g_d2dFactory) return;
+
+    const int rectHeight = static_cast<int>(rect.bottom - rect.top);
+    const int edge = std::max(12, std::min(20, rectHeight / 3));
+    const float opacity = active ? 0.18f : 0.12f;
+    const float sideShift = active ? 2.0f : 1.0f;
+
+    ID2D1RoundedRectangleGeometry* mask = nullptr;
+    ID2D1Layer* layer = nullptr;
+    if (SUCCEEDED(g_d2dFactory->CreateRoundedRectangleGeometry(rounded, &mask))
+        && SUCCEEDED(target->CreateLayer(nullptr, &layer))
+        && mask
+        && layer)
+    {
+        target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), mask), layer);
+
+        const RECT leftBand = { rect.left, rect.top, rect.left + edge, rect.bottom };
+        const RECT rightBand = { rect.right - edge, rect.top, rect.right, rect.bottom };
+
+        auto drawBand = [&](const RECT& band, float offsetX, float offsetY, float bandOpacity) {
+            if (band.right <= band.left || band.bottom <= band.top) return;
+            const auto source = SpotlightBackdropAlignedSourceRect(band, offsetX, offsetY);
+            const auto destRect = D2DRect(band);
+            target->DrawBitmap(bitmap, &destRect, bandOpacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &source);
+        };
+
+        drawBand(leftBand, -sideShift, 0.0f, opacity * 0.76f);
+        drawBand(rightBand, sideShift, 0.0f, opacity * 0.76f);
+
+        target->PopLayer();
+    }
+
+    SafeRelease(layer);
+    SafeRelease(mask);
+}
+
+void DrawSearchEdgeRefraction(HDC dc, const RECT& rect, bool active)
+{
+    if (!dc || !g_spotlightBackdrop.dc || g_spotlightBackdrop.width <= 0 || g_spotlightBackdrop.height <= 0)
+    {
+        return;
+    }
+
+    const int saved = SaveDC(dc);
+    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, SpotlightSearchCornerRadius * 2, SpotlightSearchCornerRadius * 2);
+    if (clip)
+    {
+        SelectClipRgn(dc, clip);
+    }
+
+    const int rectHeight = static_cast<int>(rect.bottom - rect.top);
+    const int edge = std::max(12, std::min(20, rectHeight / 3));
+    const int sideShift = active ? 2 : 1;
+    const BYTE alpha = static_cast<BYTE>(active ? 44 : 30);
+    BLENDFUNCTION blend = { AC_SRC_OVER, 0, alpha, 0 };
+    const RECT bands[] = {
+        { rect.left, rect.top, rect.left + edge, rect.bottom },
+        { rect.right - edge, rect.top, rect.right, rect.bottom }
+    };
+    const POINT offsets[] = {
+        { -sideShift, 0 },
+        { sideShift, 0 }
+    };
+
+    for (int i = 0; i < 2; ++i)
+    {
+        const RECT& band = bands[i];
+        if (band.right <= band.left || band.bottom <= band.top) continue;
+        const RECT source = SpotlightBackdropAlignedSourceRectGdi(band, offsets[i].x, offsets[i].y);
+        AlphaBlend(
+            dc,
+            band.left,
+            band.top,
+            band.right - band.left,
+            band.bottom - band.top,
+            g_spotlightBackdrop.dc,
+            source.left,
+            source.top,
+            source.right - source.left,
+            source.bottom - source.top,
+            blend);
+    }
+
+    if (clip)
+    {
+        DeleteObject(clip);
+    }
+    RestoreDC(dc, saved);
+}
+
+void DrawSearchHorizontalGlassRim(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, bool active)
+{
+    if (!target || !g_d2dFactory) return;
+
+    ID2D1RoundedRectangleGeometry* mask = nullptr;
+    ID2D1Layer* layer = nullptr;
+    if (SUCCEEDED(g_d2dFactory->CreateRoundedRectangleGeometry(rounded, &mask))
+        && SUCCEEDED(target->CreateLayer(nullptr, &layer))
+        && mask
+        && layer)
+    {
+        const float rim = active ? 8.0f : 6.0f;
+        target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), mask), layer);
+
+        ID2D1GradientStopCollection* topStops = nullptr;
+        ID2D1LinearGradientBrush* topBrush = nullptr;
+        D2D1_GRADIENT_STOP top[] = {
+            { 0.0f, D2DColorAlpha(RGB(255, 255, 255), active ? 0.52f : 0.36f) },
+            { 0.55f, D2DColorAlpha(RGB(190, 232, 255), active ? 0.18f : 0.10f) },
+            { 1.0f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) }
+        };
+        if (SUCCEEDED(target->CreateGradientStopCollection(top, ARRAYSIZE(top), &topStops)) && topStops)
+        {
+            const auto props = D2D1::LinearGradientBrushProperties(
+                D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.top)),
+                D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.top) + rim));
+            target->CreateLinearGradientBrush(props, topStops, &topBrush);
+        }
+        if (topBrush)
+        {
+            target->FillRectangle(
+                D2D1::RectF(static_cast<float>(rect.left), static_cast<float>(rect.top), static_cast<float>(rect.right), static_cast<float>(rect.top) + rim),
+                topBrush);
+        }
+
+        ID2D1GradientStopCollection* bottomStops = nullptr;
+        ID2D1LinearGradientBrush* bottomBrush = nullptr;
+        D2D1_GRADIENT_STOP bottom[] = {
+            { 0.0f, D2DColorAlpha(RGB(118, 186, 232), 0.0f) },
+            { 0.45f, D2DColorAlpha(RGB(138, 204, 246), active ? 0.12f : 0.070f) },
+            { 1.0f, D2DColorAlpha(RGB(232, 250, 255), active ? 0.28f : 0.18f) }
+        };
+        if (SUCCEEDED(target->CreateGradientStopCollection(bottom, ARRAYSIZE(bottom), &bottomStops)) && bottomStops)
+        {
+            const auto props = D2D1::LinearGradientBrushProperties(
+                D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.bottom) - rim),
+                D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.bottom)));
+            target->CreateLinearGradientBrush(props, bottomStops, &bottomBrush);
+        }
+        if (bottomBrush)
+        {
+            target->FillRectangle(
+                D2D1::RectF(static_cast<float>(rect.left), static_cast<float>(rect.bottom) - rim, static_cast<float>(rect.right), static_cast<float>(rect.bottom)),
+                bottomBrush);
+        }
+
+        target->PopLayer();
+
+        SafeRelease(bottomBrush);
+        SafeRelease(bottomStops);
+        SafeRelease(topBrush);
+        SafeRelease(topStops);
+    }
+
+    SafeRelease(layer);
+    SafeRelease(mask);
+}
+
+void DrawSearchHorizontalGlassRim(HDC dc, const RECT& rect, bool active)
+{
+    const int saved = SaveDC(dc);
+    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, SpotlightSearchCornerRadius * 2, SpotlightSearchCornerRadius * 2);
+    if (clip)
+    {
+        SelectClipRgn(dc, clip);
+    }
+
+    HPEN topPen = CreatePen(PS_SOLID, active ? 3 : 2, active ? RGB(246, 254, 255) : RGB(220, 242, 252));
+    HPEN bottomPen = CreatePen(PS_SOLID, active ? 2 : 1, active ? RGB(166, 226, 255) : RGB(132, 190, 226));
+    HGDIOBJ oldPen = SelectObject(dc, topPen);
+    MoveToEx(dc, rect.left + SpotlightSearchCornerRadius, rect.top + 2, nullptr);
+    LineTo(dc, rect.right - SpotlightSearchCornerRadius, rect.top + 2);
+    SelectObject(dc, bottomPen);
+    MoveToEx(dc, rect.left + SpotlightSearchCornerRadius, rect.bottom - 2, nullptr);
+    LineTo(dc, rect.right - SpotlightSearchCornerRadius, rect.bottom - 2);
+    SelectObject(dc, oldPen);
+    DeleteObject(bottomPen);
+    DeleteObject(topPen);
+
+    if (clip)
+    {
+        DeleteObject(clip);
+    }
+    RestoreDC(dc, saved);
+}
+
+void DrawSearchFocusGlow(ID2D1DCRenderTarget* target, const RECT& rect, bool active)
+{
+    ID2D1SolidColorBrush* haloBrush = nullptr;
+    ID2D1SolidColorBrush* innerBrush = nullptr;
+    const float activeBoost = active ? 1.0f : 0.58f;
+    target->CreateSolidColorBrush(D2DColorAlpha(RGB(126, 210, 255), 0.18f * activeBoost), &haloBrush);
+    target->CreateSolidColorBrush(D2DColorAlpha(RGB(244, 252, 255), 0.10f * activeBoost), &innerBrush);
+    if (haloBrush)
+    {
+        const auto halo = D2D1::RoundedRect(
+            D2D1::RectF(static_cast<float>(rect.left) - 1.5f, static_cast<float>(rect.top) - 1.5f, static_cast<float>(rect.right) + 1.5f, static_cast<float>(rect.bottom) + 1.5f),
+            static_cast<float>(SpotlightSearchCornerRadius + 2),
+            static_cast<float>(SpotlightSearchCornerRadius + 2));
+        target->DrawRoundedRectangle(halo, haloBrush, active ? 3.0f : 2.0f);
+    }
+    if (innerBrush)
+    {
+        const auto inner = D2D1::RoundedRect(
+            D2D1::RectF(static_cast<float>(rect.left) + 3.0f, static_cast<float>(rect.top) + 3.0f, static_cast<float>(rect.right) - 3.0f, static_cast<float>(rect.bottom) - 3.0f),
+            static_cast<float>(SpotlightSearchCornerRadius - 3),
+            static_cast<float>(SpotlightSearchCornerRadius - 3));
+        target->DrawRoundedRectangle(inner, innerBrush, 1.0f);
+    }
+    SafeRelease(innerBrush);
+    SafeRelease(haloBrush);
+}
+
+void DrawSearchFocusGlow(HDC dc, const RECT& rect, bool active)
+{
+    HPEN haloPen = CreatePen(PS_SOLID, active ? 3 : 2, active ? RGB(126, 210, 255) : RGB(94, 144, 184));
+    HGDIOBJ oldPen = SelectObject(dc, haloPen);
+    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+    RoundRect(dc, rect.left - 1, rect.top - 1, rect.right + 1, rect.bottom + 1, (SpotlightSearchCornerRadius + 2) * 2, (SpotlightSearchCornerRadius + 2) * 2);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(haloPen);
+}
+
+void DrawLiquidGlassFocusLens(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, float magnification, float opacity, float shiftX, float shiftY)
+{
+    ID2D1Bitmap* bitmap = GetSpotlightBackdropD2dBitmap(target);
+    if (!bitmap)
+    {
+        return;
+    }
+
+    ID2D1RoundedRectangleGeometry* mask = nullptr;
+    ID2D1Layer* layer = nullptr;
+    if (g_d2dFactory
+        && SUCCEEDED(g_d2dFactory->CreateRoundedRectangleGeometry(rounded, &mask))
+        && SUCCEEDED(target->CreateLayer(nullptr, &layer))
+        && mask
+        && layer)
+    {
+        const auto sourceRect = SpotlightBackdropSourceRectForLens(rect, magnification, shiftX, shiftY);
+        const auto destRect = D2DRect(rect);
+        target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), mask), layer);
+        target->DrawBitmap(bitmap, &destRect, opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &sourceRect);
+        target->PopLayer();
+    }
+
+    SafeRelease(layer);
+    SafeRelease(mask);
+}
+
+void DrawLiquidGlassFocusLens(HDC dc, const RECT& rect, int radius, float magnification, int shiftX, int shiftY)
+{
+    if (!dc || !g_spotlightBackdrop.dc || g_spotlightBackdrop.width <= 0 || g_spotlightBackdrop.height <= 0)
+    {
+        return;
+    }
+
+    const int saved = SaveDC(dc);
+    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, radius * 2, radius * 2);
+    if (clip)
+    {
+        SelectClipRgn(dc, clip);
+    }
+
+    const RECT source = SpotlightBackdropSourceRectForLensGdi(rect, magnification, shiftX, shiftY);
+    const int previousMode = SetStretchBltMode(dc, HALFTONE);
+    SetBrushOrgEx(dc, 0, 0, nullptr);
+    StretchBlt(
+        dc,
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        g_spotlightBackdrop.dc,
+        source.left,
+        source.top,
+        source.right - source.left,
+        source.bottom - source.top,
+        SRCCOPY);
+    SetStretchBltMode(dc, previousMode);
+
+    if (clip)
+    {
+        DeleteObject(clip);
+    }
+    RestoreDC(dc, saved);
+}
+
+void DrawSearchFocusLens(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, bool active)
+{
+    DrawAlignedSearchBackdrop(target, rounded, rect, active);
+    DrawSearchEdgeRefraction(target, rounded, rect, active);
+}
+
+void DrawSearchFocusLens(HDC dc, const RECT& rect, bool active)
+{
+    DrawAlignedSearchBackdrop(dc, rect, active);
+    DrawSearchEdgeRefraction(dc, rect, active);
+}
+
+void DrawFocusedTileLens(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect)
+{
+    DrawLiquidGlassFocusLens(target, rounded, rect, 1.16f, 0.42f, 0.0f, -4.0f);
+}
+
+void DrawFocusedTileLens(HDC dc, const RECT& rect)
+{
+    DrawLiquidGlassFocusLens(dc, rect, 14, 1.16f, 0, -4);
+}
+
+void DrawSearchLiquidSpecular(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, bool active)
+{
+    ID2D1GradientStopCollection* sheenStops = nullptr;
+    ID2D1LinearGradientBrush* sheenBrush = nullptr;
+    D2D1_GRADIENT_STOP sheen[] = {
+        { 0.0f, D2DColorAlpha(RGB(246, 252, 255), active ? 0.18f : 0.12f) },
+        { 0.24f, D2DColorAlpha(RGB(164, 216, 255), active ? 0.080f : 0.050f) },
+        { 0.48f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) },
+        { 1.0f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) }
+    };
+    if (SUCCEEDED(target->CreateGradientStopCollection(sheen, ARRAYSIZE(sheen), &sheenStops)) && sheenStops)
+    {
+        const auto props = D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.top)),
+            D2D1::Point2F(static_cast<float>(rect.right), static_cast<float>(rect.bottom)));
+        target->CreateLinearGradientBrush(props, sheenStops, &sheenBrush);
+    }
+    if (sheenBrush)
+    {
+        target->FillRoundedRectangle(rounded, sheenBrush);
+    }
+
+    ID2D1GradientStopCollection* shadowStops = nullptr;
+    ID2D1LinearGradientBrush* shadowBrush = nullptr;
+    D2D1_GRADIENT_STOP shadow[] = {
+        { 0.0f, D2DColorAlpha(RGB(1, 5, 12), 0.0f) },
+        { 0.60f, D2DColorAlpha(RGB(1, 5, 12), 0.0f) },
+        { 1.0f, D2DColorAlpha(RGB(1, 5, 12), active ? 0.14f : 0.10f) }
+    };
+    if (SUCCEEDED(target->CreateGradientStopCollection(shadow, ARRAYSIZE(shadow), &shadowStops)) && shadowStops)
+    {
+        const auto props = D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.top)),
+            D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.bottom)));
+        target->CreateLinearGradientBrush(props, shadowStops, &shadowBrush);
+    }
+    if (shadowBrush)
+    {
+        target->FillRoundedRectangle(rounded, shadowBrush);
+    }
+
+    SafeRelease(shadowBrush);
+    SafeRelease(shadowStops);
+    SafeRelease(sheenBrush);
+    SafeRelease(sheenStops);
+}
+
 void DrawSearchGlassSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool active)
 {
     const auto rounded = D2D1::RoundedRect(D2DRect(rect), static_cast<float>(SpotlightSearchCornerRadius), static_cast<float>(SpotlightSearchCornerRadius));
 
+    DrawSearchFocusLens(target, rounded, rect, active);
+    DrawSearchLiquidMaterialWash(target, rounded, rect, active);
+    DrawSearchHorizontalGlassRim(target, rounded, rect, active);
+
     ID2D1GradientStopCollection* fillStops = nullptr;
     ID2D1LinearGradientBrush* fillBrush = nullptr;
     D2D1_GRADIENT_STOP stops[] = {
-        { 0.0f, D2DColorAlpha(RGB(124, 148, 168), active ? 0.38f : 0.32f) },
-        { 0.52f, D2DColorAlpha(RGB(62, 80, 100), active ? 0.34f : 0.28f) },
-        { 1.0f, D2DColorAlpha(RGB(22, 32, 48), active ? 0.42f : 0.34f) }
+        { 0.0f, D2DColorAlpha(RGB(250, 254, 255), active ? 0.18f : 0.12f) },
+        { 0.46f, D2DColorAlpha(RGB(194, 230, 255), active ? 0.12f : 0.075f) },
+        { 1.0f, D2DColorAlpha(RGB(76, 144, 196), active ? 0.13f : 0.085f) }
     };
     if (SUCCEEDED(target->CreateGradientStopCollection(stops, ARRAYSIZE(stops), &fillStops)) && fillStops)
     {
@@ -3951,8 +4800,8 @@ void DrawSearchGlassSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool 
     ID2D1GradientStopCollection* glowStops = nullptr;
     ID2D1RadialGradientBrush* glowBrush = nullptr;
     D2D1_GRADIENT_STOP glow[] = {
-        { 0.0f, D2DColorAlpha(active ? RGB(126, 196, 255) : RGB(210, 230, 246), active ? 0.14f : 0.06f) },
-        { 0.62f, D2DColorAlpha(RGB(116, 154, 188), active ? 0.04f : 0.02f) },
+        { 0.0f, D2DColorAlpha(active ? RGB(204, 238, 255) : RGB(220, 238, 250), active ? 0.18f : 0.08f) },
+        { 0.62f, D2DColorAlpha(RGB(126, 190, 232), active ? 0.055f : 0.026f) },
         { 1.0f, D2DColorAlpha(RGB(255, 255, 255), 0.0f) }
     };
     if (SUCCEEDED(target->CreateGradientStopCollection(glow, ARRAYSIZE(glow), &glowStops)) && glowStops)
@@ -3969,10 +4818,13 @@ void DrawSearchGlassSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool 
         target->FillRoundedRectangle(rounded, glowBrush);
     }
 
+    DrawSearchLiquidSpecular(target, rounded, rect, active);
+    DrawSearchFocusGlow(target, rect, active);
+
     ID2D1SolidColorBrush* strokeBrush = nullptr;
     ID2D1SolidColorBrush* innerBrush = nullptr;
-    target->CreateSolidColorBrush(D2DColorAlpha(active ? RGB(164, 216, 255) : RGB(214, 234, 246), active ? 0.48f : 0.22f), &strokeBrush);
-    target->CreateSolidColorBrush(D2DColorAlpha(RGB(255, 255, 255), active ? 0.10f : 0.06f), &innerBrush);
+    target->CreateSolidColorBrush(D2DColorAlpha(active ? RGB(224, 248, 255) : RGB(196, 232, 252), active ? 0.74f : 0.42f), &strokeBrush);
+    target->CreateSolidColorBrush(D2DColorAlpha(RGB(255, 255, 255), active ? 0.22f : 0.13f), &innerBrush);
     if (strokeBrush)
     {
         target->DrawRoundedRectangle(rounded, strokeBrush, active ? 1.20f : 0.90f);
@@ -3994,8 +4846,12 @@ void DrawSearchGlassSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool 
 
 void DrawSearchGlassSurface(HDC dc, const RECT& rect, bool active)
 {
-    HBRUSH fill = CreateSolidBrush(active ? RGB(68, 84, 102) : RGB(52, 66, 82));
-    HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(146, 206, 255) : RGB(126, 154, 180));
+    DrawSearchFocusLens(dc, rect, active);
+    DrawSearchLiquidMaterialWash(dc, rect, active);
+    DrawSearchHorizontalGlassRim(dc, rect, active);
+
+    HBRUSH fill = CreateSolidBrush(active ? RGB(170, 214, 242) : RGB(136, 178, 210));
+    HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(222, 248, 255) : RGB(180, 224, 248));
     HGDIOBJ oldBrush = SelectObject(dc, fill);
     HGDIOBJ oldPen = SelectObject(dc, pen);
     RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, SpotlightSearchCornerRadius * 2, SpotlightSearchCornerRadius * 2);
@@ -4003,12 +4859,54 @@ void DrawSearchGlassSurface(HDC dc, const RECT& rect, bool active)
     SelectObject(dc, oldBrush);
     DeleteObject(pen);
     DeleteObject(fill);
+    DrawSearchFocusGlow(dc, rect, active);
 }
 
 void DrawAppTileSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool selected)
 {
     if (!selected) return;
-    DrawRoundedRectDirect(target, rect, RGB(42, 82, 118), RGB(130, 190, 255), 12.0f);
+
+    const auto rounded = D2D1::RoundedRect(D2DRect(rect), 14.0f, 14.0f);
+    DrawFocusedTileLens(target, rounded, rect);
+
+    ID2D1GradientStopCollection* fillStops = nullptr;
+    ID2D1LinearGradientBrush* fillBrush = nullptr;
+    D2D1_GRADIENT_STOP stops[] = {
+        { 0.0f, D2DColorAlpha(RGB(132, 174, 210), 0.22f) },
+        { 0.46f, D2DColorAlpha(RGB(42, 86, 124), 0.28f) },
+        { 1.0f, D2DColorAlpha(RGB(8, 22, 42), 0.38f) }
+    };
+    if (SUCCEEDED(target->CreateGradientStopCollection(stops, ARRAYSIZE(stops), &fillStops)) && fillStops)
+    {
+        const auto props = D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.top)),
+            D2D1::Point2F(static_cast<float>(rect.right), static_cast<float>(rect.bottom)));
+        target->CreateLinearGradientBrush(props, fillStops, &fillBrush);
+    }
+    if (fillBrush)
+    {
+        target->FillRoundedRectangle(rounded, fillBrush);
+    }
+
+    ID2D1SolidColorBrush* rimBrush = nullptr;
+    ID2D1SolidColorBrush* innerBrush = nullptr;
+    target->CreateSolidColorBrush(D2DColorAlpha(RGB(172, 226, 255), 0.58f), &rimBrush);
+    target->CreateSolidColorBrush(D2DColorAlpha(RGB(255, 255, 255), 0.12f), &innerBrush);
+    if (rimBrush)
+    {
+        target->DrawRoundedRectangle(rounded, rimBrush, 1.35f);
+    }
+    if (innerBrush)
+    {
+        target->DrawRoundedRectangle(D2D1::RoundedRect(
+            D2D1::RectF(static_cast<float>(rect.left) + 2.0f, static_cast<float>(rect.top) + 2.0f, static_cast<float>(rect.right) - 2.0f, static_cast<float>(rect.bottom) - 2.0f),
+            12.0f,
+            12.0f), innerBrush, 1.0f);
+    }
+    SafeRelease(innerBrush);
+    SafeRelease(rimBrush);
+    SafeRelease(fillBrush);
+    SafeRelease(fillStops);
 }
 
 void DrawIconBackplateDirect(ID2D1DCRenderTarget* target, const RECT& rect, bool selected)
@@ -4072,6 +4970,7 @@ void DrawIconBackplateDirect(ID2D1DCRenderTarget* target, const RECT& rect, bool
 void DrawAppTileSurface(HDC dc, const RECT& rect, bool selected)
 {
     if (!selected) return;
+    DrawFocusedTileLens(dc, rect);
     DrawRoundedRect(dc, rect, RGB(42, 82, 118), RGB(130, 190, 255), 12);
 }
 
@@ -4139,7 +5038,7 @@ void DrawSearchCaret(ID2D1DCRenderTarget* target, const RECT& textRect, int pref
 {
     if (!g_searchInputActive) return;
     ID2D1SolidColorBrush* brush = nullptr;
-    target->CreateSolidColorBrush(D2DColor(RGB(245, 250, 255)), &brush);
+    target->CreateSolidColorBrush(D2DColor(RGB(34, 54, 72)), &brush);
     if (brush)
     {
         target->FillRectangle(D2DRect(SearchCaretRect(textRect, prefixWidth)), brush);
@@ -4151,7 +5050,7 @@ void DrawSearchCaret(HDC dc, const RECT& textRect, int prefixWidth)
 {
     if (!g_searchInputActive) return;
     const RECT caret = SearchCaretRect(textRect, prefixWidth);
-    HBRUSH brush = CreateSolidBrush(RGB(245, 250, 255));
+    HBRUSH brush = CreateSolidBrush(RGB(34, 54, 72));
     FillRect(dc, &caret, brush);
     DeleteObject(brush);
 }
@@ -4167,7 +5066,7 @@ void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client)
         g_searchTextFormat,
         SearchDisplayText(),
         textRect,
-        g_searchText.empty() ? RGB(158, 172, 188) : RGB(236, 244, 252),
+        g_searchText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72),
         DWRITE_TEXT_ALIGNMENT_LEADING,
         DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
         DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -4204,7 +5103,7 @@ void DrawSearchSurface(HDC dc, const RECT& client)
         return;
     }
     HGDIOBJ oldFont = SelectObject(dc, searchFont);
-    DrawTextClipped(dc, SearchDisplayText(), textRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_searchText.empty() ? RGB(158, 172, 188) : RGB(236, 244, 252));
+    DrawTextClipped(dc, SearchDisplayText(), textRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_searchText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72));
     const std::wstring tail = SearchCompletionTail();
     if (!tail.empty())
     {
@@ -4585,15 +5484,44 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
 
     if (g_filtered.empty())
     {
-        RECT emptyRect = { metrics.left, y + 60, metrics.right, y + 120 };
-        if (!baseLayerOnly)
+        bool hasShownRegion = false;
+        for (const auto& region : OrderedRegions())
         {
-            DrawTextDirect(target, g_headerTextFormat, L"No matching apps", emptyRect, RGB(210, 220, 235), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
+            if (IsUncategorizedRegion(region.id)) continue;
+            hasShownRegion = true;
+            if (column != 0)
+            {
+                y += metrics.tileSize + metrics.gap;
+                column = 0;
+                x = metrics.left;
+            }
+            if (IsRegionSelected(region.id))
+            {
+                RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
+                DrawRoundedRectDirect(target, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10.0f);
+            }
+            if (!baseLayerOnly)
+            {
+                RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
+                DrawTextDirect(target, g_headerTextFormat, RegionName(region.id), headerRect, RGB(220, 232, 248), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
+            }
+            g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, region.id });
+            y += 38;
+            contentBottom = std::max(contentBottom, static_cast<int>(y) + g_scrollOffset);
         }
-        g_contentHeight = client.bottom;
+        if (!hasShownRegion)
+        {
+            RECT emptyRect = { metrics.left, y + 60, metrics.right, y + 120 };
+            if (!baseLayerOnly)
+            {
+                DrawTextDirect(target, g_headerTextFormat, L"No matching apps", emptyRect, RGB(210, 220, 235), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
+            }
+        }
+        g_contentHeight = contentBottom + 44;
     }
     else
     {
+        std::vector<std::wstring> shownRegionIds;
         for (int filteredIndex = 0; filteredIndex < static_cast<int>(g_filtered.size()); ++filteredIndex)
         {
             auto& item = g_items[g_filtered[filteredIndex]];
@@ -4606,6 +5534,7 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
                     x = metrics.left;
                 }
                 activeRegion = item.regionId;
+                shownRegionIds.push_back(activeRegion);
                 RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
                 if (IsRegionSelected(activeRegion))
                 {
@@ -4670,6 +5599,41 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
             contentBottom = std::max(contentBottom, static_cast<int>(visualTileRect.bottom) + metrics.gap + g_scrollOffset);
         }
 
+        for (const auto& region : OrderedRegions())
+        {
+            if (IsUncategorizedRegion(region.id)) continue;
+            bool alreadyShown = false;
+            for (const auto& id : shownRegionIds)
+            {
+                if (CompareStringOrdinal(id.c_str(), -1, region.id.c_str(), -1, TRUE) == CSTR_EQUAL)
+                {
+                    alreadyShown = true;
+                    break;
+                }
+            }
+            if (alreadyShown) continue;
+
+            if (column != 0)
+            {
+                y += metrics.tileSize + metrics.gap;
+                column = 0;
+                x = metrics.left;
+            }
+            if (IsRegionSelected(region.id))
+            {
+                RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
+                DrawRoundedRectDirect(target, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10.0f);
+            }
+            if (!baseLayerOnly)
+            {
+                RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
+                DrawTextDirect(target, g_headerTextFormat, RegionName(region.id), headerRect, RGB(220, 232, 248), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
+            }
+            g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, region.id });
+            y += 38;
+            contentBottom = std::max(contentBottom, static_cast<int>(y) + g_scrollOffset);
+        }
+
         g_contentHeight = contentBottom + 44;
     }
 
@@ -4679,6 +5643,7 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
     const HRESULT drawn = target->EndDraw();
     if (FAILED(drawn))
     {
+        SafeRelease(g_spotlightBackdropD2dBitmap);
         SafeRelease(g_d2dDcRenderTarget);
         return false;
     }
@@ -4714,15 +5679,44 @@ void PaintContent(HDC dc, const RECT& client)
     SelectObject(dc, headerFont);
     if (g_filtered.empty())
     {
-        RECT emptyRect = { metrics.left, y + 60, metrics.right, y + 120 };
-        if (!baseLayerOnly)
+        bool hasShownRegion = false;
+        for (const auto& region : OrderedRegions())
         {
-            DrawTextClipped(dc, L"No matching apps", emptyRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, RGB(210, 220, 235));
+            if (IsUncategorizedRegion(region.id)) continue;
+            hasShownRegion = true;
+            if (column != 0)
+            {
+                y += metrics.tileSize + metrics.gap;
+                column = 0;
+                x = metrics.left;
+            }
+            if (IsRegionSelected(region.id))
+            {
+                RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
+                DrawRoundedRect(dc, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10);
+            }
+            if (!baseLayerOnly)
+            {
+                RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
+                DrawTextClipped(dc, RegionName(region.id), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(220, 232, 248));
+            }
+            g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, region.id });
+            y += 38;
+            contentBottom = std::max(contentBottom, static_cast<int>(y) + g_scrollOffset);
         }
-        g_contentHeight = client.bottom;
+        if (!hasShownRegion)
+        {
+            RECT emptyRect = { metrics.left, y + 60, metrics.right, y + 120 };
+            if (!baseLayerOnly)
+            {
+                DrawTextClipped(dc, L"No matching apps", emptyRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, RGB(210, 220, 235));
+            }
+        }
+        g_contentHeight = contentBottom + 44;
     }
     else
     {
+        std::vector<std::wstring> shownRegionIds;
         for (int filteredIndex = 0; filteredIndex < static_cast<int>(g_filtered.size()); ++filteredIndex)
         {
             auto& item = g_items[g_filtered[filteredIndex]];
@@ -4735,6 +5729,7 @@ void PaintContent(HDC dc, const RECT& client)
                     x = metrics.left;
                 }
                 activeRegion = item.regionId;
+                shownRegionIds.push_back(activeRegion);
                 RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
                 if (IsRegionSelected(activeRegion))
                 {
@@ -4797,6 +5792,41 @@ void PaintContent(HDC dc, const RECT& client)
                 y += metrics.tileSize + metrics.gap;
             }
             contentBottom = std::max(contentBottom, static_cast<int>(visualTileRect.bottom) + metrics.gap + g_scrollOffset);
+        }
+
+        for (const auto& region : OrderedRegions())
+        {
+            if (IsUncategorizedRegion(region.id)) continue;
+            bool alreadyShown = false;
+            for (const auto& id : shownRegionIds)
+            {
+                if (CompareStringOrdinal(id.c_str(), -1, region.id.c_str(), -1, TRUE) == CSTR_EQUAL)
+                {
+                    alreadyShown = true;
+                    break;
+                }
+            }
+            if (alreadyShown) continue;
+
+            if (column != 0)
+            {
+                y += metrics.tileSize + metrics.gap;
+                column = 0;
+                x = metrics.left;
+            }
+            if (IsRegionSelected(region.id))
+            {
+                RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
+                DrawRoundedRect(dc, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10);
+            }
+            if (!baseLayerOnly)
+            {
+                RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
+                DrawTextClipped(dc, RegionName(region.id), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(220, 232, 248));
+            }
+            g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, region.id });
+            y += 38;
+            contentBottom = std::max(contentBottom, static_cast<int>(y) + g_scrollOffset);
         }
 
         g_contentHeight = contentBottom + 44;
@@ -6305,6 +7335,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         RemoveTrayIcon();
         UnregisterHotKey(hwnd, HotkeyId);
         ReleaseSpotlightLayerBuffer();
+        ReleaseSpotlightBackdrop();
         DestroyDirectRenderer();
         if (g_uiFont)
         {

@@ -467,6 +467,70 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("-ldwmapi", script);
     }
 
+    public static void NativeUiSource_UsesLiquidGlassOpticalLayers()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("SpotlightGlassRimLayers", source);
+        TestAssert.Contains("DrawLiquidGlassSpecularSheen", source);
+        TestAssert.Contains("DrawLiquidGlassInnerShadow", source);
+        TestAssert.Contains("DrawLiquidGlassRimLight", source);
+        TestAssert.Contains("DrawSearchLiquidSpecular", source);
+        TestAssert.Contains("RenderSpotlightGlassGdiSpecular", source);
+        TestAssert.Contains("DrawLiquidGlassSpecularSheen(target, panel, client);", source);
+        TestAssert.Contains("DrawSearchLiquidSpecular(target, rounded, rect, active);", source);
+        TestAssert.DoesNotContain("ID2D1Effect", source);
+    }
+
+    public static void NativeUiSource_UsesLiquidGlassFocusLensing()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("SpotlightBackdropCapture", source);
+        TestAssert.Contains("CaptureSpotlightBackdrop", source);
+        TestAssert.Contains("ReleaseSpotlightBackdrop", source);
+        TestAssert.Contains("DrawLiquidGlassFocusLens", source);
+        TestAssert.Contains("DrawSearchFocusLens", source);
+        TestAssert.Contains("DrawFocusedTileLens", source);
+        TestAssert.Contains("CaptureSpotlightBackdrop(windowRect);", source);
+        TestAssert.Contains("DrawSearchFocusLens(target, rounded, rect, active);", source);
+        TestAssert.Contains("DrawFocusedTileLens(target, rounded, rect);", source);
+        TestAssert.Contains("StretchBlt", source);
+        TestAssert.Contains("CAPTUREBLT", source);
+        TestAssert.DoesNotContain("ID2D1Effect", source);
+    }
+
+    public static void NativeUiSource_UsesAlignedSearchFocusRefraction()
+    {
+        var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+
+        TestAssert.Contains("DrawAlignedSearchBackdrop", source);
+        TestAssert.Contains("DrawSearchLiquidMaterialWash", source);
+        TestAssert.Contains("DrawSearchEdgeRefraction", source);
+        TestAssert.Contains("DrawSearchHorizontalGlassRim", source);
+        TestAssert.Contains("DrawSearchFocusGlow", source);
+        TestAssert.Contains("DrawAlignedSearchBackdrop(target, rounded, rect, active);", source);
+        TestAssert.Contains("DrawSearchLiquidMaterialWash(target, rounded, rect, active);", source);
+        TestAssert.Contains("DrawSearchEdgeRefraction(target, rounded, rect, active);", source);
+        TestAssert.Contains("DrawSearchHorizontalGlassRim(target, rounded, rect, active);", source);
+        TestAssert.Contains("DrawAlignedSearchBackdrop(dc, rect, active);", source);
+        TestAssert.Contains("DrawSearchLiquidMaterialWash(dc, rect, active);", source);
+        TestAssert.Contains("DrawSearchEdgeRefraction(dc, rect, active);", source);
+        TestAssert.Contains("DrawSearchHorizontalGlassRim(dc, rect, active);", source);
+        TestAssert.Contains("active ? 0.035f : 0.020f", source);
+        TestAssert.Contains("D2DColorAlpha(RGB(246, 252, 255), active ? 0.46f : 0.34f)", source);
+        TestAssert.Contains("D2DColorAlpha(RGB(148, 214, 255), active ? 0.24f : 0.16f)", source);
+        TestAssert.Contains("g_searchText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72)", source);
+        TestAssert.DoesNotContain("DrawLiquidGlassFocusLens(target, rounded, rect, active ? 1.12f : 1.06f", source);
+        TestAssert.DoesNotContain("DrawLiquidGlassFocusLens(dc, rect, SpotlightSearchCornerRadius, active ? 1.12f : 1.06f", source);
+        TestAssert.DoesNotContain("drawBand(topBand", source);
+        TestAssert.DoesNotContain("drawBand(bottomBand", source);
+        TestAssert.DoesNotContain("drawBand(topBand, 0.0f, -shift", source);
+        TestAssert.DoesNotContain("drawBand(bottomBand, 0.0f, shift", source);
+        TestAssert.DoesNotContain("{ 0, -shift }", source);
+        TestAssert.DoesNotContain("{ 0, shift }", source);
+    }
+
     public static void NativeUiSource_TrimsResidentIconsForMemory()
     {
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
