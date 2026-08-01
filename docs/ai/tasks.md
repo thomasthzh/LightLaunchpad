@@ -13,7 +13,7 @@
 
 ### LLP-001 - Canonical Development Baseline
 
-- Status: `in_progress`
+- Status: `done`
 - Depends on: none
 - Purpose: make the PRD and AI execution docs the tracked source of truth without absorbing unrelated untracked work.
 - Inspect: `git status`, branches, tags, `PRD.md`, `LLP_reconstruction/`, `LightLaunchpad.NativeUi.o`.
@@ -23,11 +23,11 @@
   - `dotnet run --project tests\LightLaunchpad.Core.Tests\LightLaunchpad.Core.Tests.csproj` reports `33/33 tests passed`.
   - `dotnet run --project tests\LightLaunchpad.App.Tests\LightLaunchpad.App.Tests.csproj` reports `74/74 tests passed` as a legacy baseline, not release confidence.
   - `powershell -ExecutionPolicy Bypass -File tools\build-native-ui.ps1 -OutputDirectory release\baseline-check` produces an EXE.
-- Completion notes: In progress on `codex/apple-first-v1.1`; repository, runtime EXE, hashes, and startup path were re-verified before any product change.
+- Completion notes: Completed on `codex/apple-first-v1.1` with commit `d2da5c0`. Revalidated repository/runtime/startup identity; tracked PRD v1.1 and all `docs/ai/*`; ignored generated `*.o`; left `LLP_reconstruction/` untracked and unstaged. Fresh evidence: Core `33/33`, legacy App `74/74`, NativeUi build exit 0 (533,504 bytes, SHA256 `AEA2BD00973E89CA92666CF05D19F036336DC535677F1AE4E8DA2BA0948094C3`), and `git diff --cached --check` exit 0.
 
 ### LLP-002 - Executable Identity And Stable Install Contract
 
-- Status: `pending`
+- Status: `in_progress`
 - Depends on: LLP-001
 - Purpose: ensure source, running process, startup entry, install, TOOL copy, and release can be identified and compared.
 - Likely files: `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.rc`, a new NativeUi manifest/version header, `tools/build-native-ui.ps1`, `tools/package-release.ps1`, diagnostics code extracted from `LightLaunchpad.NativeUi.cpp`.
@@ -41,7 +41,7 @@
   - Windows file properties show icon, product version, and file version.
   - Diagnostics values match `Get-Process`, `Get-FileHash`, and `git rev-parse --short HEAD`.
   - A development build and installed build cannot be confused or silently substituted.
-- Completion notes: Not started.
+- Completion notes: Started after LLP-001 baseline commit `d2da5c0`; inspecting current PE resources, build/package scripts, diagnostics surface, and identity-related tests before the first RED test.
 
 ### LLP-003 - Shell-First Startup And Singleton Activation
 

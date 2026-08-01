@@ -2,14 +2,15 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 03:47:25 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 03:50:23 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `b88e942`
+- HEAD: `d2da5c0`
 - Remote main: `origin/main@33e91c2`
-- Active task: `LLP-001 - Canonical Development Baseline` (`in_progress`)
-- Next task after verification: `LLP-002 - Executable Identity And Stable Install Contract`
-- Goal status: active in Codex; LLP-001 is the only task in progress.
+- Active task: `LLP-002 - Executable Identity And Stable Install Contract` (`in_progress`)
+- Completed tasks: `LLP-001`
+- Next task after verification: `LLP-003 - Shell-First Startup And Singleton Activation`
+- Goal status: active in Codex; LLP-002 is the only task in progress.
 
 ## Current Session Baseline Revalidation
 
@@ -36,7 +37,7 @@ git diff --check
 
 ## LLP-001 Execution Evidence
 
-Status at 2026-08-02 03:49 +08:00: verification complete; preparing the scoped baseline commit.
+Status at 2026-08-02 03:50 +08:00: complete.
 
 Changed files in scope:
 
@@ -61,7 +62,8 @@ Evidence and limits:
 - Runtime performance snapshot: hidden PID 22560 Private Memory 31,207,424 bytes and Working Set 11,808,768 bytes. LLP-001 establishes this baseline; it does not claim the 15 MiB target.
 - Screenshot/visual evidence: not applicable to this documentation-and-branch baseline; no visual behavior changed.
 - Protected content remains outside task scope: `LLP_reconstruction/` is untracked and unstaged; `LightLaunchpad.NativeUi.o` remains untracked and is ignored as generated output.
-- Commit: pending scoped LLP-001 baseline commit.
+- Primary scoped commit: `d2da5c0` (`docs: establish Apple-first execution baseline`).
+- Task transition: LLP-001 marked `done`; LLP-002 marked as the sole `in_progress` task immediately after the verified baseline commit.
 
 ## Intentional New Documentation
 
