@@ -334,7 +334,8 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("SettingsControlId::IconSize", source);
         TestAssert.Contains("SettingsControlId::IconSizeLabel", source);
         TestAssert.Contains("ResetIconSizeCombo", source);
-        TestAssert.Contains("ReadIconSizeFromSettingsWindow", source);
+        TestAssert.Contains("ReadSettingsWindowCandidate", source);
+        TestAssert.Contains("candidate.iconSize", source);
         TestAssert.Contains("SetIconSizeSelection", source);
         TestAssert.Contains("APP 大小", source);
         TestAssert.Contains("IconSizeName", source);

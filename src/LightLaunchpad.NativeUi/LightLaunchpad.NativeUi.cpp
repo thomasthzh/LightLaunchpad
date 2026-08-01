@@ -71,6 +71,7 @@
 namespace
 {
 constexpr int HotkeyId = 0x4C55;
+constexpr int CandidateHotkeyId = 0x4C56;
 constexpr int TrayOpenCommand = 1001;
 constexpr int TrayRefreshCommand = 1002;
 constexpr int TrayExitCommand = 1003;
@@ -351,6 +352,7 @@ SpotlightBackdropCapture g_spotlightBackdrop;
 UINT g_taskbarCreatedMessage = 0;
 bool g_trayIconAdded = false;
 bool g_hotkeyRegistered = false;
+int g_activeHotkeyId = HotkeyId;
 bool g_diagnosticsUiMode = false;
 ULONGLONG g_processStartTick = 0;
 ULONGLONG g_settingsLoadedTick = 0;
@@ -362,9 +364,10 @@ int g_trayRetryAttempts = 0;
 int g_taskbarRecoveryCount = 0;
 std::wstring g_startupLogPath;
 std::wstring g_startupProbePath;
+std::wstring g_settingsStatus = L"No settings changes in this session.";
 
 bool ShowTextInputDialog(const std::wstring& title, const std::wstring& label, const std::wstring& initialValue, std::wstring& result);
-void RegisterCurrentHotkey();
+bool RegisterCurrentHotkey();
 void ShowSettingsWindow();
 void RebuildFiltered();
 void DestroyDirectRenderer();
@@ -878,7 +881,12 @@ bool WriteFileUtf8(const std::wstring& path, const std::string& content)
         return false;
     }
 
-    return MoveFileExW(temporaryPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+    if (MoveFileExW(temporaryPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == FALSE)
+    {
+        DeleteFileW(temporaryPath.c_str());
+        return false;
+    }
+    return true;
 }
 
 void LoadSettings()
@@ -917,23 +925,24 @@ std::wstring IconSizeName()
     return L"Medium";
 }
 
-bool SaveSettings()
+bool SaveSettings(const Settings& settings)
 {
     std::string json;
+    const std::wstring iconSizeName = settings.iconSize <= 44 ? L"Small" : (settings.iconSize >= 64 ? L"Large" : L"Medium");
     json += "{\r\n";
-    json += "  \"LaunchpadFolder\": \"" + EscapeJson(g_settings.launchpadFolder) + "\",\r\n";
-    json += "  \"Hotkey\": \"" + EscapeJson(g_settings.hotkey) + "\",\r\n";
-    json += std::string("  \"StartWithWindows\": ") + (g_settings.startWithWindows ? "true" : "false") + ",\r\n";
-    json += "  \"IconSize\": \"" + EscapeJson(IconSizeName()) + "\",\r\n";
+    json += "  \"LaunchpadFolder\": \"" + EscapeJson(settings.launchpadFolder) + "\",\r\n";
+    json += "  \"Hotkey\": \"" + EscapeJson(settings.hotkey) + "\",\r\n";
+    json += std::string("  \"StartWithWindows\": ") + (settings.startWithWindows ? "true" : "false") + ",\r\n";
+    json += "  \"IconSize\": \"" + EscapeJson(iconSizeName) + "\",\r\n";
     json += "  \"ViewMode\": \"" + EscapeJson(g_layoutViewMode) + "\",\r\n";
     json += "  \"IconQuality\": \"High\",\r\n";
-    json += "  \"DisplayMode\": \"" + EscapeJson(g_settings.displayMode) + "\",\r\n";
-    json += "  \"Language\": \"" + EscapeJson(g_settings.language) + "\",\r\n";
-    json += "  \"SpotlightWidth\": " + std::to_string(g_settings.spotlightWidth) + ",\r\n";
-    json += "  \"SpotlightHeight\": " + std::to_string(g_settings.spotlightHeight) + ",\r\n";
-    json += "  \"AppSpacing\": " + std::to_string(g_settings.appSpacing) + ",\r\n";
-    json += "  \"WheelSensitivity\": " + WideToUtf8(FormatDouble(g_settings.wheelSensitivity)) + ",\r\n";
-    json += std::string("  \"ResetSearchOnOpen\": ") + (g_settings.resetSearchOnOpen ? "true" : "false") + "\r\n";
+    json += "  \"DisplayMode\": \"" + EscapeJson(settings.displayMode) + "\",\r\n";
+    json += "  \"Language\": \"" + EscapeJson(settings.language) + "\",\r\n";
+    json += "  \"SpotlightWidth\": " + std::to_string(settings.spotlightWidth) + ",\r\n";
+    json += "  \"SpotlightHeight\": " + std::to_string(settings.spotlightHeight) + ",\r\n";
+    json += "  \"AppSpacing\": " + std::to_string(settings.appSpacing) + ",\r\n";
+    json += "  \"WheelSensitivity\": " + WideToUtf8(FormatDouble(settings.wheelSensitivity)) + ",\r\n";
+    json += std::string("  \"ResetSearchOnOpen\": ") + (settings.resetSearchOnOpen ? "true" : "false") + "\r\n";
     json += "}\r\n";
     return WriteFileUtf8(GetSettingsPath(), json);
 }
@@ -2657,7 +2666,8 @@ std::wstring BuildDiagnosticsSummary()
     summary += L"DPI: " + DpiDiagnostics() + L"\r\n";
     summary += L"Monitor: " + MonitorDiagnostics() + L"\r\n";
     summary += L"Startup: " + StartupCommand() + L"\r\n";
-    summary += L"Hotkey: " + HotkeyDiagnostics();
+    summary += L"Hotkey: " + HotkeyDiagnostics() + L"\r\n";
+    summary += L"Settings status: " + g_settingsStatus;
     return summary;
 }
 
@@ -2974,9 +2984,9 @@ std::wstring FormatHotkeyFromKeyPress(WPARAM virtualKey)
     return JoinHotkeyParts(parts);
 }
 
-void ResolveHotkey(UINT& modifiers, UINT& key)
+void ResolveHotkey(const std::wstring& hotkey, UINT& modifiers, UINT& key)
 {
-    const auto hotkeyText = NormalizeHotkeyText(g_settings.hotkey);
+    const auto hotkeyText = NormalizeHotkeyText(hotkey);
     auto normalized = ToLower(hotkeyText);
     modifiers = 0;
     key = L'D';
@@ -2995,15 +3005,22 @@ void ResolveHotkey(UINT& modifiers, UINT& key)
     if (modifiers == 0) modifiers = MOD_ALT;
 }
 
-void RegisterCurrentHotkey()
+bool RegisterCurrentHotkey()
 {
     g_hotkeyRegistered = false;
-    if (!g_hwnd) return;
-    UnregisterHotKey(g_hwnd, HotkeyId);
+    g_activeHotkeyId = HotkeyId;
+    if (!g_hwnd) return false;
     UINT modifiers = 0;
     UINT key = 0;
-    ResolveHotkey(modifiers, key);
-    g_hotkeyRegistered = RegisterHotKey(g_hwnd, HotkeyId, modifiers, key) != FALSE;
+    ResolveHotkey(g_settings.hotkey, modifiers, key);
+    modifiers |= MOD_NOREPEAT;
+    g_hotkeyRegistered = RegisterHotKey(g_hwnd, g_activeHotkeyId, modifiers, key) != FALSE;
+    if (!g_hotkeyRegistered)
+    {
+        g_settingsStatus = L"Hotkey registration failed at startup for " + g_settings.hotkey
+            + L" (Windows error " + std::to_wstring(GetLastError()) + L").";
+    }
+    return g_hotkeyRegistered;
 }
 
 void ActivateSearchInput()
@@ -6716,12 +6733,6 @@ void SetIconSizeSelection(HWND hwnd)
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::IconSize), CB_SETCURSEL, index, 0);
 }
 
-void ReadIconSizeFromSettingsWindow(HWND hwnd)
-{
-    const int index = static_cast<int>(SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::IconSize), CB_GETCURSEL, 0, 0));
-    g_settings.iconSize = index == 0 ? 42 : (index == 2 ? 72 : 56);
-}
-
 std::wstring SettingsWindowLanguage(HWND hwnd)
 {
     HWND combo = GetDlgItem(hwnd, ControlId(SettingsControlId::Language));
@@ -6773,53 +6784,127 @@ void PopulateSettingsWindow(HWND hwnd)
     SetIconSizeSelection(hwnd);
 }
 
-void ReadSettingsWindow(HWND hwnd)
+Settings ReadSettingsWindowCandidate(HWND hwnd)
 {
-    g_settings.launchpadFolder = Trim(GetControlText(hwnd, ControlId(SettingsControlId::LaunchpadFolder)));
-    g_settings.hotkey = NormalizeHotkeyText(GetControlText(hwnd, ControlId(SettingsControlId::Hotkey)));
-    if (g_settings.launchpadFolder.empty())
+    Settings candidate = g_settings;
+    candidate.launchpadFolder = Trim(GetControlText(hwnd, ControlId(SettingsControlId::LaunchpadFolder)));
+    candidate.hotkey = NormalizeHotkeyText(GetControlText(hwnd, ControlId(SettingsControlId::Hotkey)));
+    if (candidate.launchpadFolder.empty())
     {
         const auto profile = GetUserProfilePath();
-        g_settings.launchpadFolder = profile.empty() ? L"Launchpad" : JoinPath(profile, L"Launchpad");
+        candidate.launchpadFolder = profile.empty() ? L"Launchpad" : JoinPath(profile, L"Launchpad");
     }
-    if (g_settings.hotkey.empty()) g_settings.hotkey = L"Alt+D";
+    if (candidate.hotkey.empty()) candidate.hotkey = L"Alt+D";
 
     const int displayIndex = static_cast<int>(SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::DisplayMode), CB_GETCURSEL, 0, 0));
     const int languageIndex = static_cast<int>(SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::Language), CB_GETCURSEL, 0, 0));
-    g_settings.displayMode = displayIndex == 1 ? L"Spotlight" : L"Launchpad";
-    g_settings.language = languageIndex == 1 ? L"Chinese" : L"English";
-    ReadIconSizeFromSettingsWindow(hwnd);
-    g_settings.spotlightWidth = NormalizeSpotlightWidth(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::SpotlightWidth)).c_str()));
-    g_settings.spotlightHeight = NormalizeSpotlightHeight(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::SpotlightHeight)).c_str()));
-    g_settings.appSpacing = NormalizeAppSpacing(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::AppSpacing)).c_str()));
-    g_settings.wheelSensitivity = NormalizeWheelSensitivity(std::wcstod(GetControlText(hwnd, ControlId(SettingsControlId::WheelSensitivity)).c_str(), nullptr));
-    g_settings.startWithWindows = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::StartWithWindows), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    g_settings.resetSearchOnOpen = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ResetSearchOnOpen), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const int iconSizeIndex = static_cast<int>(SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::IconSize), CB_GETCURSEL, 0, 0));
+    candidate.displayMode = displayIndex == 1 ? L"Spotlight" : L"Launchpad";
+    candidate.language = languageIndex == 1 ? L"Chinese" : L"English";
+    candidate.iconSize = iconSizeIndex == 0 ? 42 : (iconSizeIndex == 2 ? 72 : 56);
+    candidate.spotlightWidth = NormalizeSpotlightWidth(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::SpotlightWidth)).c_str()));
+    candidate.spotlightHeight = NormalizeSpotlightHeight(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::SpotlightHeight)).c_str()));
+    candidate.appSpacing = NormalizeAppSpacing(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::AppSpacing)).c_str()));
+    candidate.wheelSensitivity = NormalizeWheelSensitivity(std::wcstod(GetControlText(hwnd, ControlId(SettingsControlId::WheelSensitivity)).c_str(), nullptr));
+    candidate.startWithWindows = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::StartWithWindows), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.resetSearchOnOpen = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ResetSearchOnOpen), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    return candidate;
 }
 
-void SetStartWithWindows(bool enabled)
+struct StartupRegistrationSnapshot
 {
-    HKEY key = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+    bool valid = false;
+    bool exists = false;
+    DWORD type = REG_SZ;
+    std::wstring value;
+};
+
+std::wstring StartupRegistrySubkey()
+{
+    const auto testSubkey = CommandLineValue(L"--startup-registry-subkey");
+    if (CompareStringOrdinal(LLP_BUILD_CHANNEL_WIDE, -1, L"development", -1, TRUE) == CSTR_EQUAL
+        && StartsWithIgnoreCase(testSubkey, L"Software\\LightLaunchpad\\Tests\\"))
     {
-        return;
+        return testSubkey;
+    }
+    return L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+}
+
+bool CaptureStartupRegistration(StartupRegistrationSnapshot& snapshot)
+{
+    snapshot = {};
+    HKEY key = nullptr;
+    const auto subkey = StartupRegistrySubkey();
+    const LONG openResult = RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_QUERY_VALUE, &key);
+    if (openResult == ERROR_FILE_NOT_FOUND)
+    {
+        snapshot.valid = true;
+        return true;
+    }
+    if (openResult != ERROR_SUCCESS) return false;
+
+    DWORD type = 0;
+    DWORD bytes = 0;
+    const LONG sizeResult = RegQueryValueExW(key, L"LightLaunchpad", nullptr, &type, nullptr, &bytes);
+    if (sizeResult == ERROR_FILE_NOT_FOUND)
+    {
+        snapshot.valid = true;
+        RegCloseKey(key);
+        return true;
+    }
+    if (sizeResult != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) || bytes < sizeof(wchar_t))
+    {
+        RegCloseKey(key);
+        return false;
     }
 
-    if (enabled)
+    std::vector<wchar_t> value((bytes / sizeof(wchar_t)) + 1, L'\0');
+    const LONG readResult = RegQueryValueExW(key, L"LightLaunchpad", nullptr, &type, reinterpret_cast<BYTE*>(value.data()), &bytes);
+    RegCloseKey(key);
+    if (readResult != ERROR_SUCCESS) return false;
+    snapshot.valid = true;
+    snapshot.exists = true;
+    snapshot.type = type;
+    snapshot.value = value.data();
+    return true;
+}
+
+bool WriteStartupRegistrationValue(bool exists, DWORD type, const std::wstring& value)
+{
+    HKEY key = nullptr;
+    const auto subkey = StartupRegistrySubkey();
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
     {
-        wchar_t exe[MAX_PATH] = L"";
-        if (GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe)) > 0)
-        {
-            std::wstring command = L"\"" + std::wstring(exe) + L"\"";
-            RegSetValueExW(key, L"LightLaunchpad", 0, REG_SZ, reinterpret_cast<const BYTE*>(command.c_str()), static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
-        }
+        return false;
+    }
+
+    LONG result = ERROR_SUCCESS;
+    if (exists)
+    {
+        result = RegSetValueExW(key, L"LightLaunchpad", 0, type, reinterpret_cast<const BYTE*>(value.c_str()), static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
     }
     else
     {
-        RegDeleteValueW(key, L"LightLaunchpad");
+        result = RegDeleteValueW(key, L"LightLaunchpad");
+        if (result == ERROR_FILE_NOT_FOUND) result = ERROR_SUCCESS;
     }
 
     RegCloseKey(key);
+    return result == ERROR_SUCCESS;
+}
+
+bool SetStartWithWindows(bool enabled)
+{
+    if (!enabled) return WriteStartupRegistrationValue(false, REG_SZ, {});
+    wchar_t exe[MAX_PATH] = L"";
+    if (GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe)) == 0) return false;
+    const std::wstring command = L"\"" + std::wstring(exe) + L"\"";
+    return WriteStartupRegistrationValue(true, REG_SZ, command);
+}
+
+bool RestoreStartupRegistration(const StartupRegistrationSnapshot& snapshot)
+{
+    return snapshot.valid && WriteStartupRegistrationValue(snapshot.exists, snapshot.type, snapshot.value);
 }
 
 void OpenLaunchpadFolder()
@@ -6945,17 +7030,97 @@ void ImportStartMenuApps()
     if (imported > 0) RefreshAfterImport();
 }
 
-void ApplySettingsFromWindow(HWND hwnd)
+bool SameHotkey(const std::wstring& left, const std::wstring& right)
 {
-    ReadSettingsWindow(hwnd);
-    SaveSettings();
-    SetStartWithWindows(g_settings.startWithWindows);
-    RegisterCurrentHotkey();
+    const auto normalizedLeft = NormalizeHotkeyText(left);
+    const auto normalizedRight = NormalizeHotkeyText(right);
+    return CompareStringOrdinal(normalizedLeft.c_str(), -1, normalizedRight.c_str(), -1, TRUE) == CSTR_EQUAL;
+}
+
+bool ReserveCandidateHotkey(const Settings& candidate, int& reservedId, std::wstring& failure)
+{
+    reservedId = 0;
+    failure.clear();
+    if (SameHotkey(candidate.hotkey, g_settings.hotkey) && g_hotkeyRegistered) return true;
+
+    const int candidateId = g_activeHotkeyId == HotkeyId ? CandidateHotkeyId : HotkeyId;
+    UnregisterHotKey(g_hwnd, candidateId);
+    UINT modifiers = 0;
+    UINT key = 0;
+    ResolveHotkey(candidate.hotkey, modifiers, key);
+    modifiers |= MOD_NOREPEAT;
+    if (!RegisterHotKey(g_hwnd, candidateId, modifiers, key))
+    {
+        const DWORD error = GetLastError();
+        failure = L"Hotkey conflict for " + candidate.hotkey
+            + L" (Windows error " + std::to_wstring(error) + L"); kept prior setting " + g_settings.hotkey + L" and its registration state.";
+        return false;
+    }
+
+    reservedId = candidateId;
+    return true;
+}
+
+void ReleaseReservedHotkey(int reservedId)
+{
+    if (reservedId != 0 && g_hwnd) UnregisterHotKey(g_hwnd, reservedId);
+}
+
+bool ApplySettingsFromWindow(HWND hwnd)
+{
+    const Settings previous = g_settings;
+    const Settings candidate = ReadSettingsWindowCandidate(hwnd);
+    int reservedHotkeyId = 0;
+    std::wstring hotkeyFailure;
+    if (!ReserveCandidateHotkey(candidate, reservedHotkeyId, hotkeyFailure))
+    {
+        g_settingsStatus = hotkeyFailure;
+        AppendStartupLog(L"settings-apply", false, g_settingsStatus);
+        PopulateSettingsWindow(hwnd);
+        return false;
+    }
+
+    const bool startupChanged = candidate.startWithWindows != previous.startWithWindows;
+    StartupRegistrationSnapshot startupSnapshot;
+    if (startupChanged)
+    {
+        if (!CaptureStartupRegistration(startupSnapshot) || !SetStartWithWindows(candidate.startWithWindows))
+        {
+            ReleaseReservedHotkey(reservedHotkeyId);
+            g_settingsStatus = L"Startup registration failed; prior settings and hotkey were kept.";
+            AppendStartupLog(L"settings-apply", false, g_settingsStatus);
+            PopulateSettingsWindow(hwnd);
+            return false;
+        }
+    }
+
+    if (!SaveSettings(candidate))
+    {
+        const bool startupRestored = !startupChanged || RestoreStartupRegistration(startupSnapshot);
+        ReleaseReservedHotkey(reservedHotkeyId);
+        g_settingsStatus = startupRestored
+            ? L"Settings write failed; prior values and hotkey were kept."
+            : L"Settings write failed and startup rollback also failed; prior in-memory values and hotkey were kept.";
+        AppendStartupLog(L"settings-apply", false, g_settingsStatus);
+        PopulateSettingsWindow(hwnd);
+        return false;
+    }
+
+    if (reservedHotkeyId != 0)
+    {
+        UnregisterHotKey(g_hwnd, g_activeHotkeyId);
+        g_activeHotkeyId = reservedHotkeyId;
+        g_hotkeyRegistered = true;
+    }
+    g_settings = candidate;
+    g_settingsStatus = L"Settings saved. Active hotkey: " + g_settings.hotkey + L".";
+    AppendStartupLog(L"settings-apply", true, g_settingsStatus);
     ReloadData();
     RebuildFiltered();
     PositionWindow();
     PopulateSettingsWindow(hwnd);
     InvalidateRect(g_hwnd, nullptr, TRUE);
+    return true;
 }
 
 LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -7029,8 +7194,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         }
         if (LOWORD(wParam) == ControlId(SettingsControlId::Save))
         {
-            ApplySettingsFromWindow(hwnd);
-            DestroyWindow(hwnd);
+            if (ApplySettingsFromWindow(hwnd)) DestroyWindow(hwnd);
             return 0;
         }
         if (LOWORD(wParam) == ControlId(SettingsControlId::Apply))
@@ -7409,7 +7573,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return DefWindowProcW(hwnd, message, wParam, lParam);
     }
     case WM_HOTKEY:
-        if (wParam == HotkeyId) ToggleNativeUi();
+        if (wParam == static_cast<WPARAM>(g_activeHotkeyId)) ToggleNativeUi();
         return 0;
     case WM_COMMAND:
         if (LOWORD(wParam) == TrayOpenCommand) ShowNativeUi();
@@ -7753,7 +7917,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_DESTROY:
         KillTimer(hwnd, DragAnimationTimerId);
         RemoveTrayIcon();
-        UnregisterHotKey(hwnd, HotkeyId);
+        UnregisterHotKey(hwnd, g_activeHotkeyId);
         ReleaseSpotlightLayerBuffer();
         ReleaseSpotlightBackdrop();
         DestroyDirectRenderer();
