@@ -27,7 +27,7 @@
 
 ### LLP-002 - Executable Identity And Stable Install Contract
 
-- Status: `in_progress`
+- Status: `done`
 - Depends on: LLP-001
 - Purpose: ensure source, running process, startup entry, install, TOOL copy, and release can be identified and compared.
 - Likely files: `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.rc`, a new NativeUi manifest/version header, `tools/build-native-ui.ps1`, `tools/package-release.ps1`, diagnostics code extracted from `LightLaunchpad.NativeUi.cpp`.
@@ -41,11 +41,11 @@
   - Windows file properties show icon, product version, and file version.
   - Diagnostics values match `Get-Process`, `Get-FileHash`, and `git rev-parse --short HEAD`.
   - A development build and installed build cannot be confused or silently substituted.
-- Completion notes: Started after LLP-001 baseline commit `d2da5c0`; inspecting current PE resources, build/package scripts, diagnostics surface, and identity-related tests before the first RED test.
+- Completion notes: Completed with implementation commit `a9037bb`. Real development and clean-fixture stable EXEs expose distinct semantic versions, commit/channel/build IDs, and singleton names; PE VERSIONINFO/icon/Per-Monitor V2 manifest and the Native settings About/Diagnostics surface are verified. Dirty stable packaging is rejected unless `-Development` is explicit. Post-commit NativeUi identity behavior 5/5, Core 33/33, legacy App 74/74, Native build/diagnostics smoke, screenshot/UI Automation audit, package contents, and diff checks passed. Verified EXE: 545,792 bytes, SHA256 `65198E9CB78B7F94A4A978E48F7A3999D5966F892A6C844F3D63FFF2F560A768`.
 
 ### LLP-003 - Shell-First Startup And Singleton Activation
 
-- Status: `pending`
+- Status: `in_progress`
 - Depends on: LLP-002
 - Purpose: tray, hotkey, and second-instance activation must work before catalog I/O.
 - Likely files: extract `AppHost`, `Diagnostics`, and IPC modules from `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`; update build script inputs.
@@ -58,7 +58,7 @@
   - Simulate a slow/unavailable launch folder; tray and settings still appear promptly.
   - Start the EXE twice; one process remains and the first instance becomes active.
   - Restart Explorer; tray menu and settings recover.
-- Completion notes: Not started.
+- Completion notes: Started after LLP-002 post-commit gates passed. Next RED targets second-instance activation and shell-first startup timing without modifying the user's running/startup build.
 
 ### LLP-004 - Transactional Hotkey And Settings Writes
 

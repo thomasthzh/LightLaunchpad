@@ -2,19 +2,19 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 04:18:56 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 04:21:35 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `d2da5c0`
+- HEAD: `a9037bb`
 - Remote main: `origin/main@33e91c2`
-- Active task: `LLP-002 - Executable Identity And Stable Install Contract` (`in_progress`)
-- Completed tasks: `LLP-001`
-- Next task after verification: `LLP-003 - Shell-First Startup And Singleton Activation`
-- Goal status: active in Codex; LLP-002 is the only task in progress.
+- Active task: `LLP-003 - Shell-First Startup And Singleton Activation` (`in_progress`)
+- Completed tasks: `LLP-001`, `LLP-002`
+- Next task after verification: `LLP-004 - Transactional Hotkey And Settings Writes`
+- Goal status: active in Codex; LLP-003 is the only task in progress.
 
 ## LLP-002 Execution Evidence
 
-Status at 2026-08-02 04:18 +08:00: implementation and pre-commit verification complete; preparing the scoped implementation commit.
+Status at 2026-08-02 04:21 +08:00: complete.
 
 Changed files in scope:
 
@@ -60,7 +60,19 @@ Safety and performance:
 - The visible audit used a development-channel EXE with tray/hotkey integration disabled and stopped only its validated temporary PID after capture.
 - Performance budgets are not changed or claimed by LLP-002. The prior hidden Private Memory baseline remains 31,207,424 bytes until a later measured optimization task.
 - `LLP_reconstruction/` and `LightLaunchpad.NativeUi.o` remain untracked/ignored and outside staging.
-- Commit: pending scoped LLP-002 implementation commit.
+- Scoped implementation commit: `a9037bb` (`feat: add verifiable native executable identity`).
+
+Post-commit verification against `a9037bbbed4f`:
+
+- NativeUi identity behavior: 5/5 passed again from the committed source.
+- Core tests: 33/33 passed again.
+- Legacy App/source tests: 74/74 passed again; not treated as NativeUi release authority.
+- Native build: `release\llp002-postcommit\LightLaunchpad.NativeUi.exe`, 545,792 bytes, SHA256 `65198E9CB78B7F94A4A978E48F7A3999D5966F892A6C844F3D63FFF2F560A768`.
+- PE identity: `ProductName=LightLaunchpad`, `ProductVersion=1.11.0-dev+a9037bbbed4f.dirty`, `FileVersion=1.11.0.0`.
+- Real EXE diagnostics: exit 0, commit `a9037bbbed4f`, development channel, singleton `Local\LightLaunchpad.NativeUi.SingleInstance.development.a9037bbbed4f`, stable install path contract, and unchanged user startup command.
+- Safety revalidation: protected PID 22560 still runs the original artifact with SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run still points there; stable install remains absent; TOOL SHA256 remains `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`; no dev audit process remains.
+- `git diff --check` and `git diff --cached --check`: exit 0. Only protected `LLP_reconstruction/` content remains untracked.
+- Task transition: LLP-002 marked `done`; LLP-003 marked as the sole `in_progress` task.
 
 ## Current Session Baseline Revalidation
 
