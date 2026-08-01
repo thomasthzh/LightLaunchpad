@@ -80,7 +80,7 @@
 
 ### LLP-005 - Standard Persistence And Folder-Scoped Layout
 
-- Status: `in_progress`
+- Status: `done`
 - Depends on: LLP-004
 - Purpose: preserve user organization through corruption, temporary file loss, and folder changes.
 - Likely files: new `Persistence`/`SettingsStore`/`LayoutStore` modules; migration code for `%AppData%\LightLaunchpad\settings.json` and `layout.json`.
@@ -93,11 +93,11 @@
   - Strings containing quotes, braces, Unicode, and surrogate pairs round-trip.
   - Truncated JSON recovers from backup without overwriting the last good file.
   - Switching launch folders cannot display old-folder items; switching back restores their layout.
-- Completion notes: Started immediately after LLP-004 post-commit verification. Next RED targets standards-compliant JSON round trips, atomic backup/recovery, and folder-scoped layout identity without adopting `LLP_reconstruction/`.
+- Completion notes: Completed in implementation commit `a364883`. Production NativeUi now uses vendored nlohmann/json 3.12.0 with a pinned SHA256 and adjacent MIT license, schema-v2 validation and v1 compatibility, flushed temporary writes, atomic primary/backup replacement, corruption quarantine, backup recovery, normalized folder-scoped layout paths, duplicate stable-path rejection, and retained metadata that reattaches when a source returns. A real-EXE probe suite passes 7/7 checks for dependency integrity, escaped/Unicode/surrogate round trips, A/B folder isolation and restore, invalid fields/future schemas without mutation, missing-item reattachment, truncated-primary recovery without changing the last good backup, and clean first-run defaults. Post-commit settings 3/3, AppHost 4/4, identity 5/5, Core 33/33, legacy App 74/74, build/diagnostics, protected-process, Run-value, stable-install, and diff gates passed. Verified EXE: 1,379,840 bytes, SHA256 `60E2D4178C3F866EFB6C4E7649B0EAEC49BE98CF843D72C34B5ACF0758BFE95E`.
 
 ### LLP-006 - Catalog Snapshot And Shell STA Broker
 
-- Status: `pending`
+- Status: `in_progress`
 - Depends on: LLP-005
 - Purpose: show immediately and refresh safely without Shell or file I/O on the UI/render thread.
 - Likely files: new `Catalog`, `ShellBroker`, immutable snapshot types, icon cache, import logic, `ShowNativeUi` call sites.
@@ -110,7 +110,7 @@
   - A slow or broken shortcut cannot freeze typing or animation.
   - Repeated Start Menu import creates no `(2)`/`(3)` duplicates for the same target.
   - Alt+D uses cached content while refresh proceeds in the background.
-- Completion notes: Not started.
+- Completion notes: Started immediately after LLP-005 post-commit verification. First RED target: prove a slow or broken shortcut cannot delay cached presentation or input while Shell work runs on a dedicated STA broker.
 
 ### LLP-007 - Native Search Index And Ranking
 

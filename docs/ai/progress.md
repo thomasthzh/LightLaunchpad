@@ -2,15 +2,60 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 05:04:17 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 05:39:01 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `bc5ea3e`
+- HEAD: `a364883`
 - Remote main: `origin/main@33e91c2`
-- Active task: `LLP-005 - Standard Persistence And Folder-Scoped Layout` (`in_progress`)
-- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`
-- Next task after verification: `LLP-006 - Catalog Snapshot And Shell STA Broker`
-- Goal status: active in Codex; LLP-005 is the only task in progress.
+- Active task: `LLP-006 - Catalog Snapshot And Shell STA Broker` (`in_progress`)
+- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`
+- Next task after verification: `LLP-007 - Native Search Index And Ranking`
+- Goal status: active in Codex; LLP-006 is the only task in progress.
+
+## LLP-005 Execution Evidence
+
+Status at 2026-08-02 05:39 +08:00: complete.
+
+Changed files in scope:
+
+- `src/LightLaunchpad.NativeUi/Persistence.{h,cpp}` - strict UTF-8 conversion, normalized folder identity and hashed scoped layout paths, bounded object parsing, valid-primary/backup loading, corruption quarantine, flushed temporary writes, and atomic primary/backup replacement.
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - schema-v2 settings/layout documents, schema-v1 compatibility, typed validation diagnostics, legacy layout migration/archive, scoped folder-identity enforcement, normalized stable-path deduplication, missing-item metadata retention/reattachment, and a real-EXE persistence probe.
+- `src/third_party/nlohmann/json.hpp` and `LICENSE.MIT` - vendored nlohmann/json 3.12.0 and license; header SHA256 pinned to `AAF127C04CB31C406E5B04A63F1AE89369FCCDE6D8FA7CDDA1ED4F32DFC5DE63` from the official [v3.12.0 release](https://github.com/nlohmann/json/releases/tag/v3.12.0).
+- `tools/vendor-nlohmann-json.ps1` - reproducible download with fail-closed checksum verification and temporary-file cleanup.
+- `tools/build-native-ui.ps1` - compiles the production persistence module and vendored include.
+- `tests/LightLaunchpad.NativeUi.Tests/Persistence.Tests.ps1` - isolated real-EXE tests for parser fidelity, validation, migration, folder scopes, missing metadata, backup recovery, quarantine, atomic restoration, and first-run behavior.
+- `tests/LightLaunchpad.NativeUi.Tests/{AppHost,ExecutableIdentity}.Tests.ps1` - include the persistence module and vendored dependency in clean-source build fixtures.
+
+TDD and production behavior evidence:
+
+- RED: the pre-change real EXE did not recognize `--persistence-probe-file` and timed out without producing a probe.
+- RED: a present `SpotlightWidth` string was silently accepted and defaulted without diagnostics; schema-v2 layout without `FolderIdentity` was also accepted. GREEN reports the exact invalid field, retains safe defaults, rejects future schema versions without mutating their files, and requires scoped identity for schema v2.
+- RED: duplicate source paths in valid JSON produced two visible tiles. GREEN normalizes stable paths, retains the first record, and reports the ignored duplicate.
+- RED: an absent settings primary/backup was reported as corruption. GREEN treats this as normal first run while retaining `Alt+D` and the 980 px default width.
+- Real-EXE round trip preserved quotes, braces, Chinese text, and a UTF-16 surrogate-pair rocket across legacy migration, schema-v2 save, and reload.
+- Folder A metadata did not appear in folder B; returning to A restored its region and display name. Deleting the source moved its metadata to the missing set; recreating the same stable path reattached it without metadata loss.
+- Truncated settings and scoped-layout primaries were quarantined, restored to parseable schema-v2 JSON from `.bak`, left backup SHA256 values unchanged, and left no `.tmp` or `.recovery.tmp` residue.
+
+Fresh post-commit verification against `a3648830cada`:
+
+- NativeUi persistence behavior: 7/7 named real-EXE checks passed.
+- NativeUi settings transactions: 3/3 passed.
+- NativeUi AppHost behavior: 4/4 passed; `shellReadyMs=16`, `probeExitMs=345`, `settingsWindowMs=171`, `logBytes=1081`.
+- NativeUi identity/package behavior: 5/5 passed.
+- Core tests: `33/33 tests passed`.
+- Legacy App/source suite: `74/74 tests passed`; historical regression coverage only.
+- Post-commit NativeUi build/diagnostics: `artifacts\native-ui-llp005-postcommit\LightLaunchpad.NativeUi.exe`, build 11,540 ms, 1,379,840 bytes, SHA256 `60E2D4178C3F866EFB6C4E7649B0EAEC49BE98CF843D72C34B5ACF0758BFE95E`, version `1.11.0-dev+a364883.dirty`, build ID `development:a364883`.
+- `git diff --check` and staged-set checks passed; the vendored dependency checksum passed in every persistence run.
+
+Safety, performance, and evidence limits:
+
+- All persistence processes used isolated temporary `APPDATA`, `LOCALAPPDATA`, and `USERPROFILE`; cleanup rejected reparse-point roots before recursive removal.
+- Protected PID 22560 remains on `artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe` with unchanged SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; the Run value remains the exact quoted path, and the stable install remains absent.
+- No `C:\TOOL`, startup, stable-install, push, tag, or release mutation occurred. `LLP_reconstruction/` and ignored `LightLaunchpad.NativeUi.o` remained outside staging.
+- The production EXE grew from 561,152 to 1,379,840 bytes due to the standards-compliant static parser and still remains a single executable. AppHost response metrics stayed far below the existing 500 ms shell-first gate; memory optimization remains assigned to LLP-014.
+- Screenshot evidence is not applicable to persistence semantics. All release-relevant claims come from the compiled production C++ module and real EXE; the C# suites remain regression baselines only.
+- Scoped implementation commit: `a364883` (`feat: make native persistence resilient`).
+- Task transition: LLP-005 marked `done`; LLP-006 marked as the sole `in_progress` task.
 
 ## LLP-004 Execution Evidence
 
