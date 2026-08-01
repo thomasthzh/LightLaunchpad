@@ -97,7 +97,7 @@
 
 ### LLP-006 - Catalog Snapshot And Shell STA Broker
 
-- Status: `in_progress`
+- Status: `done`
 - Depends on: LLP-005
 - Purpose: show immediately and refresh safely without Shell or file I/O on the UI/render thread.
 - Likely files: new `Catalog`, `ShellBroker`, immutable snapshot types, icon cache, import logic, `ShowNativeUi` call sites.
@@ -110,11 +110,11 @@
   - A slow or broken shortcut cannot freeze typing or animation.
   - Repeated Start Menu import creates no `(2)`/`(3)` duplicates for the same target.
   - Alt+D uses cached content while refresh proceeds in the background.
-- Completion notes: Started immediately after LLP-005 post-commit verification. First RED target: prove a slow or broken shortcut cannot delay cached presentation or input while Shell work runs on a dedicated STA broker.
+- Completion notes: Completed in implementation commit `0bd788d`. Production NativeUi now publishes immutable catalog snapshots by stable item ID while a dedicated Shell STA owns scanning, shortcut/URL resolution, icons, launch/location, import, Recycle Bin, and queued layout persistence. Real-EXE tests prove a deliberately broken shortcut plus a 1.2 s slow refresh leaves cached content visible and accepts actual Alt+D-path input in 0 ms, repeated Start Menu import produces one `.lnk` then zero duplicates, executables are never copied, reparse points are skipped, and queued layout writes survive immediate shutdown. UI-thread Sleep animation was removed pending the compositor timeline task. Post-commit Catalog/Shell 3/3, persistence 7/7, settings 3/3, AppHost 4/4, identity 5/5, Core 33/33, and legacy App 74/74 gates passed. Verified EXE: 1,450,496 bytes, SHA256 `392664016AE776286DAECAB0EEB37A6F2B18C979B952D0BA7ABA07E7EAA49EE6`.
 
 ### LLP-007 - Native Search Index And Ranking
 
-- Status: `pending`
+- Status: `in_progress`
 - Depends on: LLP-006
 - Purpose: make the shipped C++ search implementation meet the PRD instead of relying on the tested C# Core.
 - Likely files: new `SearchIndex`, production C++ unit-test target, catalog snapshot integration.
@@ -125,7 +125,7 @@
 - Verify:
   - Production C++ tests cover prefix, word boundary, contains, pinyin, initials, typo/fuzzy, duplicate names, stable focus, and ranking history.
   - Current launch folder names achieve materially better pinyin coverage than the hand-written map baseline.
-- Completion notes: Not started.
+- Completion notes: Started immediately after LLP-006 post-commit verification. First RED target: establish production C++ ranking tests that expose the current hand-written pinyin coverage and path-dominated matching before replacing the index.
 
 ## Milestone C: Apple-First Interaction Model
 

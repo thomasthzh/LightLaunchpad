@@ -2,15 +2,62 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 05:39:01 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 06:42:51 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `a364883`
+- HEAD: `0bd788d`
 - Remote main: `origin/main@33e91c2`
-- Active task: `LLP-006 - Catalog Snapshot And Shell STA Broker` (`in_progress`)
-- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`
-- Next task after verification: `LLP-007 - Native Search Index And Ranking`
-- Goal status: active in Codex; LLP-006 is the only task in progress.
+- Active task: `LLP-007 - Native Search Index And Ranking` (`in_progress`)
+- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`
+- Next task after verification: `LLP-008 - Complete Search Text And IME Controller`
+- Goal status: active in Codex; LLP-007 is the only task in progress.
+
+## LLP-006 Execution Evidence
+
+Status at 2026-08-02 06:42 +08:00: complete.
+
+Changed files in scope:
+
+- `src/LightLaunchpad.NativeUi/Catalog.{h,cpp}` - immutable snapshot types, normalized stable item IDs, scoped-layout loading/migration, missing-item retention, guarded folder creation and background catalog scanning.
+- `src/LightLaunchpad.NativeUi/ShellBroker.{h,cpp}` - dedicated COM STA thread/message pump and queued catalog, icon, launch, folder/location, import, Recycle Bin, and persistence operations; normalized target/source deduplication, reparse/cancellation guards, graceful persistence drain on shutdown, and per-item recycle verification.
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - cached-snapshot-first presentation, stable-ID focus/icon publication, asynchronous refresh/icon/Shell call sites, diagnostics and real-EXE probes, immediate nonblocking Spotlight show/hide, and failure feedback.
+- `tools/build-native-ui.ps1` - compiles the production Catalog and ShellBroker modules.
+- `tests/LightLaunchpad.NativeUi.Tests/CatalogShellBroker.Tests.ps1` - real-EXE STA, broken/slow catalog, actual hotkey-path input, cache/stable-ID, shutdown persistence, import deduplication, shortcut-target, executable-copy ban, and reparse tests.
+- `tests/LightLaunchpad.NativeUi.Tests/Persistence.Tests.ps1` - adds a rejected future-schema legacy-layout non-mutation/non-archive regression.
+- `tests/LightLaunchpad.NativeUi.Tests/{AppHost,ExecutableIdentity}.Tests.ps1` - adds the new production modules to clean-source build fixtures.
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs` - updates the historical source boundary checks for the broker modules and bans the old UI-thread Sleep animation.
+- `docs/ai/{tasks,progress}.md` - records the verified LLP-006 completion and activates LLP-007.
+
+TDD and systematic-debugging evidence:
+
+- RED: the pre-change EXE did not recognize `--catalog-broker-probe-file`; the first broker compile also exposed MinGW common-controls include ordering. GREEN builds and runs the real probe through a dedicated STA.
+- RED architecture review found synchronous Shell/icon/catalog helpers still resident in the UI module. GREEN moves those calls behind the broker; the compiled UI accepts input while the worker handles a deliberately invalid `.lnk` and a 1,200 ms artificial slow refresh.
+- The initial 200 ms input check measured before the window became input-ready and therefore included the pre-existing blocking animation. The measurement boundary was corrected to the first focused/ready frame on the actual `WM_HOTKEY` path, and the blocking `Sleep(8/7)` animation itself was removed rather than accepted.
+- RED: a rejected future-schema legacy layout was archived as though migration succeeded. GREEN requires an accepted document before migration and preserves the rejected file byte-for-byte without another archive.
+- RED: an asynchronous layout edit queued immediately before `DestroyWindow` was lost. GREEN cancels non-persistence work, drains queued atomic persistence requests, then stops the broker; the real EXE reads back `Shutdown Flush Sentinel` after exit.
+- Review hardening prevents stale asynchronous icon-size results from replacing current-size icons, recursively creates/validates launch folders, and removes layout entries only for files confirmed to have left their original paths after Recycle Bin work.
+
+Fresh post-commit verification against `0bd788df848f`:
+
+- `tests\LightLaunchpad.NativeUi.Tests\CatalogShellBroker.Tests.ps1` - 3/3 passed; `inputResponseMs=0`, `refreshMs=1891`, UI thread `46244`, STA broker thread `11024`, generation 2; import counts `1` then `0`, skipped reparse points `1`.
+- `tests\LightLaunchpad.NativeUi.Tests\Persistence.Tests.ps1` - 7/7 passed, including the new rejected future legacy schema case.
+- `tests\LightLaunchpad.NativeUi.Tests\SettingsTransactions.Tests.ps1` - 3/3 passed.
+- `tests\LightLaunchpad.NativeUi.Tests\AppHost.Tests.ps1` - 4/4 passed; `shellReadyMs=16`, `probeExitMs=195`, `settingsWindowMs=149`, `logBytes=1173`.
+- `tests\LightLaunchpad.NativeUi.Tests\ExecutableIdentity.Tests.ps1` - 5/5 passed.
+- `dotnet run --project tests\LightLaunchpad.Core.Tests\LightLaunchpad.Core.Tests.csproj` - 33/33 passed.
+- `dotnet run --project tests\LightLaunchpad.App.Tests\LightLaunchpad.App.Tests.csproj` - 74/74 passed; historical regression baseline only.
+- Post-commit build/diagnostics - `artifacts\native-ui-llp006-postcommit\LightLaunchpad.NativeUi.exe`, build 17,110 ms, 1,450,496 bytes, SHA256 `392664016AE776286DAECAB0EEB37A6F2B18C979B952D0BA7ABA07E7EAA49EE6`, version `1.11.0-dev+0bd788df848f.dirty`, build ID `development:0bd788df848f`.
+- `git diff --cached --check` passed before the implementation commit; post-commit tracked source was clean.
+
+Safety, performance, and evidence limits:
+
+- Protected PID 22560 still runs `artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe` with unchanged SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run still contains its exact quoted path, the stable install remains absent, and `C:\TOOL` remains untouched.
+- All behavior probes used isolated temporary app-data/profile roots, validated cleanup boundaries, and removed a known junction before recursive cleanup. `LLP_reconstruction/` remained untracked/unstaged; ignored `LightLaunchpad.NativeUi.o` was not adopted.
+- No stable install, startup, `C:\TOOL`, push, tag, or release mutation occurred.
+- Cached input stayed responsive under the instrumented 1.891 s refresh, and AppHost stayed well inside its 500 ms shell-first gate. LLP-006 does not claim the PRD memory, startup-to-first-frame, or animation frame-time budgets; those remain assigned to later performance/animation tasks.
+- Screenshot evidence is not applicable to this worker/thread/data-safety task. Release-relevant evidence comes from the production C++ modules and real NativeUi EXE; visual/DPI acceptance remains assigned to LLP-012, LLP-015, LLP-016, and LLP-017.
+- Scoped implementation commit: `0bd788d` (`feat: move catalog work to Shell STA`).
+- Task transition: LLP-006 marked `done`; LLP-007 marked as the sole `in_progress` task.
 
 ## LLP-005 Execution Evidence
 
