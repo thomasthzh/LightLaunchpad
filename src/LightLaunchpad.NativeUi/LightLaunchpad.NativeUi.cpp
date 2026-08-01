@@ -13,6 +13,9 @@
 #include <shlwapi.h>
 #include <uxtheme.h>
 
+#include "LightLaunchpad.BuildIdentity.generated.h"
+#include "LightLaunchpad.Version.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -158,6 +161,7 @@ enum class SettingsControlId : int
     Apply = 3012,
     Cancel = 3013,
     ResetSearchOnOpen = 3014,
+    DiagnosticsSummary = 3015,
     FolderLabel = 3020,
     HotkeyLabel = 3021,
     IconSizeLabel = 3022,
@@ -165,7 +169,8 @@ enum class SettingsControlId : int
     LanguageLabel = 3024,
     SpotlightSizeLabel = 3025,
     AppSpacingLabel = 3026,
-    WheelSensitivityLabel = 3027
+    WheelSensitivityLabel = 3027,
+    DiagnosticsLabel = 3028
 };
 
 int ControlId(SettingsControlId id)
@@ -343,6 +348,8 @@ SpotlightBackdropCapture g_spotlightBackdrop;
 UINT g_taskbarCreatedMessage = 0;
 bool g_trayIconAdded = false;
 int g_trayPromotionAttempts = 0;
+bool g_hotkeyRegistered = false;
+bool g_diagnosticsUiMode = false;
 
 bool ShowTextInputDialog(const std::wstring& title, const std::wstring& label, const std::wstring& initialValue, std::wstring& result);
 void RegisterCurrentHotkey();
@@ -2523,6 +2530,176 @@ bool RegistryDwordEquals(HKEY key, const wchar_t* name, DWORD expected)
         && value == expected;
 }
 
+std::wstring StableInstallPath()
+{
+    wchar_t localAppData[MAX_PATH] = L"";
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, ARRAYSIZE(localAppData));
+    if (length == 0 || length >= ARRAYSIZE(localAppData))
+    {
+        return {};
+    }
+
+    return JoinPath(localAppData, L"Programs\\LightLaunchpad\\LightLaunchpad.NativeUi.exe");
+}
+
+std::wstring StartupCommand()
+{
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+    {
+        return L"not configured";
+    }
+
+    std::wstring command;
+    const bool found = ReadRegistryString(key, L"LightLaunchpad", command);
+    RegCloseKey(key);
+    return found ? command : L"not configured";
+}
+
+bool IsCurrentExecutableAtStableInstallPath()
+{
+    const auto executablePath = CurrentExecutablePath();
+    const auto stablePath = StableInstallPath();
+    return !executablePath.empty()
+        && !stablePath.empty()
+        && CompareStringOrdinal(executablePath.c_str(), -1, stablePath.c_str(), -1, TRUE) == CSTR_EQUAL;
+}
+
+std::wstring RendererDiagnostics()
+{
+    if (!g_hwnd || (!g_d2dFactory && !IsWindowVisible(g_hwnd))) return L"not initialized";
+    return g_d2dFactory ? L"Direct2D" : L"GDI fallback";
+}
+
+std::wstring DpiDiagnostics()
+{
+    UINT dpi = 0;
+    if (g_hwnd)
+    {
+        using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+        const auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
+            GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+        if (getDpiForWindow)
+        {
+            dpi = getDpiForWindow(g_hwnd);
+        }
+    }
+
+    return dpi > 0
+        ? L"PerMonitorV2 / " + std::to_wstring(dpi) + L" DPI"
+        : L"PerMonitorV2 (manifest; window not initialized)";
+}
+
+std::wstring MonitorDiagnostics()
+{
+    if (!g_hwnd) return L"not initialized";
+    const HMONITOR monitor = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFOEXW info = {};
+    info.cbSize = sizeof(info);
+    if (!monitor || !GetMonitorInfoW(monitor, &info))
+    {
+        return L"unavailable";
+    }
+
+    return info.szDevice;
+}
+
+std::wstring HotkeyDiagnostics()
+{
+    if (!g_hwnd) return L"not initialized";
+    if (g_diagnosticsUiMode) return L"disabled in diagnostics UI";
+    return g_hotkeyRegistered ? L"registered: " + g_settings.hotkey : L"registration failed: " + g_settings.hotkey;
+}
+
+std::wstring BuildId()
+{
+    return std::wstring(LLP_BUILD_CHANNEL_WIDE) + L":" + LLP_BUILD_COMMIT_WIDE;
+}
+
+std::string BuildDiagnosticsJson()
+{
+    const auto executablePath = CurrentExecutablePath();
+    std::string json = "{\r\n";
+    json += "  \"productName\": \"LightLaunchpad\",\r\n";
+    json += "  \"version\": \"" + EscapeJson(LLP_BUILD_VERSION_WIDE) + "\",\r\n";
+    json += "  \"commit\": \"" + EscapeJson(LLP_BUILD_COMMIT_WIDE) + "\",\r\n";
+    json += "  \"channel\": \"" + EscapeJson(LLP_BUILD_CHANNEL_WIDE) + "\",\r\n";
+    json += "  \"buildId\": \"" + EscapeJson(BuildId()) + "\",\r\n";
+    json += "  \"singletonName\": \"" + EscapeJson(LLP_SINGLETON_NAME_WIDE) + "\",\r\n";
+    json += "  \"executablePath\": \"" + EscapeJson(executablePath) + "\",\r\n";
+    json += "  \"stableInstallPath\": \"" + EscapeJson(StableInstallPath()) + "\",\r\n";
+    json += std::string("  \"isStableInstall\": ") + (IsCurrentExecutableAtStableInstallPath() ? "true" : "false") + ",\r\n";
+    json += "  \"renderer\": \"" + EscapeJson(RendererDiagnostics()) + "\",\r\n";
+    json += "  \"dpiAwareness\": \"" + EscapeJson(DpiDiagnostics()) + "\",\r\n";
+    json += "  \"monitor\": \"" + EscapeJson(MonitorDiagnostics()) + "\",\r\n";
+    json += "  \"startupPath\": \"" + EscapeJson(StartupCommand()) + "\",\r\n";
+    json += "  \"hotkeyStatus\": \"" + EscapeJson(HotkeyDiagnostics()) + "\"\r\n";
+    json += "}\r\n";
+    return json;
+}
+
+std::wstring BuildDiagnosticsSummary()
+{
+    std::wstring summary;
+    summary += L"Version: " LLP_BUILD_VERSION_WIDE L"\r\n";
+    summary += L"Commit: " LLP_BUILD_COMMIT_WIDE L"\r\n";
+    summary += L"Channel: " LLP_BUILD_CHANNEL_WIDE L"\r\n";
+    summary += L"Build ID: " + BuildId() + L"\r\n";
+    summary += L"Executable: " + CurrentExecutablePath() + L"\r\n";
+    summary += L"Stable install: " + StableInstallPath() + L"\r\n";
+    summary += std::wstring(L"Running stable: ") + (IsCurrentExecutableAtStableInstallPath() ? L"yes" : L"no") + L"\r\n";
+    summary += L"Renderer: " + RendererDiagnostics() + L"\r\n";
+    summary += L"DPI: " + DpiDiagnostics() + L"\r\n";
+    summary += L"Monitor: " + MonitorDiagnostics() + L"\r\n";
+    summary += L"Startup: " + StartupCommand() + L"\r\n";
+    summary += L"Hotkey: " + HotkeyDiagnostics();
+    return summary;
+}
+
+std::wstring DiagnosticsFileFromCommandLine()
+{
+    int argumentCount = 0;
+    LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
+    if (!arguments)
+    {
+        return {};
+    }
+
+    std::wstring outputPath;
+    for (int index = 1; index + 1 < argumentCount; ++index)
+    {
+        if (lstrcmpiW(arguments[index], L"--diagnostics-file") == 0)
+        {
+            outputPath = arguments[index + 1];
+            break;
+        }
+    }
+    LocalFree(arguments);
+    return outputPath;
+}
+
+bool CommandLineHasArgument(const wchar_t* expected)
+{
+    int argumentCount = 0;
+    LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
+    if (!arguments)
+    {
+        return false;
+    }
+
+    bool found = false;
+    for (int index = 1; index < argumentCount; ++index)
+    {
+        if (lstrcmpiW(arguments[index], expected) == 0)
+        {
+            found = true;
+            break;
+        }
+    }
+    LocalFree(arguments);
+    return found;
+}
+
 TrayPromotionResult PromoteTrayIconVisibility()
 {
     const std::wstring executablePath = CurrentExecutablePath();
@@ -2748,12 +2925,13 @@ void ResolveHotkey(UINT& modifiers, UINT& key)
 
 void RegisterCurrentHotkey()
 {
+    g_hotkeyRegistered = false;
     if (!g_hwnd) return;
     UnregisterHotKey(g_hwnd, HotkeyId);
     UINT modifiers = 0;
     UINT key = 0;
     ResolveHotkey(modifiers, key);
-    RegisterHotKey(g_hwnd, HotkeyId, modifiers, key);
+    g_hotkeyRegistered = RegisterHotKey(g_hwnd, HotkeyId, modifiers, key) != FALSE;
 }
 
 void ActivateSearchInput()
@@ -6498,6 +6676,7 @@ void ApplyLanguageToSettingsWindow(HWND hwnd)
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::WheelSensitivityLabel), IsChineseLanguage(language) ? L"滚轮灵敏度" : L"Wheel sensitivity");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::StartWithWindows), IsChineseLanguage(language) ? L"随 Windows 启动" : L"Start with Windows");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::ResetSearchOnOpen), IsChineseLanguage(language) ? L"打开时清空搜索栏" : L"Reset search on open");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::DiagnosticsLabel), IsChineseLanguage(language) ? L"关于与诊断" : L"About & Diagnostics");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Save), IsChineseLanguage(language) ? L"保存" : L"Save");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Apply), IsChineseLanguage(language) ? L"应用" : L"Apply");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Cancel), IsChineseLanguage(language) ? L"取消" : L"Cancel");
@@ -6517,6 +6696,7 @@ void PopulateSettingsWindow(HWND hwnd)
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::Language), CB_SETCURSEL, IsChineseLanguage(g_settings.language) ? 1 : 0, 0);
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::StartWithWindows), BM_SETCHECK, g_settings.startWithWindows ? BST_CHECKED : BST_UNCHECKED, 0);
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ResetSearchOnOpen), BM_SETCHECK, g_settings.resetSearchOnOpen ? BST_CHECKED : BST_UNCHECKED, 0);
+    SetControlText(hwnd, SettingsControlId::DiagnosticsSummary, BuildDiagnosticsSummary());
     ApplyLanguageToSettingsWindow(hwnd);
     SetIconSizeSelection(hwnd);
 }
@@ -6746,7 +6926,23 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, inputX, y, inputW, 24, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::StartWithWindows)), g_instance, nullptr));
         y += 32;
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, inputX, y, inputW, 24, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::ResetSearchOnOpen)), g_instance, nullptr));
-        y += 48;
+        y += 34;
+        CreateSettingsLabel(hwnd, SettingsControlId::DiagnosticsLabel, labelX, y);
+        y += 24;
+        ApplyControlFont(CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            L"EDIT",
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+            labelX,
+            y,
+            492,
+            168,
+            hwnd,
+            reinterpret_cast<HMENU>(ControlId(SettingsControlId::DiagnosticsSummary)),
+            g_instance,
+            nullptr));
+        y += 184;
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, inputX + 48, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Save)), g_instance, nullptr));
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, inputX + 146, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Apply)), g_instance, nullptr));
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, inputX + 244, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Cancel)), g_instance, nullptr));
@@ -6810,15 +7006,15 @@ void ShowSettingsWindow()
     }
 
     g_settingsHwnd = CreateWindowExW(
-        WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW,
+        WS_EX_DLGMODALFRAME | (g_diagnosticsUiMode ? 0 : WS_EX_TOOLWINDOW),
         SettingsWindowClassName,
         Text(L"LightLaunchpad Settings", L"LightLaunchpad 设置"),
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         560,
-        540,
-        g_hwnd,
+        730,
+        g_diagnosticsUiMode ? nullptr : g_hwnd,
         nullptr,
         g_instance,
         nullptr);
@@ -7468,10 +7664,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
 {
     g_instance = instance;
+    const auto diagnosticsFile = DiagnosticsFileFromCommandLine();
+    if (!diagnosticsFile.empty())
+    {
+        return WriteFileUtf8(diagnosticsFile, BuildDiagnosticsJson()) ? 0 : 2;
+    }
+    g_diagnosticsUiMode = CommandLineHasArgument(L"--diagnostics-ui");
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
     const HRESULT coInitializeResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const bool comInitialized = SUCCEEDED(coInitializeResult);
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"LightLaunchpad.NativeUi.SingleInstance");
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, LLP_SINGLETON_NAME_WIDE);
     if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS)
     {
         if (comInitialized) CoUninitialize();
@@ -7514,8 +7716,15 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         return 1;
     }
 
-    RegisterCurrentHotkey();
-    AddTrayIcon();
+    if (!g_diagnosticsUiMode)
+    {
+        RegisterCurrentHotkey();
+        AddTrayIcon();
+    }
+    else
+    {
+        ShowSettingsWindow();
+    }
 
     MSG msg = {};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0)

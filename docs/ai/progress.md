@@ -2,7 +2,7 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 03:50:23 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 04:18:56 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
 - HEAD: `d2da5c0`
@@ -11,6 +11,56 @@
 - Completed tasks: `LLP-001`
 - Next task after verification: `LLP-003 - Shell-First Startup And Singleton Activation`
 - Goal status: active in Codex; LLP-002 is the only task in progress.
+
+## LLP-002 Execution Evidence
+
+Status at 2026-08-02 04:18 +08:00: implementation and pre-commit verification complete; preparing the scoped implementation commit.
+
+Changed files in scope:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - compiled build identity, channel-specific singleton name, JSON diagnostics command, safe diagnostics UI mode, runtime identity fields, and About/Diagnostics settings surface.
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.rc` - PE icon, VERSIONINFO, build metadata, and embedded manifest resources.
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.manifest` - Per-Monitor V2, long-path, compatibility, and as-invoker declarations.
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.Version.h` - version/build identity defaults for supported builds.
+- `tools/build-native-ui.ps1` - semantic version, commit, dirty state, development/stable channel, generated identity header, and distinct singleton injection.
+- `tools/package-release.ps1` - clean stable-package gate and explicit `-Development` package identity.
+- `tests/LightLaunchpad.NativeUi.Tests/ExecutableIdentity.Tests.ps1` - builds and inspects real development/stable PE files, resources, diagnostics, Win32 settings control, singleton channels, dirty-package rejection, and ZIP contents.
+- `docs/ai/evidence/LLP-002/01-about-diagnostics.png` - accepted current-run screenshot of the real NativeUi About/Diagnostics surface.
+
+TDD evidence:
+
+- RED: real PE `ProductName` was empty before VERSIONINFO was added.
+- RED: real EXE produced no `--diagnostics-file` output before compiled diagnostics were added.
+- RED: real EXE did not expose a settings diagnostics surface before `--diagnostics-ui` and control ID 3015 were added.
+- RED: stable packaging succeeded on a dirty repository before the clean-package gate was implemented.
+- RED: stable build channel was unavailable before stable/development identity separation was implemented and verified against two real EXEs.
+- RED: diagnostics UI mislabeled an uninitialized renderer and disabled test hotkey state before explicit statuses were implemented.
+- GREEN: `powershell -ExecutionPolicy Bypass -File tests\LightLaunchpad.NativeUi.Tests\ExecutableIdentity.Tests.ps1` exits 0 with 5/5 named real-EXE behavior checks.
+
+Fresh verification before the implementation commit:
+
+- NativeUi identity behavior: 5/5 passed, including real PE version/manifest, JSON diagnostics, stable-vs-development singleton separation, real Win32 settings control, dirty stable-package rejection, and explicit development ZIP content.
+- Core tests: `33/33 tests passed`.
+- Legacy App/source suite: `74/74 tests passed`; retained as a historical regression baseline only.
+- Native build: `release\llp002-check\LightLaunchpad.NativeUi.exe`, 545,280 bytes, SHA256 `B8C1C9BD6D0C32A2525627EE7075D4E45367A48B35374050951FD01E4D6D2BF7`, `ProductVersion=1.11.0-dev+f74a4bc2a742.dirty`, `FileVersion=1.11.0.0`.
+- Real EXE diagnostics smoke: exit 0; executable path, commit `f74a4bc2a742`, development channel, build ID, stable install contract, startup command, DPI declaration, monitor/renderer/hotkey fields all parsed from produced JSON.
+- `git diff --check`: exit 0; only Git LF-to-CRLF working-copy notices were emitted.
+
+Visual and accessibility audit:
+
+- Accepted screenshot: `docs/ai/evidence/LLP-002/01-about-diagnostics.png` (372 x 486 captured logical pixels).
+- The real settings window loaded completely with visible Save/Apply/Cancel actions and a readable About/Diagnostics surface.
+- UI Automation exposed the diagnostics label as text ID 3028 and its read-only edit surface as ID 3015, alongside the existing keyboard-focusable settings controls.
+- Known nonblocking risk: at the current 150% desktop scale the settings layout is physically dense and long paths require scrolling/wrapping. Per-task scope leaves full DIP scaling, reflow, and DPI screenshots to LLP-012 rather than hiding the risk.
+- Visual audit did not claim contrast or full accessibility compliance from the screenshot alone.
+
+Safety and performance:
+
+- No stable install, `C:\TOOL`, Run entry, push, tag, or release action was performed.
+- The visible audit used a development-channel EXE with tray/hotkey integration disabled and stopped only its validated temporary PID after capture.
+- Performance budgets are not changed or claimed by LLP-002. The prior hidden Private Memory baseline remains 31,207,424 bytes until a later measured optimization task.
+- `LLP_reconstruction/` and `LightLaunchpad.NativeUi.o` remain untracked/ignored and outside staging.
+- Commit: pending scoped LLP-002 implementation commit.
 
 ## Current Session Baseline Revalidation
 
