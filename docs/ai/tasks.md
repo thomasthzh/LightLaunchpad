@@ -62,7 +62,7 @@
 
 ### LLP-004 - Transactional Hotkey And Settings Writes
 
-- Status: `in_progress`
+- Status: `done`
 - Depends on: LLP-003
 - Purpose: a failed settings change must never destroy the working launch path.
 - Likely files: `AppHost`, `SettingsStore`, Native settings UI, hotkey parser/registrar.
@@ -74,13 +74,13 @@
 - Verify:
   - Register a known conflicting hotkey; old hotkey continues to work and the setting shows the reason.
   - Save to an unwritable destination; UI retains the prior value and reports failure.
-- Completion notes: Started immediately after LLP-003 verification and documentation. Next RED targets transactional hotkey replacement and settings write rollback/failure feedback against production NativeUi behavior.
+- Completion notes: Completed with implementation commit `bc5ea3e`. NativeUi now pre-registers a `MOD_NOREPEAT` candidate hotkey under an alternate ID while the prior binding remains live, commits the swap only after startup registration and settings persistence succeed, and rolls back the exact prior startup command plus candidate registration on failure. Settings are read into a candidate object, failures keep prior in-memory/control/file state, and visible Diagnostics status reports conflict, write, startup, and success outcomes. Real-EXE tests prove conflict retention, successful ownership transfer, and unwritable-destination rollback across hotkey/startup/settings with no test registry residue. Post-commit transaction 3/3, AppHost 4/4, identity 5/5, Core 33/33, legacy App 74/74, native build/diagnostics, Run-value safety, and diff gates passed. Verified EXE: 561,152 bytes, SHA256 `6151535E799359BC6D3553619991ECD339A8FFA36CA6AECCF86562048A9DC53E`.
 
 ## Milestone B: Reliable Data And Instant Response
 
 ### LLP-005 - Standard Persistence And Folder-Scoped Layout
 
-- Status: `pending`
+- Status: `in_progress`
 - Depends on: LLP-004
 - Purpose: preserve user organization through corruption, temporary file loss, and folder changes.
 - Likely files: new `Persistence`/`SettingsStore`/`LayoutStore` modules; migration code for `%AppData%\LightLaunchpad\settings.json` and `layout.json`.
@@ -93,7 +93,7 @@
   - Strings containing quotes, braces, Unicode, and surrogate pairs round-trip.
   - Truncated JSON recovers from backup without overwriting the last good file.
   - Switching launch folders cannot display old-folder items; switching back restores their layout.
-- Completion notes: Not started.
+- Completion notes: Started immediately after LLP-004 post-commit verification. Next RED targets standards-compliant JSON round trips, atomic backup/recovery, and folder-scoped layout identity without adopting `LLP_reconstruction/`.
 
 ### LLP-006 - Catalog Snapshot And Shell STA Broker
 

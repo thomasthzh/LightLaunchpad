@@ -2,15 +2,54 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 04:48:00 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 05:04:17 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `33a139e`
+- HEAD: `bc5ea3e`
 - Remote main: `origin/main@33e91c2`
-- Active task: `LLP-004 - Transactional Hotkey And Settings Writes` (`in_progress`)
-- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`
-- Next task after verification: `LLP-005 - Standard Persistence And Folder-Scoped Layout`
-- Goal status: active in Codex; LLP-004 is the only task in progress.
+- Active task: `LLP-005 - Standard Persistence And Folder-Scoped Layout` (`in_progress`)
+- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`
+- Next task after verification: `LLP-006 - Catalog Snapshot And Shell STA Broker`
+- Goal status: active in Codex; LLP-005 is the only task in progress.
+
+## LLP-004 Execution Evidence
+
+Status at 2026-08-02 05:04 +08:00: complete.
+
+Changed files in scope:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - candidate settings snapshots, alternate-ID hotkey reservation with `MOD_NOREPEAT`, commit/rollback ordering, exact startup-registration snapshot/restore, visible settings status, candidate-based serialization, and temporary-file cleanup after failed atomic replacement.
+- `tests/LightLaunchpad.NativeUi.Tests/SettingsTransactions.Tests.ps1` - real-EXE Win32 tests with isolated app-data, a dedicated competing hotkey thread, UI control inspection, ownership probes, forced write failure, development-only registry isolation, startup rollback, and zero-residue checks.
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs` - updates the historical icon-size source assertion to the candidate-settings boundary.
+- `.learnings/ERRORS.md` - records and resolves the startup-isolation error discovered during the first RED test.
+
+TDD and production behavior evidence:
+
+- RED: the first real-EXE conflict test showed the settings control changed from `Ctrl+Alt+Shift+9` to the occupied `Ctrl+Alt+Shift+8`; the rejected value was also persisted and the old registration had been released by the legacy order.
+- GREEN conflict: an independent Win32 thread owns the candidate combination; Apply reports the Windows conflict, restores the old control/file value, and another ownership probe confirms the product still holds the old binding.
+- GREEN success: after releasing the competing owner, Apply persists and owns the candidate first, then releases the prior binding; external `RegisterHotKey` probes prove both sides of the handoff.
+- GREEN write/startup rollback: the isolated `settings.json` target is temporarily replaced by a directory and the startup checkbox is changed. The settings write fails, the candidate hotkey is released, the prior hotkey/control/file values remain, the isolated startup value is removed back to its exact snapshot, and no `.tmp` file remains.
+- Failure and success reasons are read from the real settings Diagnostics control (ID 3015), rather than inferred from source strings.
+
+Fresh post-commit verification against `bc5ea3e5f8de`:
+
+- NativeUi settings transactions: 3/3 passed.
+- NativeUi AppHost behavior: 4/4 passed; isolated timing remained within LLP-003 gates (`shellReadyMs=32`, `probeExitMs=332`, `settingsWindowMs=172`, `logBytes=1086`).
+- NativeUi identity behavior: 5/5 passed.
+- Core tests: `33/33 tests passed`.
+- Legacy App/source suite: `74/74 tests passed`; historical regression coverage only.
+- Native build and diagnostics: `release\llp004-postcommit\LightLaunchpad.NativeUi.exe`, 561,152 bytes, SHA256 `6151535E799359BC6D3553619991ECD339A8FFA36CA6AECCF86562048A9DC53E`, `ProductVersion=1.11.0-dev+bc5ea3e5f8de.dirty`, diagnostics commit `bc5ea3e5f8de`.
+- `git diff --check` and cached diff checks: exit 0; only Git line-ending notices appeared while staging.
+
+Safety incident, correction, and final state:
+
+- The first RED test isolated `APPDATA` but invoked the legacy Apply path before startup registration was isolated. That old path unconditionally called `SetStartWithWindows(false)` and removed the real `HKCU\...\Run\LightLaunchpad` value.
+- Work stopped at discovery. The exact baseline Run string was restored only after the protected EXE path and SHA256 were revalidated. A development-only override now accepts only `HKCU\Software\LightLaunchpad\Tests\...`; the real test aborts if the formal Run baseline is missing, compares it after every transaction, and removes its exact test key in `finally`.
+- Final safety verification: Run is exactly `"C:\Users\thoma\Desktop\启动台\artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe"`; protected EXE SHA256 is `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; test registry key count is 0; only protected PID 22560 remains.
+- No stable install, `C:\TOOL`, push, tag, or release action was performed. `LLP_reconstruction/` and ignored `LightLaunchpad.NativeUi.o` stayed outside staging.
+- Screenshot evidence is not applicable to this transactional behavior task; real visible status and control rollback were verified through Win32 controls. Full settings visual reflow remains assigned to LLP-015.
+- Scoped implementation commit: `bc5ea3e` (`feat: make native settings transactional`).
+- Task transition: LLP-004 marked `done`; LLP-005 marked as the sole `in_progress` task.
 
 ## LLP-003 Execution Evidence
 
