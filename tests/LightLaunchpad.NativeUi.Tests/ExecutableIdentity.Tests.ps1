@@ -260,11 +260,16 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $llpCleanSourceRoot 'tools') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.App\Assets') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $llpCleanSourceRoot 'src\third_party\nlohmann') | Out-Null
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'tools\build-native-ui.ps1') -Destination (Join-Path $llpCleanSourceRoot 'tools\build-native-ui.ps1')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.rc') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.rc')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.manifest') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.manifest')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.Version.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.Version.h')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\Persistence.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\Persistence.cpp')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\Persistence.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\Persistence.h')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\third_party\nlohmann\json.hpp') -Destination (Join-Path $llpCleanSourceRoot 'src\third_party\nlohmann\json.hpp')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\third_party\nlohmann\LICENSE.MIT') -Destination (Join-Path $llpCleanSourceRoot 'src\third_party\nlohmann\LICENSE.MIT')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.App\Assets\LightLaunchpad.ico') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.App\Assets\LightLaunchpad.ico')
     & git -C $llpCleanSourceRoot init --quiet
     & git -C $llpCleanSourceRoot config core.autocrlf false

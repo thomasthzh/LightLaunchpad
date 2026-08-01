@@ -125,9 +125,11 @@ try {
 
     & $gpp `
         src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp `
+        src\LightLaunchpad.NativeUi\Persistence.cpp `
         $temporaryResourceObject `
         -I $temporaryDirectory `
         -I src\LightLaunchpad.NativeUi `
+        -I src\third_party `
         -std=c++17 `
         -finput-charset=UTF-8 `
         -fexec-charset=UTF-8 `

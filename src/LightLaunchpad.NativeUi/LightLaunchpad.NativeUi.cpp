@@ -16,6 +16,7 @@
 
 #include "LightLaunchpad.BuildIdentity.generated.h"
 #include "LightLaunchpad.Version.h"
+#include "Persistence.h"
 
 #include <algorithm>
 #include <cmath>
@@ -25,6 +26,7 @@
 #include <cwchar>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -70,6 +72,8 @@
 
 namespace
 {
+using Json = nlohmann::json;
+
 constexpr int HotkeyId = 0x4C55;
 constexpr int CandidateHotkeyId = 0x4C56;
 constexpr int TrayOpenCommand = 1001;
@@ -297,6 +301,7 @@ HWND g_settingsHwnd = nullptr;
 Settings g_settings;
 std::vector<Region> g_regions;
 std::vector<LaunchItem> g_items;
+std::vector<LaunchItem> g_missingLayoutItems;
 std::vector<int> g_filtered;
 std::vector<HitTile> g_hits;
 std::vector<IconOpaqueBoundsCacheEntry> g_iconBoundsCache;
@@ -365,9 +370,17 @@ int g_taskbarRecoveryCount = 0;
 std::wstring g_startupLogPath;
 std::wstring g_startupProbePath;
 std::wstring g_settingsStatus = L"No settings changes in this session.";
+bool g_settingsRecoveredFromBackup = false;
+bool g_settingsMigrated = false;
+std::wstring g_settingsPersistenceError;
+bool g_layoutRecoveredFromBackup = false;
+bool g_layoutMigrated = false;
+std::wstring g_layoutPersistenceError;
+std::wstring g_layoutQuarantinePath;
 
 bool ShowTextInputDialog(const std::wstring& title, const std::wstring& label, const std::wstring& initialValue, std::wstring& result);
 bool RegisterCurrentHotkey();
+bool SaveLayout();
 void ShowSettingsWindow();
 void RebuildFiltered();
 void DestroyDirectRenderer();
@@ -613,26 +626,6 @@ std::wstring JoinPath(const std::wstring& left, const wchar_t* right)
     return result;
 }
 
-std::string ReadFileUtf8(const std::wstring& path)
-{
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return {};
-
-    LARGE_INTEGER size = {};
-    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || size.QuadPart > 8 * 1024 * 1024)
-    {
-        CloseHandle(file);
-        return {};
-    }
-
-    std::string content(static_cast<size_t>(size.QuadPart), '\0');
-    DWORD read = 0;
-    ReadFile(file, content.data(), static_cast<DWORD>(content.size()), &read, nullptr);
-    CloseHandle(file);
-    content.resize(read);
-    return content;
-}
-
 std::wstring Utf8ToWide(const std::string& value)
 {
     if (value.empty()) return {};
@@ -651,135 +644,6 @@ std::string WideToUtf8(const std::wstring& value)
     std::string utf8(count, '\0');
     WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), utf8.data(), count, nullptr, nullptr);
     return utf8;
-}
-
-int HexValue(char ch)
-{
-    if (ch >= '0' && ch <= '9') return ch - '0';
-    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
-    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
-    return 0;
-}
-
-std::wstring ParseJsonStringAt(const std::string& text, size_t quote)
-{
-    if (quote == std::string::npos || quote >= text.size() || text[quote] != '"') return {};
-
-    std::wstring result;
-    std::string utf8;
-    for (size_t i = quote + 1; i < text.size(); ++i)
-    {
-        const char ch = text[i];
-        if (ch == '"')
-        {
-            if (!utf8.empty())
-            {
-                result += Utf8ToWide(utf8);
-            }
-            return result;
-        }
-
-        if (ch != '\\')
-        {
-            utf8.push_back(ch);
-            continue;
-        }
-
-        if (!utf8.empty())
-        {
-            result += Utf8ToWide(utf8);
-            utf8.clear();
-        }
-        if (++i >= text.size()) break;
-        const char escaped = text[i];
-        switch (escaped)
-        {
-        case '"': result += L'"'; break;
-        case '\\': result += L'\\'; break;
-        case '/': result += L'/'; break;
-        case 'b': result += L'\b'; break;
-        case 'f': result += L'\f'; break;
-        case 'n': result += L'\n'; break;
-        case 'r': result += L'\r'; break;
-        case 't': result += L'\t'; break;
-        case 'u':
-            if (i + 4 < text.size())
-            {
-                wchar_t code = static_cast<wchar_t>(
-                    (HexValue(text[i + 1]) << 12)
-                    | (HexValue(text[i + 2]) << 8)
-                    | (HexValue(text[i + 3]) << 4)
-                    | HexValue(text[i + 4]));
-                result += code;
-                i += 4;
-            }
-            break;
-        default:
-            result += static_cast<wchar_t>(escaped);
-            break;
-        }
-    }
-
-    if (!utf8.empty())
-    {
-        result += Utf8ToWide(utf8);
-    }
-    return result;
-}
-
-size_t FindValueStart(const std::string& text, const char* key, size_t begin, size_t end)
-{
-    std::string pattern = "\"";
-    pattern += key;
-    pattern += "\"";
-    const auto found = text.find(pattern, begin);
-    if (found == std::string::npos || found >= end) return std::string::npos;
-    const auto colon = text.find(':', found + pattern.size());
-    if (colon == std::string::npos || colon >= end) return std::string::npos;
-    return colon + 1;
-}
-
-std::wstring FindJsonStringValue(const std::string& text, const char* key, size_t begin = 0, size_t end = std::string::npos)
-{
-    if (end == std::string::npos) end = text.size();
-    const auto valueStart = FindValueStart(text, key, begin, end);
-    if (valueStart == std::string::npos) return {};
-    const auto quote = text.find('"', valueStart);
-    if (quote == std::string::npos || quote >= end) return {};
-    return ParseJsonStringAt(text, quote);
-}
-
-int FindJsonNumberValue(const std::string& text, const char* key, int fallback, size_t begin = 0, size_t end = std::string::npos)
-{
-    if (end == std::string::npos) end = text.size();
-    const auto valueStart = FindValueStart(text, key, begin, end);
-    if (valueStart == std::string::npos) return fallback;
-    int value = fallback;
-    if (std::sscanf(text.c_str() + valueStart, "%d", &value) == 1)
-    {
-        return value;
-    }
-    return fallback;
-}
-
-double FindJsonDoubleValue(const std::string& text, const char* key, double fallback, size_t begin = 0, size_t end = std::string::npos)
-{
-    if (end == std::string::npos) end = text.size();
-    const auto valueStart = FindValueStart(text, key, begin, end);
-    if (valueStart == std::string::npos) return fallback;
-    char* parseEnd = nullptr;
-    const double value = std::strtod(text.c_str() + valueStart, &parseEnd);
-    return parseEnd && parseEnd != text.c_str() + valueStart ? value : fallback;
-}
-
-bool FindJsonBoolValue(const std::string& text, const char* key, bool fallback, size_t begin = 0, size_t end = std::string::npos)
-{
-    if (end == std::string::npos) end = text.size();
-    const auto valueStart = FindValueStart(text, key, begin, end);
-    if (valueStart == std::string::npos) return fallback;
-    if (text.compare(valueStart, 4, "true") == 0) return true;
-    if (text.compare(valueStart, 5, "false") == 0) return false;
-    return fallback;
 }
 
 int NormalizeSpotlightWidth(int value)
@@ -834,6 +698,35 @@ std::string EscapeJson(const std::wstring& value)
     return result;
 }
 
+void AppendPersistenceError(std::wstring& target, const std::wstring& message)
+{
+    if (message.empty()) return;
+    if (target.empty())
+    {
+        target = message;
+    }
+    else if (target.find(message) == std::wstring::npos)
+    {
+        target += L" " + message;
+    }
+}
+
+bool TryGetJsonInt(const Json& value, int& result)
+{
+    if (value.is_number_unsigned())
+    {
+        const auto number = value.get<uint64_t>();
+        if (number > static_cast<uint64_t>(std::numeric_limits<int>::max())) return false;
+        result = static_cast<int>(number);
+        return true;
+    }
+    if (!value.is_number_integer()) return false;
+    const auto number = value.get<int64_t>();
+    if (number < std::numeric_limits<int>::min() || number > std::numeric_limits<int>::max()) return false;
+    result = static_cast<int>(number);
+    return true;
+}
+
 std::wstring GetLightLaunchpadDataPath()
 {
     const auto appData = GetAppDataPath();
@@ -841,6 +734,12 @@ std::wstring GetLightLaunchpadDataPath()
 }
 
 std::wstring GetLayoutPath()
+{
+    const auto dataPath = GetLightLaunchpadDataPath();
+    return dataPath.empty() ? L"" : llp::persistence::ScopedLayoutPath(dataPath, g_settings.launchpadFolder);
+}
+
+std::wstring GetLegacyLayoutPath()
 {
     const auto dataPath = GetLightLaunchpadDataPath();
     return dataPath.empty() ? L"" : JoinPath(dataPath, L"layout.json");
@@ -891,31 +790,97 @@ bool WriteFileUtf8(const std::wstring& path, const std::string& content)
 
 void LoadSettings()
 {
-    const auto appData = GetAppDataPath();
     const auto profile = GetUserProfilePath();
-    g_settings.launchpadFolder = profile.empty() ? L"Launchpad" : JoinPath(profile, L"Launchpad");
-    if (appData.empty()) return;
+    Settings loaded;
+    loaded.launchpadFolder = profile.empty() ? L"Launchpad" : JoinPath(profile, L"Launchpad");
+    g_settingsRecoveredFromBackup = false;
+    g_settingsMigrated = false;
+    g_settingsPersistenceError.clear();
 
-    const auto json = ReadFileUtf8(JoinPath(JoinPath(appData, L"LightLaunchpad"), L"settings.json"));
-    if (json.empty()) return;
+    const auto loadResult = llp::persistence::LoadJsonWithRecovery(GetSettingsPath());
+    g_settingsRecoveredFromBackup = loadResult.recoveredFromBackup;
+    g_settingsPersistenceError = loadResult.error;
+    if (!loadResult.document.is_object())
+    {
+        g_settings = loaded;
+        return;
+    }
 
-    const auto folder = FindJsonStringValue(json, "LaunchpadFolder");
-    if (!folder.empty()) g_settings.launchpadFolder = folder;
-    const auto hotkey = FindJsonStringValue(json, "Hotkey");
-    if (!hotkey.empty()) g_settings.hotkey = NormalizeHotkeyText(hotkey);
-    const auto displayMode = FindJsonStringValue(json, "DisplayMode");
-    if (!displayMode.empty()) g_settings.displayMode = displayMode;
-    const auto language = FindJsonStringValue(json, "Language");
-    if (!language.empty()) g_settings.language = language;
-    const auto iconSize = FindJsonStringValue(json, "IconSize");
-    if (ContainsIgnoreCase(iconSize, L"Large")) g_settings.iconSize = 72;
-    if (ContainsIgnoreCase(iconSize, L"Small")) g_settings.iconSize = 42;
-    g_settings.spotlightWidth = NormalizeSpotlightWidth(FindJsonNumberValue(json, "SpotlightWidth", g_settings.spotlightWidth));
-    g_settings.spotlightHeight = NormalizeSpotlightHeight(FindJsonNumberValue(json, "SpotlightHeight", g_settings.spotlightHeight));
-    g_settings.appSpacing = NormalizeAppSpacing(FindJsonNumberValue(json, "AppSpacing", g_settings.appSpacing));
-    g_settings.wheelSensitivity = NormalizeWheelSensitivity(FindJsonDoubleValue(json, "WheelSensitivity", g_settings.wheelSensitivity));
-    g_settings.startWithWindows = FindJsonBoolValue(json, "StartWithWindows", g_settings.startWithWindows);
-    g_settings.resetSearchOnOpen = FindJsonBoolValue(json, "ResetSearchOnOpen", g_settings.resetSearchOnOpen);
+    const Json& document = loadResult.document;
+    int schemaVersion = 1;
+    if (document.contains("SchemaVersion") && !TryGetJsonInt(document["SchemaVersion"], schemaVersion))
+    {
+        g_settingsPersistenceError = L"Settings SchemaVersion must be a supported integer.";
+        g_settings = loaded;
+        return;
+    }
+    if (schemaVersion < 1 || schemaVersion > llp::persistence::CurrentSchemaVersion)
+    {
+        g_settingsPersistenceError = L"Unsupported settings schema version " + std::to_wstring(schemaVersion) + L".";
+        g_settings = loaded;
+        return;
+    }
+    g_settingsMigrated = schemaVersion < llp::persistence::CurrentSchemaVersion;
+
+    auto readString = [&](const char* key, const std::wstring& fallback) {
+        if (!document.contains(key)) return fallback;
+        if (!document[key].is_string())
+        {
+            AppendPersistenceError(g_settingsPersistenceError, L"Settings field " + llp::persistence::Utf8ToWide(key) + L" must be a string.");
+            return fallback;
+        }
+        const auto value = llp::persistence::Utf8ToWide(document[key].get<std::string>());
+        if (value.empty())
+        {
+            AppendPersistenceError(g_settingsPersistenceError, L"Settings field " + llp::persistence::Utf8ToWide(key) + L" must not be empty.");
+            return fallback;
+        }
+        return value;
+    };
+    auto readInt = [&](const char* key, int fallback) {
+        if (!document.contains(key)) return fallback;
+        int value = fallback;
+        if (!TryGetJsonInt(document[key], value))
+        {
+            AppendPersistenceError(g_settingsPersistenceError, L"Settings field " + llp::persistence::Utf8ToWide(key) + L" must be an in-range integer.");
+            return fallback;
+        }
+        return value;
+    };
+    auto readDouble = [&](const char* key, double fallback) {
+        if (!document.contains(key)) return fallback;
+        if (!document[key].is_number())
+        {
+            AppendPersistenceError(g_settingsPersistenceError, L"Settings field " + llp::persistence::Utf8ToWide(key) + L" must be a number.");
+            return fallback;
+        }
+        return document[key].get<double>();
+    };
+    auto readBool = [&](const char* key, bool fallback) {
+        if (!document.contains(key)) return fallback;
+        if (!document[key].is_boolean())
+        {
+            AppendPersistenceError(g_settingsPersistenceError, L"Settings field " + llp::persistence::Utf8ToWide(key) + L" must be a boolean.");
+            return fallback;
+        }
+        return document[key].get<bool>();
+    };
+
+    loaded.launchpadFolder = readString("LaunchpadFolder", loaded.launchpadFolder);
+    loaded.hotkey = NormalizeHotkeyText(readString("Hotkey", loaded.hotkey));
+    loaded.displayMode = readString("DisplayMode", loaded.displayMode);
+    loaded.language = readString("Language", loaded.language);
+    const auto iconSize = readString("IconSize", L"Medium");
+    if (ContainsIgnoreCase(iconSize, L"Large")) loaded.iconSize = 72;
+    else if (ContainsIgnoreCase(iconSize, L"Small")) loaded.iconSize = 42;
+    else loaded.iconSize = 56;
+    loaded.spotlightWidth = NormalizeSpotlightWidth(readInt("SpotlightWidth", loaded.spotlightWidth));
+    loaded.spotlightHeight = NormalizeSpotlightHeight(readInt("SpotlightHeight", loaded.spotlightHeight));
+    loaded.appSpacing = NormalizeAppSpacing(readInt("AppSpacing", loaded.appSpacing));
+    loaded.wheelSensitivity = NormalizeWheelSensitivity(readDouble("WheelSensitivity", loaded.wheelSensitivity));
+    loaded.startWithWindows = readBool("StartWithWindows", loaded.startWithWindows);
+    loaded.resetSearchOnOpen = readBool("ResetSearchOnOpen", loaded.resetSearchOnOpen);
+    g_settings = loaded;
 }
 
 std::wstring IconSizeName()
@@ -927,24 +892,27 @@ std::wstring IconSizeName()
 
 bool SaveSettings(const Settings& settings)
 {
-    std::string json;
     const std::wstring iconSizeName = settings.iconSize <= 44 ? L"Small" : (settings.iconSize >= 64 ? L"Large" : L"Medium");
-    json += "{\r\n";
-    json += "  \"LaunchpadFolder\": \"" + EscapeJson(settings.launchpadFolder) + "\",\r\n";
-    json += "  \"Hotkey\": \"" + EscapeJson(settings.hotkey) + "\",\r\n";
-    json += std::string("  \"StartWithWindows\": ") + (settings.startWithWindows ? "true" : "false") + ",\r\n";
-    json += "  \"IconSize\": \"" + EscapeJson(iconSizeName) + "\",\r\n";
-    json += "  \"ViewMode\": \"" + EscapeJson(g_layoutViewMode) + "\",\r\n";
-    json += "  \"IconQuality\": \"High\",\r\n";
-    json += "  \"DisplayMode\": \"" + EscapeJson(settings.displayMode) + "\",\r\n";
-    json += "  \"Language\": \"" + EscapeJson(settings.language) + "\",\r\n";
-    json += "  \"SpotlightWidth\": " + std::to_string(settings.spotlightWidth) + ",\r\n";
-    json += "  \"SpotlightHeight\": " + std::to_string(settings.spotlightHeight) + ",\r\n";
-    json += "  \"AppSpacing\": " + std::to_string(settings.appSpacing) + ",\r\n";
-    json += "  \"WheelSensitivity\": " + WideToUtf8(FormatDouble(settings.wheelSensitivity)) + ",\r\n";
-    json += std::string("  \"ResetSearchOnOpen\": ") + (settings.resetSearchOnOpen ? "true" : "false") + "\r\n";
-    json += "}\r\n";
-    return WriteFileUtf8(GetSettingsPath(), json);
+    Json document = {
+        { "SchemaVersion", llp::persistence::CurrentSchemaVersion },
+        { "LaunchpadFolder", llp::persistence::WideToUtf8(settings.launchpadFolder) },
+        { "Hotkey", llp::persistence::WideToUtf8(settings.hotkey) },
+        { "StartWithWindows", settings.startWithWindows },
+        { "IconSize", llp::persistence::WideToUtf8(iconSizeName) },
+        { "ViewMode", llp::persistence::WideToUtf8(g_layoutViewMode) },
+        { "IconQuality", "High" },
+        { "DisplayMode", llp::persistence::WideToUtf8(settings.displayMode) },
+        { "Language", llp::persistence::WideToUtf8(settings.language) },
+        { "SpotlightWidth", settings.spotlightWidth },
+        { "SpotlightHeight", settings.spotlightHeight },
+        { "AppSpacing", settings.appSpacing },
+        { "WheelSensitivity", settings.wheelSensitivity },
+        { "ResetSearchOnOpen", settings.resetSearchOnOpen }
+    };
+    std::wstring error;
+    const bool saved = llp::persistence::WriteJsonAtomicWithBackup(GetSettingsPath(), document, error);
+    if (!saved) g_settingsPersistenceError = error;
+    return saved;
 }
 
 bool RegionExists(const std::wstring& id)
@@ -972,7 +940,9 @@ int RegionOrder(const std::wstring& id)
 
 bool SamePath(const std::wstring& left, const std::wstring& right)
 {
-    return CompareStringOrdinal(left.c_str(), -1, right.c_str(), -1, TRUE) == CSTR_EQUAL;
+    const auto normalizedLeft = llp::persistence::NormalizeFolderIdentity(left);
+    const auto normalizedRight = llp::persistence::NormalizeFolderIdentity(right);
+    return CompareStringOrdinal(normalizedLeft.c_str(), -1, normalizedRight.c_str(), -1, TRUE) == CSTR_EQUAL;
 }
 
 bool ContainsPath(const std::vector<std::wstring>& paths, const std::wstring& sourcePath)
@@ -1080,61 +1050,183 @@ void AddDefaultRegion()
     }
 }
 
+bool IsDirectChildOfLaunchpadFolder(const std::wstring& sourcePath)
+{
+    if (sourcePath.empty() || g_settings.launchpadFolder.empty()) return false;
+    std::vector<wchar_t> parent(sourcePath.begin(), sourcePath.end());
+    parent.push_back(L'\0');
+    if (!PathRemoveFileSpecW(parent.data())) return false;
+    const auto normalizedParent = llp::persistence::NormalizeFolderIdentity(parent.data());
+    const auto normalizedLaunchpad = llp::persistence::NormalizeFolderIdentity(g_settings.launchpadFolder);
+    return CompareStringOrdinal(normalizedParent.c_str(), -1, normalizedLaunchpad.c_str(), -1, TRUE) == CSTR_EQUAL;
+}
+
 void LoadLayout()
 {
     g_regions.clear();
     g_items.clear();
-    const auto appData = GetAppDataPath();
-    if (appData.empty())
+    g_missingLayoutItems.clear();
+    g_layoutRecoveredFromBackup = false;
+    g_layoutMigrated = false;
+    g_layoutPersistenceError.clear();
+    g_layoutQuarantinePath.clear();
+    const auto dataPath = GetLightLaunchpadDataPath();
+    if (dataPath.empty())
     {
         AddDefaultRegion();
         return;
     }
 
     const auto layoutPath = GetLayoutPath();
-    const auto json = ReadFileUtf8(layoutPath);
-    if (json.empty())
+    const auto backupPath = layoutPath + L".bak";
+    const bool scopedStateExists = GetFileAttributesW(layoutPath.c_str()) != INVALID_FILE_ATTRIBUTES
+        || GetFileAttributesW(backupPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+    auto loadResult = llp::persistence::LoadJsonWithRecovery(layoutPath);
+    bool migratedLegacyFile = false;
+    if (!loadResult.document.is_object() && !scopedStateExists)
+    {
+        auto legacyResult = llp::persistence::LoadJsonWithRecovery(GetLegacyLayoutPath());
+        if (legacyResult.document.is_object())
+        {
+            loadResult = std::move(legacyResult);
+            migratedLegacyFile = true;
+        }
+    }
+    g_layoutRecoveredFromBackup = loadResult.recoveredFromBackup;
+    g_layoutQuarantinePath = loadResult.quarantinePath;
+    if (loadResult.found || loadResult.recoveredFromBackup) g_layoutPersistenceError = loadResult.error;
+    if (!loadResult.document.is_object())
     {
         AddDefaultRegion();
         return;
     }
 
-    const auto viewMode = FindJsonStringValue(json, "ViewMode");
-    if (!viewMode.empty()) g_layoutViewMode = viewMode;
-
-    size_t pos = 0;
-    while ((pos = json.find("\"Id\"", pos)) != std::string::npos)
+    const Json& document = loadResult.document;
+    int schemaVersion = 1;
+    if (document.contains("SchemaVersion") && !TryGetJsonInt(document["SchemaVersion"], schemaVersion))
     {
-        const auto objectEnd = json.find('}', pos);
-        if (objectEnd == std::string::npos) break;
-        auto id = FindJsonStringValue(json, "Id", pos, objectEnd);
-        auto name = FindJsonStringValue(json, "Name", pos, objectEnd);
-        int order = FindJsonNumberValue(json, "Order", static_cast<int>(g_regions.size()), pos, objectEnd);
-        if (!id.empty() && !name.empty())
+        g_layoutPersistenceError = L"Layout SchemaVersion must be a supported integer.";
+        AddDefaultRegion();
+        return;
+    }
+    if (schemaVersion < 1 || schemaVersion > llp::persistence::CurrentSchemaVersion)
+    {
+        g_layoutPersistenceError = L"Unsupported layout schema version " + std::to_wstring(schemaVersion) + L".";
+        AddDefaultRegion();
+        return;
+    }
+    g_layoutMigrated = migratedLegacyFile || schemaVersion < llp::persistence::CurrentSchemaVersion;
+
+    const auto currentIdentity = llp::persistence::NormalizeFolderIdentity(g_settings.launchpadFolder);
+    if (!migratedLegacyFile && schemaVersion >= 2
+        && (!document.contains("FolderIdentity") || !document["FolderIdentity"].is_string()))
+    {
+        g_layoutPersistenceError = L"Schema v2 layout requires a string FolderIdentity.";
+        AddDefaultRegion();
+        return;
+    }
+    if (!migratedLegacyFile && document.contains("FolderIdentity") && document["FolderIdentity"].is_string())
+    {
+        const auto storedIdentity = llp::persistence::Utf8ToWide(document["FolderIdentity"].get<std::string>());
+        if (CompareStringOrdinal(storedIdentity.c_str(), -1, currentIdentity.c_str(), -1, TRUE) != CSTR_EQUAL)
         {
-            g_regions.push_back({ id, name, order });
+            g_layoutPersistenceError = L"Scoped layout folder identity does not match the active launchpad folder.";
+            AddDefaultRegion();
+            return;
         }
-        pos = objectEnd + 1;
+    }
+
+    if (document.contains("ViewMode") && document["ViewMode"].is_string())
+    {
+        const auto viewMode = llp::persistence::Utf8ToWide(document["ViewMode"].get<std::string>());
+        if (!viewMode.empty()) g_layoutViewMode = viewMode;
+    }
+
+    if (document.contains("Regions") && !document["Regions"].is_array())
+    {
+        AppendPersistenceError(g_layoutPersistenceError, L"Layout field Regions must be an array.");
+    }
+    else if (document.contains("Regions"))
+    {
+        for (const auto& regionDocument : document["Regions"])
+        {
+            if (!regionDocument.is_object() || g_regions.size() >= 1000) continue;
+            const auto id = regionDocument.contains("Id") && regionDocument["Id"].is_string()
+                ? llp::persistence::Utf8ToWide(regionDocument["Id"].get<std::string>())
+                : std::wstring{};
+            const auto name = regionDocument.contains("Name") && regionDocument["Name"].is_string()
+                ? llp::persistence::Utf8ToWide(regionDocument["Name"].get<std::string>())
+                : std::wstring{};
+            int order = static_cast<int>(g_regions.size());
+            if (regionDocument.contains("Order") && !TryGetJsonInt(regionDocument["Order"], order))
+            {
+                AppendPersistenceError(g_layoutPersistenceError, L"Layout region Order must be an in-range integer.");
+                order = static_cast<int>(g_regions.size());
+            }
+            if (!id.empty() && !name.empty() && !RegionExists(id)) g_regions.push_back({ id, name, order });
+        }
     }
     AddDefaultRegion();
 
-    pos = 0;
-    while ((pos = json.find("\"SourcePath\"", pos)) != std::string::npos)
+    if (document.contains("Items") && !document["Items"].is_array())
     {
-        const auto objectEnd = json.find('}', pos);
-        if (objectEnd == std::string::npos) break;
-        auto sourcePath = FindJsonStringValue(json, "SourcePath", pos, objectEnd);
-        auto displayName = FindJsonStringValue(json, "DisplayName", pos, objectEnd);
-        auto regionId = FindJsonStringValue(json, "RegionId", pos, objectEnd);
-        int order = FindJsonNumberValue(json, "Order", static_cast<int>(g_items.size()), pos, objectEnd);
-
-        if (!sourcePath.empty() && GetFileAttributesW(sourcePath.c_str()) != INVALID_FILE_ATTRIBUTES)
+        AppendPersistenceError(g_layoutPersistenceError, L"Layout field Items must be an array.");
+    }
+    else if (document.contains("Items"))
+    {
+        for (const auto& itemDocument : document["Items"])
         {
+            if (!itemDocument.is_object() || g_items.size() + g_missingLayoutItems.size() >= 10000) continue;
+            auto sourcePath = itemDocument.contains("SourcePath") && itemDocument["SourcePath"].is_string()
+                ? llp::persistence::Utf8ToWide(itemDocument["SourcePath"].get<std::string>())
+                : std::wstring{};
+            auto displayName = itemDocument.contains("DisplayName") && itemDocument["DisplayName"].is_string()
+                ? llp::persistence::Utf8ToWide(itemDocument["DisplayName"].get<std::string>())
+                : std::wstring{};
+            auto regionId = itemDocument.contains("RegionId") && itemDocument["RegionId"].is_string()
+                ? llp::persistence::Utf8ToWide(itemDocument["RegionId"].get<std::string>())
+                : std::wstring{};
+            int order = static_cast<int>(g_items.size() + g_missingLayoutItems.size());
+            if (itemDocument.contains("Order") && !TryGetJsonInt(itemDocument["Order"], order))
+            {
+                AppendPersistenceError(g_layoutPersistenceError, L"Layout item Order must be an in-range integer.");
+                order = static_cast<int>(g_items.size() + g_missingLayoutItems.size());
+            }
+            if (sourcePath.empty() || !IsDirectChildOfLaunchpadFolder(sourcePath)) continue;
+            const bool duplicateSource = std::any_of(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
+                return SamePath(item.sourcePath, sourcePath);
+            }) || std::any_of(g_missingLayoutItems.begin(), g_missingLayoutItems.end(), [&](const LaunchItem& item) {
+                return SamePath(item.sourcePath, sourcePath);
+            });
+            if (duplicateSource)
+            {
+                AppendPersistenceError(g_layoutPersistenceError, L"Layout contains a duplicate stable source path; the later item was ignored.");
+                continue;
+            }
             if (displayName.empty()) displayName = GetFileStem(sourcePath);
             if (regionId.empty() || !RegionExists(regionId)) regionId = L"uncategorized";
-            g_items.push_back({ sourcePath, displayName, regionId, order, nullptr });
+            LaunchItem item = { sourcePath, displayName, regionId, order, nullptr };
+            if (GetFileAttributesW(sourcePath.c_str()) != INVALID_FILE_ATTRIBUTES) g_items.push_back(std::move(item));
+            else g_missingLayoutItems.push_back(std::move(item));
         }
-        pos = objectEnd + 1;
+    }
+
+    if (g_layoutMigrated)
+    {
+        const bool migratedSaved = SaveLayout();
+        if (migratedLegacyFile && migratedSaved)
+        {
+            const auto legacyPath = GetLegacyLayoutPath();
+            std::wstring archivedPath = legacyPath + L".migrated-v1";
+            if (GetFileAttributesW(archivedPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                archivedPath += L"-" + std::to_wstring(GetTickCount64());
+            }
+            if (!MoveFileExW(legacyPath.c_str(), archivedPath.c_str(), MOVEFILE_WRITE_THROUGH))
+            {
+                g_layoutPersistenceError = L"Scoped layout was saved, but the legacy layout could not be archived.";
+            }
+        }
     }
 }
 
@@ -1156,7 +1248,18 @@ void AddMissingLaunchpadFolderItems()
         });
         if (!exists)
         {
-            g_items.push_back({ path, GetFileStem(path), L"uncategorized", static_cast<int>(g_items.size()), nullptr });
+            auto missing = std::find_if(g_missingLayoutItems.begin(), g_missingLayoutItems.end(), [&](const LaunchItem& item) {
+                return SamePath(item.sourcePath, path);
+            });
+            if (missing != g_missingLayoutItems.end())
+            {
+                g_items.push_back(std::move(*missing));
+                g_missingLayoutItems.erase(missing);
+            }
+            else
+            {
+                g_items.push_back({ path, GetFileStem(path), L"uncategorized", static_cast<int>(g_items.size()), nullptr });
+            }
         }
     } while (FindNextFileW(find, &data));
 
@@ -1246,37 +1349,43 @@ void RenumberItemsByRegion()
 bool SaveLayout()
 {
     RenumberItemsByRegion();
-    std::string json;
-    json += "{\r\n";
-    json += "  \"ViewMode\": \"" + EscapeJson(g_layoutViewMode) + "\",\r\n";
-    json += "  \"Regions\": [\r\n";
+    Json document = {
+        { "SchemaVersion", llp::persistence::CurrentSchemaVersion },
+        { "FolderIdentity", llp::persistence::WideToUtf8(llp::persistence::NormalizeFolderIdentity(g_settings.launchpadFolder)) },
+        { "FolderPath", llp::persistence::WideToUtf8(g_settings.launchpadFolder) },
+        { "ViewMode", llp::persistence::WideToUtf8(g_layoutViewMode) },
+        { "Regions", Json::array() },
+        { "Items", Json::array() }
+    };
     const auto regions = OrderedRegions();
-    for (size_t i = 0; i < regions.size(); ++i)
+    for (const auto& region : regions)
     {
-        const auto& region = regions[i];
-        json += "    {\r\n";
-        json += "      \"Id\": \"" + EscapeJson(region.id) + "\",\r\n";
-        json += "      \"Name\": \"" + EscapeJson(region.name) + "\",\r\n";
-        json += "      \"Order\": " + std::to_string(region.order) + "\r\n";
-        json += "    }";
-        json += i + 1 < regions.size() ? ",\r\n" : "\r\n";
+        document["Regions"].push_back({
+            { "Id", llp::persistence::WideToUtf8(region.id) },
+            { "Name", llp::persistence::WideToUtf8(region.name) },
+            { "Order", region.order }
+        });
     }
-    json += "  ],\r\n";
-    json += "  \"Items\": [\r\n";
-    for (size_t i = 0; i < g_items.size(); ++i)
+    auto appendItem = [&](const LaunchItem& item) {
+        document["Items"].push_back({
+            { "SourcePath", llp::persistence::WideToUtf8(item.sourcePath) },
+            { "DisplayName", llp::persistence::WideToUtf8(item.displayName) },
+            { "RegionId", llp::persistence::WideToUtf8(item.regionId) },
+            { "Order", item.order }
+        });
+    };
+    for (const auto& item : g_items) appendItem(item);
+    for (const auto& item : g_missingLayoutItems)
     {
-        const auto& item = g_items[i];
-        json += "    {\r\n";
-        json += "      \"SourcePath\": \"" + EscapeJson(item.sourcePath) + "\",\r\n";
-        json += "      \"DisplayName\": \"" + EscapeJson(item.displayName) + "\",\r\n";
-        json += "      \"RegionId\": \"" + EscapeJson(item.regionId) + "\",\r\n";
-        json += "      \"Order\": " + std::to_string(item.order) + "\r\n";
-        json += "    }";
-        json += i + 1 < g_items.size() ? ",\r\n" : "\r\n";
+        const bool alreadyVisible = std::any_of(g_items.begin(), g_items.end(), [&](const LaunchItem& visible) {
+            return SamePath(visible.sourcePath, item.sourcePath);
+        });
+        if (!alreadyVisible) appendItem(item);
     }
-    json += "  ]\r\n";
-    json += "}\r\n";
-    return WriteFileUtf8(GetLayoutPath(), json);
+    std::wstring error;
+    const bool saved = llp::persistence::WriteJsonAtomicWithBackup(GetLayoutPath(), document, error);
+    if (!saved) g_layoutPersistenceError = error;
+    return saved;
 }
 
 void MoveItemsToTarget(const std::vector<std::wstring>& sourcePaths, const DropTarget& target)
@@ -2649,6 +2758,64 @@ std::string BuildDiagnosticsJson()
     json += "  \"hotkeyStatus\": \"" + EscapeJson(HotkeyDiagnostics()) + "\"\r\n";
     json += "}\r\n";
     return json;
+}
+
+std::string BuildPersistenceProbeJson(bool settingsSaved, bool layoutSaved)
+{
+    Json document;
+    document["settings"] = {
+        { "schemaVersion", llp::persistence::CurrentSchemaVersion },
+        { "launchpadFolder", llp::persistence::WideToUtf8(g_settings.launchpadFolder) },
+        { "hotkey", llp::persistence::WideToUtf8(g_settings.hotkey) },
+        { "spotlightWidth", g_settings.spotlightWidth },
+        { "migrated", g_settingsMigrated },
+        { "recoveredFromBackup", g_settingsRecoveredFromBackup },
+        { "error", llp::persistence::WideToUtf8(g_settingsPersistenceError) },
+        { "saveSucceeded", settingsSaved }
+    };
+    document["layout"] = {
+        { "schemaVersion", llp::persistence::CurrentSchemaVersion },
+        { "path", llp::persistence::WideToUtf8(GetLayoutPath()) },
+        { "folderIdentity", llp::persistence::WideToUtf8(llp::persistence::NormalizeFolderIdentity(g_settings.launchpadFolder)) },
+        { "migratedLegacy", g_layoutMigrated },
+        { "recoveredFromBackup", g_layoutRecoveredFromBackup },
+        { "quarantinePath", llp::persistence::WideToUtf8(g_layoutQuarantinePath) },
+        { "error", llp::persistence::WideToUtf8(g_layoutPersistenceError) },
+        { "saveSucceeded", layoutSaved },
+        { "regions", Json::array() },
+        { "items", Json::array() },
+        { "missingItems", Json::array() }
+    };
+    for (const auto& region : OrderedRegions())
+    {
+        document["layout"]["regions"].push_back({
+            { "id", llp::persistence::WideToUtf8(region.id) },
+            { "name", llp::persistence::WideToUtf8(region.name) },
+            { "order", region.order }
+        });
+    }
+    auto appendProbeItem = [](Json& target, const LaunchItem& item) {
+        target.push_back({
+            { "sourcePath", llp::persistence::WideToUtf8(item.sourcePath) },
+            { "displayName", llp::persistence::WideToUtf8(item.displayName) },
+            { "regionId", llp::persistence::WideToUtf8(item.regionId) },
+            { "order", item.order }
+        });
+    };
+    for (const auto& item : g_items) appendProbeItem(document["layout"]["items"], item);
+    for (const auto& item : g_missingLayoutItems) appendProbeItem(document["layout"]["missingItems"], item);
+    return document.dump(2) + "\n";
+}
+
+int RunPersistenceProbe(const std::wstring& outputPath, bool resave)
+{
+    LoadSettings();
+    LoadLayout();
+    AddMissingLaunchpadFolderItems();
+    const bool settingsSaved = !resave || SaveSettings(g_settings);
+    const bool layoutSaved = !resave || SaveLayout();
+    const bool probeSaved = WriteFileUtf8(outputPath, BuildPersistenceProbeJson(settingsSaved, layoutSaved));
+    return settingsSaved && layoutSaved && probeSaved ? 0 : 2;
 }
 
 std::wstring BuildDiagnosticsSummary()
@@ -7946,6 +8113,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     if (!diagnosticsFile.empty())
     {
         return WriteFileUtf8(diagnosticsFile, BuildDiagnosticsJson()) ? 0 : 2;
+    }
+    const auto persistenceProbeFile = CommandLineValue(L"--persistence-probe-file");
+    if (!persistenceProbeFile.empty())
+    {
+        return RunPersistenceProbe(persistenceProbeFile, CommandLineHasArgument(L"--persistence-resave"));
     }
     g_diagnosticsUiMode = CommandLineHasArgument(L"--diagnostics-ui");
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
