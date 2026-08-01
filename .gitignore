@@ -12,6 +12,7 @@ TestResults/
 *.user
 *.suo
 *.nupkg
+*.o
 /DESIGN.md
 /LightFrame_MC_*.vui
 /爱丽丝.gif
