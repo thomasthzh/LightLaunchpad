@@ -2,15 +2,61 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 06:42:51 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 07:24:00 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `0bd788d`
+- HEAD: `b092424`
 - Remote main: `origin/main@33e91c2`
-- Active task: `LLP-007 - Native Search Index And Ranking` (`in_progress`)
-- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`
-- Next task after verification: `LLP-008 - Complete Search Text And IME Controller`
-- Goal status: active in Codex; LLP-007 is the only task in progress.
+- Active task: `LLP-008 - Complete Search Text And IME Controller` (`in_progress`)
+- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`
+- Next task after verification: `LLP-009 - Spotlight State Machine And Keyboard Flow`
+- Goal status: active in Codex; LLP-008 is the only task in progress.
+
+## LLP-007 Execution Evidence
+
+Status at 2026-08-02 07:24 +08:00: complete.
+
+Changed files in scope:
+
+- `src/LightLaunchpad.NativeUi/SearchIndex.{h,cpp}` - production normalized index, complete/initial pinyin candidates, deterministic match classes and stable-ID ordering, bounded Damerau-Levenshtein typo matching, usage/favorite history, privacy controls, reset, and strict JSON schema parsing.
+- `src/third_party/pinyin-data/{PinyinData.generated.h,LICENSE.MIT}` and `tools/vendor-pinyin-data.ps1` - pinned MIT `mozillazg/pinyin-data` commit `923b108dc5d45dee061324c011b478fb649f8b73`, fail-closed upstream hashes, 8,105 code points, 2,144 reading sets, generated-header SHA256 `2D81EAEA6138350852AFD738E6DD9AAB5D381F54B3759B7352250A9FC81E28F5`, and adjacent license SHA256 `9C048697BE2502A16E8BCB282D5D465A07295B2DEF0FFB05A269C5D39DBE1586`.
+- `src/LightLaunchpad.NativeUi/Catalog.{h,cpp}` and `ShellBroker.{h,cpp}` - separate alias/subtitle metadata, resolve shortcut/URL metadata on the Shell STA, load immutable history with catalog snapshots, publish persistence identity, and protect malformed/future history as read-only.
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - replaces the 129-character handwritten index with production search results, preserves focus by stable ID, keeps normal path text out of normal ranking, records only successful launches, queues atomic history persistence, preserves history across refresh races, and exposes privacy/history diagnostics.
+- `tools/build-native-ui.ps1` and clean-source fixtures in `tests/LightLaunchpad.NativeUi.Tests/{AppHost,ExecutableIdentity}.Tests.ps1` - compile and package the production search module and pinned data in normal and isolated builds.
+- `tests/LightLaunchpad.NativeUi.Tests/SearchIndex.Tests.{cpp,ps1}` - direct production C++ behavior and performance tests plus dependency-integrity checks.
+- `tests/LightLaunchpad.NativeUi.Tests/CatalogShellBroker.Tests.ps1` - real-EXE future-history non-overwrite probe alongside the existing STA/input/import gates.
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs` - updates the historical regression boundary to the new module; it is not treated as search behavior authority.
+- `docs/ai/{tasks,progress}.md` - records verified completion and activates LLP-008.
+
+TDD and systematic-debugging evidence:
+
+- RED: the initial production test target could not compile because `SearchIndex` did not exist. GREEN added the production C++ module and exercised exact, prefix, word-boundary, contains, alias, full pinyin, initials, typo, duplicate-name determinism, stable focus, history ranking, privacy, reset, and JSON round trip.
+- A first ranking RED used `My Alpha Tool` as a contains fixture even though it is a word-boundary match. The fixture was corrected to `MyAlphaTool`; the implementation retained the PRD order rather than weakening the boundary rule.
+- The old 129-character map was measured against current launch-folder representatives: `个人中心`, `黑神话悟空`, `三角洲行动`, `觅长生`, `网易云音乐`, and `给梨加速器` produced 0/6 complete expected forms. The pinned generated table produces 6/6 complete forms and all six expected initials.
+- RED review probe: a future-schema `search-history.json` was rejected on load but the next save was still queued, risking a downgrade overwrite. GREEN marks unsafe history read-only; the real EXE reports `queued=False` and preserves SHA256 `5D5FD4CC37218C4645A6E7FE72810EAA5C668D38441E15C62CCF35E15256AB6C` byte-for-byte.
+- Review hardening prevents a late catalog refresh from replacing newer in-memory launch history, removes per-entry pinyin-vector copies from the query hot path, caps polyphonic candidate expansion, and records usage only after the Shell broker reports successful launch.
+
+Fresh post-commit verification against `b092424f2844`:
+
+- `tests\LightLaunchpad.NativeUi.Tests\SearchIndex.Tests.ps1` - 7/7 passed; dependency hashes passed, current-name pinyin coverage 6/6, 300-item rebuild 402 microseconds, cached pinyin query P95 90 microseconds over 100 iterations.
+- `tests\LightLaunchpad.NativeUi.Tests\CatalogShellBroker.Tests.ps1` - 3/3 passed; `inputResponseMs=0` during a 1,890 ms refresh, UI thread `43808`, STA broker thread `43164`, generation 2, import counts 1 then 0, skipped reparse points 1, and future search history not queued or changed.
+- `tests\LightLaunchpad.NativeUi.Tests\Persistence.Tests.ps1` - 7/7 passed.
+- `tests\LightLaunchpad.NativeUi.Tests\SettingsTransactions.Tests.ps1` - 3/3 passed.
+- `tests\LightLaunchpad.NativeUi.Tests\AppHost.Tests.ps1` - 4/4 passed; `shellReadyMs=15`, `probeExitMs=391`, `settingsWindowMs=176`, `logBytes=1168`.
+- `tests\LightLaunchpad.NativeUi.Tests\ExecutableIdentity.Tests.ps1` - 5/5 passed.
+- `dotnet run --project tests\LightLaunchpad.Core.Tests\LightLaunchpad.Core.Tests.csproj` - 33/33 passed.
+- `dotnet run --project tests\LightLaunchpad.App.Tests\LightLaunchpad.App.Tests.csproj` - 74/74 passed; historical regression baseline only.
+- Post-commit build/diagnostics - `artifacts\native-ui-llp007-postcommit\LightLaunchpad.NativeUi.exe`, build 21,354 ms, 1,599,488 bytes, SHA256 `85AC30FF2FF79D5F5EB25D746FA453F3628CEC38C13AA8C8151F698C3A1E2312`, diagnostics exit 0 in 262 ms, version `1.11.0-dev+b092424f2844.dirty`, executable/commit/startup identities matched.
+- `git diff --cached --check` passed before the implementation commit; the implementation staged set contained exactly 17 explicit files and excluded both protected paths.
+
+Safety, performance, and evidence limits:
+
+- Protected PID 22560 still runs `artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe` with unchanged SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run remains its exact quoted path, the stable install remains absent, and the `C:\TOOL` EXE remains SHA256 `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`.
+- `LLP_reconstruction/` remains untracked/unstaged and ignored `LightLaunchpad.NativeUi.o` was not adopted. No stable-install, startup, `C:\TOOL`, push, tag, or release mutation occurred.
+- Search uses cached normalized candidates; the 300-item pinyin-query P95 is 0.09 ms at the module boundary, while cached input remained 0 ms during the intentionally slow broker refresh. Full hotkey-to-input and animation budgets remain owned by LLP-009, LLP-014, and LLP-016.
+- Screenshot evidence is not applicable to this nonvisual index/ranking/data-safety task. Release-relevant evidence comes from production C++ and real NativeUi EXE probes; input/IME visuals begin in LLP-008 and material/DPI pixel evidence remains assigned to LLP-012 through LLP-016.
+- Scoped implementation commit: `b092424` (`feat: add native search index and ranking`).
+- Task transition: LLP-007 marked `done`; LLP-008 marked as the sole `in_progress` task.
 
 ## LLP-006 Execution Evidence
 

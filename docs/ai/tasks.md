@@ -114,7 +114,7 @@
 
 ### LLP-007 - Native Search Index And Ranking
 
-- Status: `in_progress`
+- Status: `done`
 - Depends on: LLP-006
 - Purpose: make the shipped C++ search implementation meet the PRD instead of relying on the tested C# Core.
 - Likely files: new `SearchIndex`, production C++ unit-test target, catalog snapshot integration.
@@ -125,13 +125,13 @@
 - Verify:
   - Production C++ tests cover prefix, word boundary, contains, pinyin, initials, typo/fuzzy, duplicate names, stable focus, and ranking history.
   - Current launch folder names achieve materially better pinyin coverage than the hand-written map baseline.
-- Completion notes: Started immediately after LLP-006 post-commit verification. First RED target: establish production C++ ranking tests that expose the current hand-written pinyin coverage and path-dominated matching before replacing the index.
+- Completion notes: Completed in implementation commit `b092424`. NativeUi now ships a production C++ `SearchIndex` with normalized English/Chinese matching, deterministic exact/prefix/boundary/contains/alias/pinyin/metadata/fuzzy ranking, stable IDs/focus, isolated explicit `path:` matching, and local frequency/recency/favorite history with tracking/visibility controls and history reset. A pinned MIT `mozillazg/pinyin-data` snapshot replaces the 129-character hand map; six representative names from the current launch folder improved from 0/6 complete-pinyin coverage to 6/6, with matching initials. History is loaded on the Shell STA, atomically persisted after successful Shell launch, and made read-only if a malformed or future schema cannot be loaded safely. Post-commit production search 7/7, Catalog/Shell 3/3, persistence 7/7, settings 3/3, AppHost 4/4, identity 5/5, Core 33/33, and legacy App 74/74 gates passed. The 300-item cached pinyin-query P95 was 90 microseconds. Verified EXE: 1,599,488 bytes, SHA256 `85AC30FF2FF79D5F5EB25D746FA453F3628CEC38C13AA8C8151F698C3A1E2312`.
 
 ## Milestone C: Apple-First Interaction Model
 
 ### LLP-008 - Complete Search Text And IME Controller
 
-- Status: `pending`
+- Status: `in_progress`
 - Depends on: LLP-007
 - Purpose: make search behave like a real text field while retaining custom visual rendering.
 - Likely files: new `InputController`, `TextBuffer`, IME bridge, clipboard commands, UI Automation provider, Native window message handling.
@@ -144,7 +144,7 @@
   - English and Chinese IME input works at start, middle, and end of text with no duplicate commits.
   - Clipboard, selection, caret navigation, and undoable text edits behave consistently.
   - A UI Automation inspector can discover and operate the search field.
-- Completion notes: Not started.
+- Completion notes: Started immediately after LLP-007 post-commit verification. First RED target: compile a production C++ text-buffer/controller test target that exposes the current append/backspace-only input model before integrating caret, selection, clipboard, IME ownership, and UI Automation.
 
 ### LLP-009 - Spotlight State Machine And Keyboard Flow
 
