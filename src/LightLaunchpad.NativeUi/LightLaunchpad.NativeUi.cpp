@@ -17,6 +17,7 @@
 #include "LightLaunchpad.Version.h"
 #include "Catalog.h"
 #include "Persistence.h"
+#include "SearchIndex.h"
 #include "ShellBroker.h"
 
 #include <algorithm>
@@ -189,6 +190,8 @@ struct Settings
     double wheelSensitivity = 1.0;
     bool startWithWindows = false;
     bool resetSearchOnOpen = true;
+    bool showRecentAndFavorites = true;
+    bool trackLaunchHistory = true;
 };
 
 struct Region
@@ -206,10 +209,9 @@ struct LaunchItem
     int order = 0;
     HICON icon = nullptr;
     uint64_t iconLastUsed = 0;
-    std::wstring displayNameLower;
-    std::wstring searchCandidateText;
-    std::wstring searchCandidateLower;
     std::wstring stableId;
+    std::vector<std::wstring> aliases;
+    std::wstring subtitle;
     bool iconRequestPending = false;
 };
 
@@ -369,7 +371,12 @@ bool g_layoutRecoveredFromBackup = false;
 bool g_layoutMigrated = false;
 std::wstring g_layoutPersistenceError;
 std::wstring g_layoutQuarantinePath;
+std::wstring g_searchHistoryStatus = L"Search history has not loaded yet.";
+bool g_searchHistoryWritable = true;
+bool g_searchHistoryLoaded = false;
 llp::shell::ShellBroker g_shellBroker;
+llp::search::Index g_searchIndex;
+llp::search::History g_searchHistory;
 uint64_t g_catalogGeneration = 0;
 uint64_t g_requestedCatalogGeneration = 0;
 bool g_catalogRefreshPending = false;
@@ -392,6 +399,7 @@ struct CatalogBrokerProbeState
     DWORD brokerThreadId = 0;
     std::wstring apartment;
     bool shutdownPersistenceQueued = false;
+    bool shutdownHistoryPersistenceQueued = false;
 };
 
 struct ShellImportProbeState
@@ -430,8 +438,6 @@ void ReleaseSpotlightLayerBuffer();
 void ReleaseSpotlightBackdrop();
 bool CaptureSpotlightBackdrop(const RECT& windowRect);
 ID2D1Bitmap* GetSpotlightBackdropD2dBitmap(ID2D1DCRenderTarget* target);
-std::wstring BuildPinyinSearchText(const std::wstring& text);
-void UpdateSearchIndex(LaunchItem& item);
 void RebuildSearchIndex();
 void DrawSearchSurface(HDC dc, const RECT& client);
 void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client);
@@ -773,6 +779,12 @@ std::wstring GetSettingsPath()
     return dataPath.empty() ? L"" : JoinPath(dataPath, L"settings.json");
 }
 
+std::wstring GetSearchHistoryPath()
+{
+    const auto dataPath = GetLightLaunchpadDataPath();
+    return dataPath.empty() ? L"" : JoinPath(dataPath, L"search-history.json");
+}
+
 bool EnsureParentDirectory(const std::wstring& path)
 {
     if (path.empty()) return false;
@@ -902,7 +914,10 @@ void LoadSettings()
     loaded.wheelSensitivity = NormalizeWheelSensitivity(readDouble("WheelSensitivity", loaded.wheelSensitivity));
     loaded.startWithWindows = readBool("StartWithWindows", loaded.startWithWindows);
     loaded.resetSearchOnOpen = readBool("ResetSearchOnOpen", loaded.resetSearchOnOpen);
+    loaded.showRecentAndFavorites = readBool("ShowRecentAndFavorites", loaded.showRecentAndFavorites);
+    loaded.trackLaunchHistory = readBool("TrackLaunchHistory", loaded.trackLaunchHistory);
     g_settings = loaded;
+    g_searchHistory.SetTrackingEnabled(g_settings.trackLaunchHistory);
 }
 
 std::wstring IconSizeName()
@@ -929,7 +944,9 @@ bool SaveSettings(const Settings& settings)
         { "SpotlightHeight", settings.spotlightHeight },
         { "AppSpacing", settings.appSpacing },
         { "WheelSensitivity", settings.wheelSensitivity },
-        { "ResetSearchOnOpen", settings.resetSearchOnOpen }
+        { "ResetSearchOnOpen", settings.resetSearchOnOpen },
+        { "ShowRecentAndFavorites", settings.showRecentAndFavorites },
+        { "TrackLaunchHistory", settings.trackLaunchHistory }
     };
     std::wstring error;
     const bool saved = llp::persistence::WriteJsonAtomicWithBackup(GetSettingsPath(), document, error);
@@ -1198,6 +1215,36 @@ bool SaveLayout()
     const bool saved = llp::persistence::WriteJsonAtomicWithBackup(GetLayoutPath(), document, error);
     if (!saved) g_layoutPersistenceError = error;
     return saved;
+}
+
+bool SaveSearchHistory()
+{
+    if (!g_searchHistoryWritable)
+    {
+        g_searchHistoryStatus = L"Search history is read-only because its file could not be loaded safely; the existing file was preserved.";
+        return false;
+    }
+    if (!g_shellBroker.IsRunning())
+    {
+        g_searchHistoryStatus = L"Shell broker is not running; search history was not queued.";
+        return false;
+    }
+    const auto requestId = g_shellBroker.RequestPersistJson(GetSearchHistoryPath(), g_searchHistory.SerializeUtf8());
+    g_searchHistoryStatus = requestId != 0
+        ? L"Search history save queued on Shell STA."
+        : L"Search history save queue failed.";
+    return requestId != 0;
+}
+
+uint64_t CurrentUnixMilliseconds()
+{
+    FILETIME fileTime = {};
+    GetSystemTimeAsFileTime(&fileTime);
+    ULARGE_INTEGER ticks = {};
+    ticks.LowPart = fileTime.dwLowDateTime;
+    ticks.HighPart = fileTime.dwHighDateTime;
+    constexpr uint64_t WindowsToUnixEpochTicks = 116444736000000000ULL;
+    return ticks.QuadPart <= WindowsToUnixEpochTicks ? 0 : (ticks.QuadPart - WindowsToUnixEpochTicks) / 10000ULL;
 }
 
 void MoveItemsToTarget(const std::vector<std::wstring>& sourcePaths, const DropTarget& target)
@@ -1476,7 +1523,7 @@ void RenameItem(const std::wstring& sourcePath)
     if (name.empty()) return;
 
     found->displayName = name;
-    UpdateSearchIndex(*found);
+    RebuildSearchIndex();
     ClearSearchCompletion();
     SaveLayout();
     RebuildFiltered();
@@ -1718,10 +1765,15 @@ LaunchItem LaunchItemFromCatalog(const llp::catalog::Item& source)
 {
     LaunchItem item = { source.sourcePath, source.displayName, source.regionId, source.order, nullptr };
     item.stableId = source.stableId;
+    item.aliases = source.aliases;
+    item.subtitle = source.subtitle;
     return item;
 }
 
-void ApplyCatalogSnapshot(const llp::catalog::Snapshot& snapshot)
+void ApplyCatalogSnapshot(
+    const llp::catalog::Snapshot& snapshot,
+    const llp::search::History* history = nullptr,
+    bool historyWritable = true)
 {
     if (snapshot.generation < g_requestedCatalogGeneration) return;
     std::wstring focusedStableId;
@@ -1772,6 +1824,18 @@ void ApplyCatalogSnapshot(const llp::catalog::Snapshot& snapshot)
     g_catalogGeneration = snapshot.generation;
     g_catalogFolderIdentity = snapshot.folderIdentity;
     g_catalogRefreshPending = false;
+    if (history && !g_searchHistoryLoaded)
+    {
+        g_searchHistory = *history;
+        g_searchHistoryWritable = historyWritable;
+        g_searchHistoryLoaded = true;
+        g_searchHistoryStatus = snapshot.error.empty()
+            ? L"Local usage history loaded with catalog snapshot."
+            : (historyWritable
+                ? L"History loaded with catalog diagnostics; see Catalog status."
+                : L"Search history is read-only; its existing file was preserved.");
+    }
+    g_searchHistory.SetTrackingEnabled(g_settings.trackLaunchHistory);
     g_catalogStatus = snapshot.error.empty()
         ? L"Catalog snapshot published in " + std::to_wstring(snapshot.loadMilliseconds) + L" ms."
         : L"Catalog snapshot published with diagnostics: " + snapshot.error;
@@ -1852,441 +1916,71 @@ void QueueItemIcon(LaunchItem& item)
     item.iconRequestPending = g_shellBroker.RequestIcon(item.stableId, item.sourcePath, g_settings.iconSize) != 0;
 }
 
-bool IsCjkCharacter(wchar_t ch)
-{
-    return (ch >= 0x4E00 && ch <= 0x9FFF)
-        || (ch >= 0x3400 && ch <= 0x4DBF);
-}
-
-std::wstring KnownPinyinForChar(wchar_t ch)
-{
-    switch (ch)
-    {
-    case L'爱': return L"ai";
-    case L'百': return L"bai";
-    case L'宝': return L"bao";
-    case L'编': return L"bian";
-    case L'哔': return L"bi";
-    case L'便': return L"bian";
-    case L'表': return L"biao";
-    case L'博': return L"bo";
-    case L'播': return L"bo";
-    case L'财': return L"cai";
-    case L'程': return L"cheng";
-    case L'词': return L"ci";
-    case L'达': return L"da";
-    case L'大': return L"da";
-    case L'店': return L"dian";
-    case L'东': return L"dong";
-    case L'抖': return L"dou";
-    case L'钉': return L"ding";
-    case L'度': return L"du";
-    case L'多': return L"duo";
-    case L'飞': return L"fei";
-    case L'付': return L"fu";
-    case L'蜂': return L"feng";
-    case L'狗': return L"gou";
-    case L'管': return L"guan";
-    case L'光': return L"guang";
-    case L'广': return L"guang";
-    case L'果': return L"guo";
-    case L'盒': return L"he";
-    case L'红': return L"hong";
-    case L'狐': return L"hu";
-    case L'乎': return L"hu";
-    case L'虎': return L"hu";
-    case L'花': return L"hua";
-    case L'画': return L"hua";
-    case L'会': return L"hui";
-    case L'火': return L"huo";
-    case L'机': return L"ji";
-    case L'辑': return L"ji";
-    case L'家': return L"jia";
-    case L'加': return L"jia";
-    case L'剪': return L"jian";
-    case L'记': return L"ji";
-    case L'件': return L"jian";
-    case L'金': return L"jin";
-    case L'京': return L"jing";
-    case L'快': return L"kuai";
-    case L'酷': return L"ku";
-    case L'克': return L"ke";
-    case L'夸': return L"kua";
-    case L'控': return L"kong";
-    case L'览': return L"lan";
-    case L'狸': return L"li";
-    case L'哩': return L"li";
-    case L'理': return L"li";
-    case L'雷': return L"lei";
-    case L'乐': return L"le";
-    case L'联': return L"lian";
-    case L'聊': return L"liao";
-    case L'流': return L"liu";
-    case L'龙': return L"long";
-    case L'猫': return L"mao";
-    case L'美': return L"mei";
-    case L'梦': return L"meng";
-    case L'米': return L"mi";
-    case L'密': return L"mi";
-    case L'民': return L"min";
-    case L'墨': return L"mo";
-    case L'目': return L"mu";
-    case L'脑': return L"nao";
-    case L'能': return L"neng";
-    case L'盘': return L"pan";
-    case L'片': return L"pian";
-    case L'频': return L"pin";
-    case L'拼': return L"pin";
-    case L'屏': return L"ping";
-    case L'企': return L"qi";
-    case L'奇': return L"qi";
-    case L'器': return L"qi";
-    case L'签': return L"qian";
-    case L'全': return L"quan";
-    case L'软': return L"ruan";
-    case L'绒': return L"rong";
-    case L'森': return L"sen";
-    case L'商': return L"shang";
-    case L'书': return L"shu";
-    case L'输': return L"shu";
-    case L'搜': return L"sou";
-    case L'速': return L"su";
-    case L'台': return L"tai";
-    case L'淘': return L"tao";
-    case L'腾': return L"teng";
-    case L'天': return L"tian";
-    case L'条': return L"tiao";
-    case L'图': return L"tu";
-    case L'团': return L"tuan";
-    case L'网': return L"wang";
-    case L'微': return L"wei";
-    case L'文': return L"wen";
-    case L'无': return L"wu";
-    case L'息': return L"xi";
-    case L'侠': return L"xia";
-    case L'下': return L"xia";
-    case L'小': return L"xiao";
-    case L'星': return L"xing";
-    case L'型': return L"xing";
-    case L'信': return L"xin";
-    case L'行': return L"xing";
-    case L'讯': return L"xun";
-    case L'迅': return L"xun";
-    case L'牙': return L"ya";
-    case L'压': return L"ya";
-    case L'音': return L"yin";
-    case L'影': return L"ying";
-    case L'易': return L"yi";
-    case L'艺': return L"yi";
-    case L'银': return L"yin";
-    case L'有': return L"you";
-    case L'游': return L"you";
-    case L'鱼': return L"yu";
-    case L'语': return L"yu";
-    case L'云': return L"yun";
-    case L'业': return L"ye";
-    case L'支': return L"zhi";
-    case L'知': return L"zhi";
-    case L'中': return L"zhong";
-    case L'助': return L"zhu";
-    case L'桌': return L"zhuo";
-    case L'字': return L"zi";
-    default: return {};
-    }
-}
-
-wchar_t GbkPinyinInitial(wchar_t ch)
-{
-    char bytes[2] = {};
-    const int count = WideCharToMultiByte(936, 0, &ch, 1, bytes, 2, nullptr, nullptr);
-    if (count != 2) return 0;
-
-    const int high = static_cast<unsigned char>(bytes[0]);
-    const int low = static_cast<unsigned char>(bytes[1]);
-    const int code = (high - 160) * 100 + (low - 160);
-    static const int ranges[] = {
-        1601, 1637, 1833, 2078, 2274, 2302, 2433, 2594, 2787, 3106, 3212, 3472,
-        3635, 3722, 3730, 3858, 4027, 4086, 4390, 4558, 4684, 4925, 5249, 5590
-    };
-    static const wchar_t letters[] = L"ABCDEFGHJKLMNOPQRSTWXYZ";
-    for (int i = 0; i < ARRAYSIZE(ranges) - 1; ++i)
-    {
-        if (code >= ranges[i] && code < ranges[i + 1])
-        {
-            return static_cast<wchar_t>(std::towlower(letters[i]));
-        }
-    }
-
-    return 0;
-}
-
-std::wstring BuildPinyinSearchText(const std::wstring& text)
-{
-    std::wstring full;
-    std::wstring initials;
-    for (wchar_t ch : text)
-    {
-        if (!IsCjkCharacter(ch)) continue;
-
-        const std::wstring known = KnownPinyinForChar(ch);
-        if (!known.empty())
-        {
-            full += known;
-            initials.push_back(known.front());
-            continue;
-        }
-
-        const wchar_t initial = GbkPinyinInitial(ch);
-        if (initial)
-        {
-            full.push_back(initial);
-            initials.push_back(initial);
-        }
-    }
-
-    if (full.empty() && initials.empty()) return {};
-    return full + L" " + initials;
-}
-
-std::wstring BuildSearchCandidateText(const LaunchItem& item)
-{
-    const std::wstring displayPinyin = BuildPinyinSearchText(item.displayName);
-    const std::wstring stemPinyin = BuildPinyinSearchText(GetFileStem(item.sourcePath));
-    return item.displayName
-        + L" " + GetFileStem(item.sourcePath)
-        + L" " + displayPinyin
-        + L" " + stemPinyin
-        + L" " + item.sourcePath;
-}
-
-void UpdateSearchIndex(LaunchItem& item)
-{
-    item.displayNameLower = ToLower(item.displayName);
-    item.searchCandidateText = BuildSearchCandidateText(item);
-    item.searchCandidateLower = ToLower(item.searchCandidateText);
-}
-
 void RebuildSearchIndex()
 {
-    for (auto& item : g_items)
+    std::vector<llp::search::Item> items;
+    items.reserve(g_items.size());
+    for (const auto& item : g_items)
     {
-        UpdateSearchIndex(item);
+        llp::search::Item indexed;
+        indexed.stableId = item.stableId;
+        indexed.displayName = item.displayName;
+        indexed.aliases = item.aliases;
+        indexed.subtitle = item.subtitle;
+        indexed.sourcePath = item.sourcePath;
+        items.push_back(std::move(indexed));
     }
-}
-
-std::vector<std::wstring> SearchTokens(const std::wstring& query)
-{
-    std::vector<std::wstring> tokens;
-    std::wstring current;
-    for (wchar_t ch : Trim(query))
-    {
-        if (std::iswspace(ch))
-        {
-            if (!current.empty())
-            {
-                tokens.push_back(current);
-                current.clear();
-            }
-        }
-        else
-        {
-            current.push_back(ch);
-        }
-    }
-    if (!current.empty())
-    {
-        tokens.push_back(current);
-    }
-    return tokens;
-}
-
-int BoundaryMatchIndex(const std::wstring& text, const std::wstring& token)
-{
-    if (token.empty()) return 0;
-    const auto lowerText = ToLower(text);
-    const auto lowerToken = ToLower(token);
-    size_t position = lowerText.find(lowerToken);
-    while (position != std::wstring::npos)
-    {
-        if (position == 0)
-        {
-            return 0;
-        }
-        const wchar_t previous = lowerText[position - 1];
-        if (std::iswspace(previous) || previous == L'-' || previous == L'_' || previous == L'.' || previous == L'\\' || previous == L'/')
-        {
-            return static_cast<int>(position);
-        }
-        position = lowerText.find(lowerToken, position + 1);
-    }
-    return -1;
-}
-
-int BoundaryMatchIndexLower(const std::wstring& lowerText, const std::wstring& lowerToken)
-{
-    if (lowerToken.empty()) return 0;
-    size_t position = lowerText.find(lowerToken);
-    while (position != std::wstring::npos)
-    {
-        if (position == 0)
-        {
-            return 0;
-        }
-        const wchar_t previous = lowerText[position - 1];
-        if (std::iswspace(previous) || previous == L'-' || previous == L'_' || previous == L'.' || previous == L'\\' || previous == L'/')
-        {
-            return static_cast<int>(position);
-        }
-        position = lowerText.find(lowerToken, position + 1);
-    }
-    return -1;
-}
-
-int FuzzyMatchScore(const std::wstring& text, const std::wstring& token)
-{
-    if (token.empty()) return 0;
-    const auto lowerText = ToLower(text);
-    const auto lowerToken = ToLower(token);
-    int score = 0;
-    int lastMatched = -1;
-    size_t searchFrom = 0;
-    for (wchar_t ch : lowerToken)
-    {
-        const size_t found = lowerText.find(ch, searchFrom);
-        if (found == std::wstring::npos)
-        {
-            return 1000000;
-        }
-        if (lastMatched >= 0)
-        {
-            score += static_cast<int>(found) - lastMatched - 1;
-        }
-        else
-        {
-            score += static_cast<int>(found);
-        }
-        lastMatched = static_cast<int>(found);
-        searchFrom = found + 1;
-    }
-    return score + static_cast<int>(lowerText.size() - lowerToken.size());
-}
-
-int FuzzyMatchScoreLower(const std::wstring& lowerText, const std::wstring& lowerToken)
-{
-    if (lowerToken.empty()) return 0;
-    int score = 0;
-    int lastMatched = -1;
-    size_t searchFrom = 0;
-    for (wchar_t ch : lowerToken)
-    {
-        const size_t found = lowerText.find(ch, searchFrom);
-        if (found == std::wstring::npos)
-        {
-            return 1000000;
-        }
-        if (lastMatched >= 0)
-        {
-            score += static_cast<int>(found) - lastMatched - 1;
-        }
-        else
-        {
-            score += static_cast<int>(found);
-        }
-        lastMatched = static_cast<int>(found);
-        searchFrom = found + 1;
-    }
-    return score + static_cast<int>(lowerText.size() - lowerToken.size());
-}
-
-int SearchScore(const LaunchItem& item, const std::wstring& query)
-{
-    const auto tokens = SearchTokens(query);
-    if (tokens.empty()) return 0;
-
-    const auto& display = item.displayNameLower;
-    const auto& candidate = item.searchCandidateLower;
-    int total = 0;
-    for (const auto& rawToken : tokens)
-    {
-        const auto token = ToLower(rawToken);
-        int tokenScore = 1000000;
-        if (display == token)
-        {
-            tokenScore = 0;
-        }
-        else if (display.rfind(token, 0) == 0)
-        {
-            tokenScore = 5 + static_cast<int>(display.size() - token.size());
-        }
-        else
-        {
-            const int boundary = BoundaryMatchIndexLower(display, token);
-            if (boundary >= 0)
-            {
-                tokenScore = 20 + boundary;
-            }
-            else
-            {
-                const size_t displayContains = display.find(token);
-                const size_t candidateContains = candidate.find(token);
-                if (displayContains != std::wstring::npos)
-                {
-                    tokenScore = 45 + static_cast<int>(displayContains);
-                }
-                else if (candidateContains != std::wstring::npos)
-                {
-                    tokenScore = 80 + static_cast<int>(candidateContains);
-                }
-                else
-                {
-                    const int displayFuzzy = FuzzyMatchScoreLower(display, token);
-                    const int candidateFuzzy = FuzzyMatchScoreLower(candidate, token);
-                    tokenScore = std::min(120 + displayFuzzy, 220 + candidateFuzzy);
-                }
-            }
-        }
-
-        if (tokenScore >= 1000000)
-        {
-            return 1000000;
-        }
-        total += tokenScore;
-    }
-
-    return total;
+    g_searchHistory.SetTrackingEnabled(g_settings.trackLaunchHistory);
+    g_searchIndex.Rebuild(items, g_searchHistory);
 }
 
 void RebuildFiltered()
 {
+    std::wstring focusedStableId;
+    if (g_selectedFilteredIndex >= 0 && g_selectedFilteredIndex < static_cast<int>(g_filtered.size()))
+    {
+        const int itemIndex = g_filtered[g_selectedFilteredIndex];
+        if (itemIndex >= 0 && itemIndex < static_cast<int>(g_items.size())) focusedStableId = g_items[itemIndex].stableId;
+    }
     g_filtered.clear();
     g_filtered.reserve(g_items.size());
     g_filterScores.assign(g_items.size(), 0);
-    for (int i = 0; i < static_cast<int>(g_items.size()); ++i)
+    if (g_searchText.empty() && !IsSpotlightMode())
     {
-        const int score = g_searchText.empty() ? 0 : SearchScore(g_items[i], g_searchText);
-        if (g_searchText.empty() || score < 1000000)
+        for (int itemIndex = 0; itemIndex < static_cast<int>(g_items.size()); ++itemIndex) g_filtered.push_back(itemIndex);
+    }
+    else
+    {
+        llp::search::QueryOptions options;
+        options.spotlight = IsSpotlightMode();
+        options.showRecentAndFavorites = g_settings.showRecentAndFavorites;
+        options.emptyLimit = 10;
+        const auto results = g_searchIndex.Query(g_searchText, options);
+        for (const auto& result : results)
         {
-            g_filterScores[i] = score;
-            g_filtered.push_back(i);
+            auto found = std::find_if(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
+                return item.stableId == result.stableId;
+            });
+            if (found == g_items.end()) continue;
+            const int itemIndex = static_cast<int>(found - g_items.begin());
+            g_filterScores[itemIndex] = result.score;
+            g_filtered.push_back(itemIndex);
         }
     }
-    if (!g_searchText.empty())
+
+    g_selectedFilteredIndex = -1;
+    if (!focusedStableId.empty())
     {
-        std::stable_sort(g_filtered.begin(), g_filtered.end(), [&](int left, int right) {
-            const int leftScore = g_filterScores[left];
-            const int rightScore = g_filterScores[right];
-            if (leftScore != rightScore) return leftScore < rightScore;
-            return CompareStringOrdinal(g_items[left].displayName.c_str(), -1, g_items[right].displayName.c_str(), -1, TRUE) == CSTR_LESS_THAN;
-        });
+        for (int filteredIndex = 0; filteredIndex < static_cast<int>(g_filtered.size()); ++filteredIndex)
+        {
+            if (g_items[g_filtered[filteredIndex]].stableId == focusedStableId)
+            {
+                g_selectedFilteredIndex = filteredIndex;
+                break;
+            }
+        }
     }
-    if (g_selectedFilteredIndex >= static_cast<int>(g_filtered.size()))
-    {
-        g_selectedFilteredIndex = static_cast<int>(g_filtered.size()) - 1;
-    }
-    if (g_selectedFilteredIndex < 0 && !g_filtered.empty())
-    {
-        g_selectedFilteredIndex = 0;
-    }
+    if (g_selectedFilteredIndex < 0 && !g_filtered.empty()) g_selectedFilteredIndex = 0;
 }
 
 HICON LoadEmbeddedAppIcon(int width = 0, int height = 0)
@@ -2543,6 +2237,9 @@ std::wstring BuildDiagnosticsSummary()
     summary += L"Settings status: " + g_settingsStatus + L"\r\n";
     summary += L"Catalog: " + g_catalogStatus + L"\r\n";
     summary += L"Catalog generation: " + std::to_wstring(g_catalogGeneration) + L"\r\n";
+    summary += L"Recent/favorites visible: " + std::wstring(g_settings.showRecentAndFavorites ? L"yes" : L"no") + L"\r\n";
+    summary += L"Launch history tracking: " + std::wstring(g_settings.trackLaunchHistory ? L"enabled" : L"disabled") + L"\r\n";
+    summary += L"Search history: " + g_searchHistoryStatus + L"\r\n";
     summary += L"Shell broker thread: " + (g_catalogBrokerThreadId == 0 ? L"not published" : std::to_wstring(g_catalogBrokerThreadId));
     return summary;
 }
@@ -2620,7 +2317,8 @@ std::string BuildCatalogBrokerProbeJson()
         { "inputResponseMs", g_catalogBrokerProbe.inputResponseMilliseconds },
         { "refreshMs", g_catalogBrokerProbe.refreshMilliseconds },
         { "catalogGeneration", g_catalogGeneration },
-        { "shutdownPersistenceQueued", g_catalogBrokerProbe.shutdownPersistenceQueued }
+        { "shutdownPersistenceQueued", g_catalogBrokerProbe.shutdownPersistenceQueued },
+        { "shutdownHistoryPersistenceQueued", g_catalogBrokerProbe.shutdownHistoryPersistenceQueued }
     };
     return document.dump(2) + "\n";
 }
@@ -2652,7 +2350,7 @@ void HandleShellBrokerResult(LPARAM lParam)
             if (g_catalogBrokerProbe.stage == 0)
             {
                 if (!result->snapshot) break;
-                ApplyCatalogSnapshot(*result->snapshot);
+                ApplyCatalogSnapshot(*result->snapshot, result->history.get(), result->historyWritable);
                 g_catalogBrokerProbe.cachedItemCountBeforeRefresh = g_items.size();
                 if (!g_items.empty()) g_catalogBrokerProbe.cachedStableIdBeforeRefresh = g_items.front().stableId;
                 g_catalogBrokerProbe.stage = 1;
@@ -2662,9 +2360,10 @@ void HandleShellBrokerResult(LPARAM lParam)
             {
                 g_catalogBrokerProbe.refreshMilliseconds = result->elapsedMilliseconds;
                 if (!result->snapshot) break;
-                ApplyCatalogSnapshot(*result->snapshot);
+                ApplyCatalogSnapshot(*result->snapshot, result->history.get(), result->historyWritable);
                 if (!g_items.empty()) g_items.front().displayName = L"Shutdown Flush Sentinel";
                 g_catalogBrokerProbe.shutdownPersistenceQueued = SaveLayout();
+                g_catalogBrokerProbe.shutdownHistoryPersistenceQueued = SaveSearchHistory();
                 const bool saved = WriteFileUtf8(g_catalogBrokerProbe.outputPath, BuildCatalogBrokerProbeJson());
                 g_catalogBrokerProbe.active = false;
                 DestroyWindow(g_hwnd);
@@ -2673,7 +2372,7 @@ void HandleShellBrokerResult(LPARAM lParam)
         }
         else
         {
-            if (result->snapshot) ApplyCatalogSnapshot(*result->snapshot);
+            if (result->snapshot) ApplyCatalogSnapshot(*result->snapshot, result->history.get(), result->historyWritable);
         }
         break;
     case llp::shell::ResultKind::Icon:
@@ -2751,6 +2450,18 @@ void HandleShellBrokerResult(LPARAM lParam)
         }
         break;
     case llp::shell::ResultKind::Launch:
+        if (result->succeeded && !result->stableId.empty() && g_settings.trackLaunchHistory)
+        {
+            g_searchHistory.RecordLaunch(result->stableId, CurrentUnixMilliseconds());
+            RebuildSearchIndex();
+            RebuildFiltered();
+            SaveSearchHistory();
+        }
+        if (!result->succeeded && !result->error.empty())
+        {
+            MessageBoxW(g_hwnd, result->error.c_str(), L"LightLaunchpad Shell operation", MB_ICONWARNING | MB_OK);
+        }
+        break;
     case llp::shell::ResultKind::OpenFolder:
     case llp::shell::ResultKind::OpenLocation:
         if (!result->succeeded && !result->error.empty())
@@ -2759,6 +2470,15 @@ void HandleShellBrokerResult(LPARAM lParam)
         }
         break;
     case llp::shell::ResultKind::Persistence:
+        if (CompareStringOrdinal(result->persistencePath.c_str(), -1, GetSearchHistoryPath().c_str(), -1, TRUE) == CSTR_EQUAL)
+        {
+            g_searchHistoryStatus = result->succeeded ? L"Search history saved atomically." : result->error;
+            if (!result->succeeded)
+            {
+                MessageBoxW(g_hwnd, result->error.c_str(), L"LightLaunchpad search history", MB_ICONWARNING | MB_OK);
+            }
+            break;
+        }
         if (result->succeeded)
         {
             g_layoutPersistenceError.clear();

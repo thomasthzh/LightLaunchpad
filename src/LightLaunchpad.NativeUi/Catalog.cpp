@@ -210,7 +210,12 @@ void ReadMetadata(const Json& document, Snapshot& snapshot, bool migratedLegacy)
         }
         if (displayName.empty()) displayName = FileStem(sourcePath);
         if (regionId.empty() || !RegionExists(snapshot, regionId)) regionId = L"uncategorized";
-        Item item{ stableId, sourcePath, displayName, regionId, order };
+        Item item;
+        item.stableId = stableId;
+        item.sourcePath = sourcePath;
+        item.displayName = displayName;
+        item.regionId = regionId;
+        item.order = order;
         if (FileExists(sourcePath)) snapshot.items.push_back(std::move(item));
         else snapshot.missingItems.push_back(std::move(item));
     }
@@ -238,7 +243,13 @@ void ScanFolder(Snapshot& snapshot)
         if (!IsLaunchablePath(path)) continue;
         const auto stableId = StableItemId(path);
         if (ContainsStableId(snapshot, stableId)) continue;
-        snapshot.items.push_back({ stableId, path, FileStem(path), L"uncategorized", static_cast<int>(snapshot.items.size()) });
+        Item item;
+        item.stableId = stableId;
+        item.sourcePath = path;
+        item.displayName = FileStem(path);
+        item.regionId = L"uncategorized";
+        item.order = static_cast<int>(snapshot.items.size());
+        snapshot.items.push_back(std::move(item));
     } while (FindNextFileW(find, &data));
     FindClose(find);
 }

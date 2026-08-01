@@ -16,6 +16,7 @@ $llpReparseTarget = Join-Path $llpTempRoot 'ReparseTarget'
 $llpImportJunction = Join-Path $llpImportRoot 'LinkedApps'
 $llpCatalogProbePath = Join-Path $llpTempRoot 'catalog-probe.json'
 $llpImportProbePath = Join-Path $llpTempRoot 'import-probe.json'
+$llpSearchHistoryPath = Join-Path $llpDataDirectory 'search-history.json'
 $llpProcesses = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
 
 function Assert-Equal {
@@ -96,6 +97,9 @@ try {
 }
 "@
     [System.IO.File]::WriteAllText((Join-Path $llpDataDirectory 'layout.json'), $llpLegacyLayout, [System.Text.UTF8Encoding]::new($false))
+    $llpFutureSearchHistory = '{"SchemaVersion":99,"Items":[{"StableId":"future-item","LaunchCount":42,"LastLaunchedUnixMilliseconds":9000,"Favorite":true}]}'
+    [System.IO.File]::WriteAllText($llpSearchHistoryPath, $llpFutureSearchHistory, [System.Text.UTF8Encoding]::new($false))
+    $llpFutureSearchHistoryHash = (Get-FileHash -LiteralPath $llpSearchHistoryPath -Algorithm SHA256).Hash
 
     & (Join-Path $llpRepoRoot 'tools\build-native-ui.ps1') `
         -OutputDirectory $llpOutputDirectory `
@@ -123,11 +127,14 @@ try {
     Assert-True ([int]$llpCatalogProbe.refreshMs -ge 1100) 'Slow refresh fixture did not exercise the asynchronous path.'
     Assert-True ([int]$llpCatalogProbe.catalogGeneration -ge 2) 'Refreshed immutable snapshot was not published.'
     Assert-Equal $true ([bool]$llpCatalogProbe.shutdownPersistenceQueued) 'Shutdown persistence fixture was not queued.'
+    Assert-Equal $false ([bool]$llpCatalogProbe.shutdownHistoryPersistenceQueued) 'Unsupported future search history was queued for an unsafe downgrade overwrite.'
+    Assert-Equal $llpFutureSearchHistoryHash (Get-FileHash -LiteralPath $llpSearchHistoryPath -Algorithm SHA256).Hash 'Unsupported future search history was modified.'
     $llpScopedLayouts = @(Get-ChildItem -LiteralPath (Join-Path $llpDataDirectory 'layouts') -Filter '*.json' -File)
     Assert-Equal 1 $llpScopedLayouts.Count 'Catalog probe did not produce exactly one scoped layout.'
     $llpShutdownLayout = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpScopedLayouts[0].FullName | ConvertFrom-Json
     Assert-Equal 'Shutdown Flush Sentinel' ([string]@($llpShutdownLayout.Items)[0].DisplayName) 'Queued layout persistence was lost during broker shutdown.'
     Write-Output "METRIC CatalogBroker inputResponseMs=$([int]$llpCatalogProbe.inputResponseMs) refreshMs=$([int]$llpCatalogProbe.refreshMs) uiThreadId=$([int64]$llpCatalogProbe.uiThreadId) brokerThreadId=$([int64]$llpCatalogProbe.brokerThreadId) generation=$([int]$llpCatalogProbe.catalogGeneration)"
+    Write-Output "METRIC SearchHistoryFutureSchema queued=$([bool]$llpCatalogProbe.shutdownHistoryPersistenceQueued) preservedSha256=$llpFutureSearchHistoryHash"
     Write-Output 'PASS CatalogBroker_CachedSnapshotAndInputRemainAvailableDuringSlowRefresh'
 
     $llpSampleExecutable = Join-Path $llpImportRoot 'SampleApp.exe'

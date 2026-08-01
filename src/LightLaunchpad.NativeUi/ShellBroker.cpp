@@ -182,6 +182,66 @@ bool ContainsIdentity(const std::vector<std::wstring>& identities, const std::ws
     });
 }
 
+void AddAlias(catalog::Item& item, const std::wstring& alias)
+{
+    if (alias.empty() || CompareStringOrdinal(alias.c_str(), -1, item.displayName.c_str(), -1, TRUE) == CSTR_EQUAL) return;
+    const bool present = std::any_of(item.aliases.begin(), item.aliases.end(), [&](const std::wstring& value) {
+        return CompareStringOrdinal(value.c_str(), -1, alias.c_str(), -1, TRUE) == CSTR_EQUAL;
+    });
+    if (!present) item.aliases.push_back(alias);
+}
+
+void EnrichCatalogItem(catalog::Item& item)
+{
+    AddAlias(item, FileStem(item.sourcePath));
+    if (EndsWithIgnoreCase(item.sourcePath, L".lnk"))
+    {
+        std::wstring target;
+        if (ResolveShortcutTarget(item.sourcePath, target))
+        {
+            item.subtitle = FileStem(target);
+            AddAlias(item, item.subtitle);
+        }
+    }
+    else if (EndsWithIgnoreCase(item.sourcePath, L".url"))
+    {
+        wchar_t url[32768] = L"";
+        GetPrivateProfileStringW(L"InternetShortcut", L"URL", L"", url, ARRAYSIZE(url), item.sourcePath.c_str());
+        if (url[0] != L'\0') item.subtitle = url;
+    }
+}
+
+search::History LoadSearchHistory(const std::wstring& dataDirectory, std::wstring& error, bool& writable)
+{
+    error.clear();
+    writable = true;
+    if (dataDirectory.empty())
+    {
+        writable = false;
+        error = L"Search history data directory is unavailable.";
+        return {};
+    }
+    const auto path = JoinPath(dataDirectory, L"search-history.json");
+    const auto loaded = persistence::LoadJsonWithRecovery(path);
+    if (!loaded.document.is_object())
+    {
+        if (loaded.found || loaded.recoveredFromBackup || !loaded.error.empty())
+        {
+            writable = false;
+            error = loaded.error.empty() ? L"Search history could not be loaded safely." : loaded.error;
+        }
+        return {};
+    }
+    auto history = search::History::ParseUtf8(loaded.document.dump(), error);
+    if (!error.empty()) writable = false;
+    if (!loaded.error.empty())
+    {
+        if (error.empty()) error = loaded.error;
+        else error += L" " + loaded.error;
+    }
+    return history;
+}
+
 std::wstring UniqueDestination(const std::wstring& folder, const std::wstring& stem, const std::wstring& extension)
 {
     auto destination = JoinPath(folder, stem + extension);
@@ -461,6 +521,7 @@ struct ShellBroker::Impl
         switch (request.kind)
         {
         case RequestKind::Catalog:
+        {
             result->kind = ResultKind::Catalog;
             for (DWORD delayed = 0; delayed < request.testDelayMilliseconds && !cancelRequested.load(); delayed += 20)
             {
@@ -471,10 +532,20 @@ struct ShellBroker::Impl
                 delete result;
                 return;
             }
-            result->snapshot = std::make_shared<const catalog::Snapshot>(
-                catalog::LoadSnapshot(request.dataDirectory, request.launchpadFolder, request.generation));
+            auto snapshot = catalog::LoadSnapshot(request.dataDirectory, request.launchpadFolder, request.generation);
+            for (auto& item : snapshot.items) EnrichCatalogItem(item);
+            std::wstring historyError;
+            auto history = LoadSearchHistory(request.dataDirectory, historyError, result->historyWritable);
+            if (!historyError.empty())
+            {
+                if (!snapshot.error.empty()) snapshot.error += L" ";
+                snapshot.error += historyError;
+            }
+            result->snapshot = std::make_shared<const catalog::Snapshot>(std::move(snapshot));
+            result->history = std::make_shared<const search::History>(std::move(history));
             result->succeeded = true;
             break;
+        }
         case RequestKind::Icon:
             result->kind = ResultKind::Icon;
             result->stableId = request.stableId;
@@ -558,6 +629,7 @@ struct ShellBroker::Impl
         case RequestKind::PersistJson:
         {
             result->kind = ResultKind::Persistence;
+            result->persistencePath = request.path;
             try
             {
                 const auto document = nlohmann::json::parse(request.documentUtf8);

@@ -581,17 +581,18 @@ public sealed class HostedAppModeSourceTests
     public static void NativeUiSource_ImprovesSearchAndTabCompletion()
     {
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var searchSource = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "SearchIndex.cpp"));
 
         TestAssert.Contains("ActivateSearchInput", source);
-        TestAssert.Contains("BuildSearchCandidateText", source);
-        TestAssert.Contains("BuildPinyinSearchText", source);
-        TestAssert.Contains("KnownPinyinForChar", source);
-        TestAssert.Contains("FuzzyMatchScore", source);
-        TestAssert.Contains("UpdateSearchIndex", source);
+        TestAssert.Contains("#include \"SearchIndex.h\"", source);
         TestAssert.Contains("RebuildSearchIndex", source);
-        TestAssert.Contains("searchCandidateLower", source);
-        TestAssert.Contains("displayNameLower", source);
-        TestAssert.Contains("SearchScore", source);
+        TestAssert.Contains("g_searchIndex.Rebuild(items, g_searchHistory)", source);
+        TestAssert.Contains("g_searchIndex.Query(g_searchText, options)", source);
+        TestAssert.Contains("options.showRecentAndFavorites", source);
+        TestAssert.Contains("Index::BuildPinyinForms", searchSource);
+        TestAssert.Contains("ScoreName", searchSource);
+        TestAssert.Contains("DamerauLevenshtein", searchSource);
+        TestAssert.Contains("History::RecordLaunch", searchSource);
         TestAssert.Contains("CompleteSearchFromSelection", source);
         TestAssert.Contains("SearchCompletionTail", source);
         TestAssert.Contains("g_completionCandidateText", source);
@@ -602,8 +603,10 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("searchRect.top, searchRect.right", source);
         TestAssert.Contains("RGB(58, 140, 255)", source);
         TestAssert.Contains("VK_TAB", source);
-        TestAssert.Contains("std::stable_sort(g_filtered.begin(), g_filtered.end()", source);
         TestAssert.Contains("metrics.groupByRegion = g_searchText.empty()", source);
+        TestAssert.DoesNotContain("KnownPinyinForChar", source);
+        TestAssert.DoesNotContain("BuildPinyinSearchText", source);
+        TestAssert.DoesNotContain("searchCandidateLower", source);
         TestAssert.DoesNotContain("ToLower(BuildSearchCandidateText(item))", source);
     }
 

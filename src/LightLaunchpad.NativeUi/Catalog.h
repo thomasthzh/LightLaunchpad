@@ -18,6 +18,8 @@ struct Item
     std::wstring stableId;
     std::wstring sourcePath;
     std::wstring displayName;
+    std::vector<std::wstring> aliases;
+    std::wstring subtitle;
     std::wstring regionId;
     int order = 0;
 };

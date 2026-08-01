@@ -261,6 +261,7 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.App\Assets') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $llpCleanSourceRoot 'src\third_party\nlohmann') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $llpCleanSourceRoot 'src\third_party\pinyin-data') | Out-Null
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'tools\build-native-ui.ps1') -Destination (Join-Path $llpCleanSourceRoot 'tools\build-native-ui.ps1')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.rc') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.rc')
@@ -272,8 +273,12 @@ try {
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\Catalog.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\Catalog.h')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\ShellBroker.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\ShellBroker.cpp')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\ShellBroker.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\ShellBroker.h')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\SearchIndex.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\SearchIndex.cpp')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\SearchIndex.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\SearchIndex.h')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\third_party\nlohmann\json.hpp') -Destination (Join-Path $llpCleanSourceRoot 'src\third_party\nlohmann\json.hpp')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\third_party\nlohmann\LICENSE.MIT') -Destination (Join-Path $llpCleanSourceRoot 'src\third_party\nlohmann\LICENSE.MIT')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\third_party\pinyin-data\PinyinData.generated.h') -Destination (Join-Path $llpCleanSourceRoot 'src\third_party\pinyin-data\PinyinData.generated.h')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\third_party\pinyin-data\LICENSE.MIT') -Destination (Join-Path $llpCleanSourceRoot 'src\third_party\pinyin-data\LICENSE.MIT')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.App\Assets\LightLaunchpad.ico') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.App\Assets\LightLaunchpad.ico')
     & git -C $llpCleanSourceRoot init --quiet
     & git -C $llpCleanSourceRoot config core.autocrlf false

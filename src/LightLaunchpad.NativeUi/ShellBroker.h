@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Catalog.h"
+#include "SearchIndex.h"
 
 #include <windows.h>
 
@@ -30,7 +31,10 @@ struct Result
     DWORD brokerThreadId = 0;
     std::wstring apartment = L"unknown";
     std::shared_ptr<const catalog::Snapshot> snapshot;
+    std::shared_ptr<const search::History> history;
+    bool historyWritable = true;
     std::wstring stableId;
+    std::wstring persistencePath;
     HICON icon = nullptr;
     int iconSize = 0;
     bool succeeded = false;
