@@ -56,6 +56,12 @@ $singletonName = if ($BuildChannel -eq 'Development') {
 else {
     'Local\LightLaunchpad.NativeUi.SingleInstance.stable'
 }
+$windowClassName = if ($BuildChannel -eq 'Development') {
+    "LightLaunchpadNativeUiWindow.development.$BuildCommit"
+}
+else {
+    'LightLaunchpadNativeUiWindow.stable'
+}
 
 function ConvertTo-CppStringLiteral {
     param([string]$Value)
@@ -66,6 +72,7 @@ $escapedBuildVersion = ConvertTo-CppStringLiteral $buildVersion
 $escapedBuildCommit = ConvertTo-CppStringLiteral $BuildCommit
 $escapedChannel = ConvertTo-CppStringLiteral $channelValue
 $escapedSingleton = ConvertTo-CppStringLiteral $singletonName
+$escapedWindowClass = ConvertTo-CppStringLiteral $windowClassName
 $identityHeader = @"
 #pragma once
 #define LLP_VERSION_MAJOR $versionMajor
@@ -81,6 +88,7 @@ $identityHeader = @"
 #define LLP_BUILD_CHANNEL_STRING "$escapedChannel"
 #define LLP_BUILD_CHANNEL_WIDE L"$escapedChannel"
 #define LLP_SINGLETON_NAME_WIDE L"$escapedSingleton"
+#define LLP_WINDOW_CLASS_NAME_WIDE L"$escapedWindowClass"
 "@
 
 $gpp = (where.exe g++ | Select-Object -First 1)

@@ -9,6 +9,7 @@
 #include <imm.h>
 #include <objbase.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <shlwapi.h>
 #include <uxtheme.h>
@@ -89,7 +90,8 @@ constexpr int WorkspaceClearSelectionCommand = 2203;
 constexpr int WorkspaceImportFilesCommand = 2204;
 constexpr int WorkspaceImportStartMenuCommand = 2205;
 constexpr UINT WmTray = WM_APP + 72;
-constexpr wchar_t WindowClassName[] = L"LightLaunchpadNativeUiWindow";
+constexpr UINT WmActivateInstance = WM_APP + 73;
+constexpr wchar_t WindowClassName[] = LLP_WINDOW_CLASS_NAME_WIDE;
 constexpr wchar_t SettingsWindowClassName[] = L"LightLaunchpadNativeSettingsWindow";
 constexpr wchar_t TextInputWindowClassName[] = L"LightLaunchpadNativeTextInputWindow";
 constexpr wchar_t AppIconResourceName[] = L"IDI_APP";
@@ -113,10 +115,11 @@ constexpr int DragTargetSettleMs = 55;
 constexpr double DragReflowSmoothing = 0.24;
 constexpr UINT_PTR HotkeyEditSubclassId = 0x4C5602;
 constexpr UINT_PTR TrayIconRetryTimerId = 0x4C5603;
-constexpr UINT_PTR TrayIconPromotionRetryTimerId = 0x4C5604;
 constexpr UINT TrayIconRetryMs = 1000;
-constexpr UINT TrayIconPromotionRetryMs = 1000;
-constexpr int TrayIconPromotionMaxAttempts = 8;
+constexpr int TrayIconRetryMaxAttempts = 8;
+constexpr DWORD ActivationIpcTimeoutMs = 2000;
+constexpr size_t MaxStartupLogBytes = 256 * 1024;
+constexpr ULONG_PTR ActivationCopyDataId = 0x4C4C5001;
 const GUID NativeIID_IImageList = { 0x46eb5926, 0x582e, 0x4017, { 0x9f, 0xdf, 0xe8, 0x99, 0x8d, 0xaa, 0x09, 0x50 } };
 
 enum AccentState
@@ -347,9 +350,18 @@ SpotlightLayerBuffer g_spotlightLayerBuffer;
 SpotlightBackdropCapture g_spotlightBackdrop;
 UINT g_taskbarCreatedMessage = 0;
 bool g_trayIconAdded = false;
-int g_trayPromotionAttempts = 0;
 bool g_hotkeyRegistered = false;
 bool g_diagnosticsUiMode = false;
+ULONGLONG g_processStartTick = 0;
+ULONGLONG g_settingsLoadedTick = 0;
+ULONGLONG g_shellReadyTick = 0;
+ULONGLONG g_catalogStartTick = 0;
+bool g_catalogStarted = false;
+int g_trayAddAttempts = 0;
+int g_trayRetryAttempts = 0;
+int g_taskbarRecoveryCount = 0;
+std::wstring g_startupLogPath;
+std::wstring g_startupProbePath;
 
 bool ShowTextInputDialog(const std::wstring& title, const std::wstring& label, const std::wstring& initialValue, std::wstring& result);
 void RegisterCurrentHotkey();
@@ -837,13 +849,20 @@ std::wstring GetSettingsPath()
     return dataPath.empty() ? L"" : JoinPath(dataPath, L"settings.json");
 }
 
-bool WriteFileUtf8(const std::wstring& path, const std::string& content)
+bool EnsureParentDirectory(const std::wstring& path)
 {
     if (path.empty()) return false;
     wchar_t directory[MAX_PATH] = L"";
     CopyText(directory, ARRAYSIZE(directory), path.c_str());
-    PathRemoveFileSpecW(directory);
-    if (directory[0] != L'\0') CreateDirectoryW(directory, nullptr);
+    if (!PathRemoveFileSpecW(directory) || directory[0] == L'\0') return true;
+    const int result = SHCreateDirectoryExW(nullptr, directory, nullptr);
+    return result == ERROR_SUCCESS || result == ERROR_ALREADY_EXISTS || result == ERROR_FILE_EXISTS;
+}
+
+bool WriteFileUtf8(const std::wstring& path, const std::string& content)
+{
+    if (path.empty()) return false;
+    if (!EnsureParentDirectory(path)) return false;
 
     const auto temporaryPath = path + L".tmp";
     HANDLE file = CreateFileW(temporaryPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -1821,6 +1840,8 @@ void CancelSelectionBox(HWND hwnd)
 
 void ReloadData()
 {
+    g_catalogStarted = true;
+    if (g_catalogStartTick == 0) g_catalogStartTick = GetTickCount64();
     const int previousIconSize = g_settings.iconSize;
     std::vector<LaunchItem> previousItems = std::move(g_items);
     LoadSettings();
@@ -2478,13 +2499,6 @@ void PopulateTrayIconData(NOTIFYICONDATAW& nid)
     CopyText(nid.szTip, ARRAYSIZE(nid.szTip), L"LightLaunchpad Native UI");
 }
 
-enum class TrayPromotionResult
-{
-    NotFound,
-    AlreadyPromoted,
-    Promoted
-};
-
 std::wstring CurrentExecutablePath()
 {
     wchar_t exe[MAX_PATH] = L"";
@@ -2517,17 +2531,6 @@ bool ReadRegistryString(HKEY key, const wchar_t* name, std::wstring& value)
     while (!buffer.empty() && buffer.back() == L'\0') buffer.pop_back();
     value = buffer;
     return true;
-}
-
-bool RegistryDwordEquals(HKEY key, const wchar_t* name, DWORD expected)
-{
-    DWORD type = 0;
-    DWORD value = 0;
-    DWORD bytes = sizeof(value);
-    return RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(&value), &bytes) == ERROR_SUCCESS
-        && type == REG_DWORD
-        && bytes == sizeof(value)
-        && value == expected;
 }
 
 std::wstring StableInstallPath()
@@ -2626,6 +2629,7 @@ std::string BuildDiagnosticsJson()
     json += "  \"channel\": \"" + EscapeJson(LLP_BUILD_CHANNEL_WIDE) + "\",\r\n";
     json += "  \"buildId\": \"" + EscapeJson(BuildId()) + "\",\r\n";
     json += "  \"singletonName\": \"" + EscapeJson(LLP_SINGLETON_NAME_WIDE) + "\",\r\n";
+    json += "  \"windowClass\": \"" + EscapeJson(LLP_WINDOW_CLASS_NAME_WIDE) + "\",\r\n";
     json += "  \"executablePath\": \"" + EscapeJson(executablePath) + "\",\r\n";
     json += "  \"stableInstallPath\": \"" + EscapeJson(StableInstallPath()) + "\",\r\n";
     json += std::string("  \"isStableInstall\": ") + (IsCurrentExecutableAtStableInstallPath() ? "true" : "false") + ",\r\n";
@@ -2645,6 +2649,7 @@ std::wstring BuildDiagnosticsSummary()
     summary += L"Commit: " LLP_BUILD_COMMIT_WIDE L"\r\n";
     summary += L"Channel: " LLP_BUILD_CHANNEL_WIDE L"\r\n";
     summary += L"Build ID: " + BuildId() + L"\r\n";
+    summary += L"IPC class: " LLP_WINDOW_CLASS_NAME_WIDE L"\r\n";
     summary += L"Executable: " + CurrentExecutablePath() + L"\r\n";
     summary += L"Stable install: " + StableInstallPath() + L"\r\n";
     summary += std::wstring(L"Running stable: ") + (IsCurrentExecutableAtStableInstallPath() ? L"yes" : L"no") + L"\r\n";
@@ -2656,7 +2661,7 @@ std::wstring BuildDiagnosticsSummary()
     return summary;
 }
 
-std::wstring DiagnosticsFileFromCommandLine()
+std::wstring CommandLineValue(const wchar_t* name)
 {
     int argumentCount = 0;
     LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
@@ -2668,7 +2673,7 @@ std::wstring DiagnosticsFileFromCommandLine()
     std::wstring outputPath;
     for (int index = 1; index + 1 < argumentCount; ++index)
     {
-        if (lstrcmpiW(arguments[index], L"--diagnostics-file") == 0)
+        if (lstrcmpiW(arguments[index], name) == 0)
         {
             outputPath = arguments[index + 1];
             break;
@@ -2676,6 +2681,11 @@ std::wstring DiagnosticsFileFromCommandLine()
     }
     LocalFree(arguments);
     return outputPath;
+}
+
+std::wstring DiagnosticsFileFromCommandLine()
+{
+    return CommandLineValue(L"--diagnostics-file");
 }
 
 bool CommandLineHasArgument(const wchar_t* expected)
@@ -2700,71 +2710,147 @@ bool CommandLineHasArgument(const wchar_t* expected)
     return found;
 }
 
-TrayPromotionResult PromoteTrayIconVisibility()
+std::wstring DefaultStartupLogPath()
 {
-    const std::wstring executablePath = CurrentExecutablePath();
-    if (executablePath.empty())
-    {
-        return TrayPromotionResult::NotFound;
-    }
-
-    HKEY settingsKey = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\NotifyIconSettings", 0, KEY_READ, &settingsKey) != ERROR_SUCCESS)
-    {
-        return TrayPromotionResult::NotFound;
-    }
-
-    bool found = false;
-    bool promoted = false;
-    for (DWORD index = 0;; ++index)
-    {
-        wchar_t subkeyName[256] = L"";
-        DWORD subkeyNameLength = ARRAYSIZE(subkeyName);
-        const LONG enumResult = RegEnumKeyExW(settingsKey, index, subkeyName, &subkeyNameLength, nullptr, nullptr, nullptr, nullptr);
-        if (enumResult == ERROR_NO_MORE_ITEMS)
-        {
-            break;
-        }
-        if (enumResult != ERROR_SUCCESS)
-        {
-            continue;
-        }
-
-        HKEY iconKey = nullptr;
-        if (RegOpenKeyExW(settingsKey, subkeyName, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &iconKey) != ERROR_SUCCESS)
-        {
-            continue;
-        }
-
-        std::wstring registeredPath;
-        if (ReadRegistryString(iconKey, L"ExecutablePath", registeredPath)
-            && CompareStringOrdinal(registeredPath.c_str(), -1, executablePath.c_str(), -1, TRUE) == CSTR_EQUAL)
-        {
-            found = true;
-            if (!RegistryDwordEquals(iconKey, L"IsPromoted", 1))
-            {
-                const DWORD value = 1;
-                if (RegSetValueExW(iconKey, L"IsPromoted", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value)) == ERROR_SUCCESS)
-                {
-                    promoted = true;
-                }
-            }
-        }
-
-        RegCloseKey(iconKey);
-    }
-
-    RegCloseKey(settingsKey);
-    if (!found)
-    {
-        return TrayPromotionResult::NotFound;
-    }
-
-    return promoted ? TrayPromotionResult::Promoted : TrayPromotionResult::AlreadyPromoted;
+    wchar_t localAppData[MAX_PATH] = L"";
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, ARRAYSIZE(localAppData));
+    if (length == 0 || length >= ARRAYSIZE(localAppData)) return {};
+    return JoinPath(JoinPath(JoinPath(localAppData, L"LightLaunchpad"), L"logs"), L"apphost.log");
 }
 
-bool AddTrayIcon(bool refreshAfterPromotion = true)
+void AppendStartupLog(const wchar_t* stage, bool succeeded, const std::wstring& detail = {})
 {
+    if (g_startupLogPath.empty()) return;
+    const ULONGLONG elapsed = g_processStartTick == 0 ? 0 : GetTickCount64() - g_processStartTick;
+    std::string line = "{\"elapsedMs\":" + std::to_string(elapsed)
+        + ",\"stage\":\"" + EscapeJson(stage)
+        + "\",\"success\":" + (succeeded ? "true" : "false")
+        + ",\"detail\":\"" + EscapeJson(detail) + "\"}\r\n";
+    if (line.size() > MaxStartupLogBytes) line.resize(MaxStartupLogBytes);
+    if (!EnsureParentDirectory(g_startupLogPath)) return;
+
+    WIN32_FILE_ATTRIBUTE_DATA attributes = {};
+    ULONGLONG existingSize = 0;
+    if (GetFileAttributesExW(g_startupLogPath.c_str(), GetFileExInfoStandard, &attributes))
+    {
+        existingSize = (static_cast<ULONGLONG>(attributes.nFileSizeHigh) << 32) | attributes.nFileSizeLow;
+    }
+    const bool resetLog = existingSize + line.size() > MaxStartupLogBytes;
+    HANDLE file = CreateFileW(
+        g_startupLogPath.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ,
+        nullptr,
+        resetLog ? CREATE_ALWAYS : OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    if (!resetLog) SetFilePointer(file, 0, nullptr, FILE_END);
+    DWORD written = 0;
+    WriteFile(file, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    CloseHandle(file);
+}
+
+std::string BuildStartupProbeJson()
+{
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG shellReadyMs = g_shellReadyTick == 0 ? now - g_processStartTick : g_shellReadyTick - g_processStartTick;
+    const ULONGLONG settingsLoadedMs = g_settingsLoadedTick == 0 ? 0 : g_settingsLoadedTick - g_processStartTick;
+    const bool catalogStartedBeforeShell = g_catalogStarted
+        && g_catalogStartTick != 0
+        && (g_shellReadyTick == 0 || g_catalogStartTick <= g_shellReadyTick);
+    std::string json = "{\r\n";
+    json += "  \"processRole\": \"primary\",\r\n";
+    json += std::string("  \"windowCreated\": ") + (g_hwnd ? "true" : "false") + ",\r\n";
+    json += std::string("  \"catalogStartedBeforeShell\": ") + (catalogStartedBeforeShell ? "true" : "false") + ",\r\n";
+    json += "  \"settingsLoadedMs\": " + std::to_string(settingsLoadedMs) + ",\r\n";
+    json += "  \"shellReadyMs\": " + std::to_string(shellReadyMs) + ",\r\n";
+    json += "  \"trayAddAttempts\": " + std::to_string(g_trayAddAttempts) + ",\r\n";
+    json += std::string("  \"trayAdded\": ") + (g_trayIconAdded ? "true" : "false") + ",\r\n";
+    json += std::string("  \"hotkeyRegistered\": ") + (g_hotkeyRegistered ? "true" : "false") + ",\r\n";
+    json += "  \"taskbarRecoveryCount\": " + std::to_string(g_taskbarRecoveryCount) + ",\r\n";
+    json += "  \"logPath\": \"" + EscapeJson(g_startupLogPath) + "\"\r\n";
+    json += "}\r\n";
+    return json;
+}
+
+enum class SecondaryActivationResult
+{
+    Activated,
+    VersionOrChannelMismatch,
+    Failed
+};
+
+bool WriteActivationReport(const std::wstring& path, const wchar_t* status, ULONGLONG elapsedMs)
+{
+    if (path.empty()) return true;
+    std::string json = "{\r\n";
+    json += "  \"status\": \"" + EscapeJson(status) + "\",\r\n";
+    json += "  \"requestBuildId\": \"" + EscapeJson(BuildId()) + "\",\r\n";
+    json += "  \"channel\": \"" + EscapeJson(LLP_BUILD_CHANNEL_WIDE) + "\",\r\n";
+    json += "  \"windowClass\": \"" + EscapeJson(LLP_WINDOW_CLASS_NAME_WIDE) + "\",\r\n";
+    json += "  \"elapsedMs\": " + std::to_string(elapsedMs) + "\r\n";
+    json += "}\r\n";
+    return WriteFileUtf8(path, json);
+}
+
+SecondaryActivationResult ActivatePrimaryInstance(const std::wstring& reportPath)
+{
+    const ULONGLONG start = GetTickCount64();
+    HWND target = nullptr;
+    while (GetTickCount64() - start < ActivationIpcTimeoutMs)
+    {
+        target = FindWindowW(LLP_WINDOW_CLASS_NAME_WIDE, nullptr);
+        if (target) break;
+        Sleep(25);
+    }
+
+    if (!target)
+    {
+        const auto elapsed = GetTickCount64() - start;
+        WriteActivationReport(reportPath, L"activation-failed", elapsed);
+        AppendStartupLog(L"secondary-activation", false, L"primary window not found");
+        return SecondaryActivationResult::Failed;
+    }
+
+    const std::wstring payload = BuildId();
+    COPYDATASTRUCT copyData = {};
+    copyData.dwData = ActivationCopyDataId;
+    copyData.cbData = static_cast<DWORD>((payload.size() + 1) * sizeof(wchar_t));
+    copyData.lpData = const_cast<wchar_t*>(payload.c_str());
+    DWORD_PTR response = 0;
+    const LRESULT delivered = SendMessageTimeoutW(
+        target,
+        WM_COPYDATA,
+        0,
+        reinterpret_cast<LPARAM>(&copyData),
+        SMTO_ABORTIFHUNG | SMTO_BLOCK,
+        ActivationIpcTimeoutMs,
+        &response);
+    const auto elapsed = GetTickCount64() - start;
+    if (!delivered || (response != 1 && response != 2))
+    {
+        WriteActivationReport(reportPath, L"activation-failed", elapsed);
+        AppendStartupLog(L"secondary-activation", false, L"IPC timed out or was rejected");
+        return SecondaryActivationResult::Failed;
+    }
+
+    if (response == 2)
+    {
+        WriteActivationReport(reportPath, L"version-or-channel-mismatch", elapsed);
+        AppendStartupLog(L"secondary-activation", true, L"version or channel mismatch reported");
+        return SecondaryActivationResult::VersionOrChannelMismatch;
+    }
+
+    WriteActivationReport(reportPath, L"activated", elapsed);
+    AppendStartupLog(L"secondary-activation", true, L"existing instance activated");
+    return SecondaryActivationResult::Activated;
+}
+
+bool AddTrayIcon()
+{
+    ++g_trayAddAttempts;
+    ++g_trayRetryAttempts;
     NOTIFYICONDATAW nid = {};
     PopulateTrayIconData(nid);
     g_trayIconAdded = Shell_NotifyIconW(NIM_ADD, &nid) != FALSE;
@@ -2773,28 +2859,19 @@ bool AddTrayIcon(bool refreshAfterPromotion = true)
         nid.uVersion = NOTIFYICON_VERSION_4;
         Shell_NotifyIconW(NIM_SETVERSION, &nid);
         KillTimer(g_hwnd, TrayIconRetryTimerId);
-        const TrayPromotionResult promotionResult = PromoteTrayIconVisibility();
-        if (promotionResult == TrayPromotionResult::NotFound)
-        {
-            g_trayPromotionAttempts = 0;
-            SetTimer(g_hwnd, TrayIconPromotionRetryTimerId, TrayIconPromotionRetryMs, nullptr);
-        }
-        else
-        {
-            g_trayPromotionAttempts = 0;
-            KillTimer(g_hwnd, TrayIconPromotionRetryTimerId);
-            if (promotionResult == TrayPromotionResult::Promoted && refreshAfterPromotion)
-            {
-                RemoveTrayIcon();
-                return AddTrayIcon(false);
-            }
-        }
+        AppendStartupLog(L"tray-added", true, L"attempt=" + std::to_wstring(g_trayRetryAttempts));
         return true;
     }
 
-    if (g_hwnd)
+    AppendStartupLog(L"tray-add", false, L"attempt=" + std::to_wstring(g_trayRetryAttempts));
+    if (g_hwnd && g_trayRetryAttempts < TrayIconRetryMaxAttempts)
     {
         SetTimer(g_hwnd, TrayIconRetryTimerId, TrayIconRetryMs, nullptr);
+    }
+    else if (g_hwnd)
+    {
+        KillTimer(g_hwnd, TrayIconRetryTimerId);
+        AppendStartupLog(L"tray-retry-exhausted", false, std::to_wstring(TrayIconRetryMaxAttempts));
     }
     return false;
 }
@@ -2807,11 +2884,6 @@ void RemoveTrayIcon()
     nid.uID = 1;
     Shell_NotifyIconW(NIM_DELETE, &nid);
     g_trayIconAdded = false;
-    if (g_hwnd)
-    {
-        KillTimer(g_hwnd, TrayIconPromotionRetryTimerId);
-    }
-    g_trayPromotionAttempts = 0;
 }
 
 void ReaddTrayIcon()
@@ -6986,7 +7058,7 @@ void ShowSettingsWindow()
 {
     if (g_settingsHwnd)
     {
-        ShowWindow(g_settingsHwnd, SW_SHOW);
+        ShowWindow(g_settingsHwnd, IsIconic(g_settingsHwnd) ? SW_RESTORE : SW_SHOW);
         SetForegroundWindow(g_settingsHwnd);
         return;
     }
@@ -7261,12 +7333,68 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     if (message == g_taskbarCreatedMessage && g_taskbarCreatedMessage != 0)
     {
-        ReaddTrayIcon();
+        if (!g_diagnosticsUiMode)
+        {
+            ++g_taskbarRecoveryCount;
+            g_trayRetryAttempts = 0;
+            AppendStartupLog(L"taskbar-created", true, L"restoring tray icon");
+            ReaddTrayIcon();
+            if (!g_startupProbePath.empty())
+            {
+                WriteFileUtf8(g_startupProbePath, BuildStartupProbeJson());
+            }
+        }
         return 0;
     }
 
     switch (message)
     {
+    case WM_COPYDATA:
+    {
+        const auto* copyData = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+        if (!copyData
+            || copyData->dwData != ActivationCopyDataId
+            || !copyData->lpData
+            || copyData->cbData < sizeof(wchar_t)
+            || copyData->cbData > 2048
+            || copyData->cbData % sizeof(wchar_t) != 0)
+        {
+            return 0;
+        }
+        const auto* requestData = static_cast<const wchar_t*>(copyData->lpData);
+        const size_t requestLength = copyData->cbData / sizeof(wchar_t);
+        std::wstring requestBuildId(requestData, requestData + requestLength);
+        while (!requestBuildId.empty() && requestBuildId.back() == L'\0') requestBuildId.pop_back();
+        const bool mismatch = CompareStringOrdinal(requestBuildId.c_str(), -1, BuildId().c_str(), -1, FALSE) != CSTR_EQUAL;
+        AppendStartupLog(
+            L"activation-request",
+            true,
+            mismatch ? L"version or channel mismatch" : L"matching build");
+        PostMessageW(hwnd, WmActivateInstance, mismatch ? 1 : 0, 0);
+        return mismatch ? 2 : 1;
+    }
+    case WmActivateInstance:
+    {
+        if (g_diagnosticsUiMode)
+        {
+            ShowSettingsWindow();
+        }
+        else
+        {
+            ShowNativeUi();
+        }
+        if (wParam != 0 && g_trayIconAdded)
+        {
+            NOTIFYICONDATAW nid = {};
+            PopulateTrayIconData(nid);
+            nid.uFlags = NIF_INFO;
+            CopyText(nid.szInfoTitle, ARRAYSIZE(nid.szInfoTitle), L"LightLaunchpad build mismatch");
+            CopyText(nid.szInfo, ARRAYSIZE(nid.szInfo), L"Activated the running instance, but the new executable has a different version or channel.");
+            nid.dwInfoFlags = NIIF_WARNING;
+            Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
+        return 0;
+    }
     case WM_NCHITTEST:
     {
         if (IsSpotlightMode())
@@ -7340,24 +7468,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (wParam == TrayIconRetryTimerId)
         {
             AddTrayIcon();
-            return 0;
-        }
-        if (wParam == TrayIconPromotionRetryTimerId)
-        {
-            const TrayPromotionResult promotionResult = PromoteTrayIconVisibility();
-            if (promotionResult == TrayPromotionResult::Promoted)
-            {
-                g_trayPromotionAttempts = 0;
-                KillTimer(hwnd, TrayIconPromotionRetryTimerId);
-                ReaddTrayIcon();
-                return 0;
-            }
-            if (promotionResult == TrayPromotionResult::AlreadyPromoted
-                || ++g_trayPromotionAttempts >= TrayIconPromotionMaxAttempts)
-            {
-                g_trayPromotionAttempts = 0;
-                KillTimer(hwnd, TrayIconPromotionRetryTimerId);
-            }
             return 0;
         }
         if (wParam == DragAnimationTimerId && g_dragActive)
@@ -7663,7 +7773,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
 {
+    g_processStartTick = GetTickCount64();
     g_instance = instance;
+    g_startupLogPath = CommandLineValue(L"--diagnostics-log-file");
+    if (g_startupLogPath.empty()) g_startupLogPath = DefaultStartupLogPath();
+    AppendStartupLog(L"process-start", true, BuildId());
     const auto diagnosticsFile = DiagnosticsFileFromCommandLine();
     if (!diagnosticsFile.empty())
     {
@@ -7674,15 +7788,48 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     const HRESULT coInitializeResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const bool comInitialized = SUCCEEDED(coInitializeResult);
     HANDLE mutex = CreateMutexW(nullptr, TRUE, LLP_SINGLETON_NAME_WIDE);
-    if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS)
+    if (!mutex)
     {
+        AppendStartupLog(L"singleton-mutex", false, L"CreateMutex failed: " + std::to_wstring(GetLastError()));
+        const auto reportPath = CommandLineValue(L"--activation-report-file");
+        WriteActivationReport(reportPath, L"mutex-failed", GetTickCount64() - g_processStartTick);
+        if (reportPath.empty())
+        {
+            MessageBoxW(nullptr, L"LightLaunchpad could not establish its single-instance channel.", L"LightLaunchpad startup failed", MB_ICONERROR | MB_OK);
+        }
         if (comInitialized) CoUninitialize();
+        return 4;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        AppendStartupLog(L"singleton-secondary", true, L"activating existing instance");
+        const auto reportPath = CommandLineValue(L"--activation-report-file");
+        const auto activationResult = ActivatePrimaryInstance(reportPath);
+        CloseHandle(mutex);
+        if (comInitialized) CoUninitialize();
+        if (activationResult == SecondaryActivationResult::VersionOrChannelMismatch)
+        {
+            if (reportPath.empty())
+            {
+                MessageBoxW(nullptr, L"The running LightLaunchpad instance was activated, but this executable has a different version or channel.", L"LightLaunchpad build mismatch", MB_ICONWARNING | MB_OK);
+            }
+            return 3;
+        }
+        if (activationResult == SecondaryActivationResult::Failed)
+        {
+            if (reportPath.empty())
+            {
+                MessageBoxW(nullptr, L"Another LightLaunchpad process is running, but it could not be activated. Check Diagnostics for the running executable and version.", L"LightLaunchpad activation failed", MB_ICONERROR | MB_OK);
+            }
+            return 4;
+        }
         return 0;
     }
+    AppendStartupLog(L"singleton-primary", true, LLP_SINGLETON_NAME_WIDE);
 
     LoadSettings();
-    ReloadData();
-    RebuildFiltered();
+    g_settingsLoadedTick = GetTickCount64();
+    AppendStartupLog(L"settings-loaded", true, g_settings.launchpadFolder);
 
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
@@ -7693,7 +7840,13 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     wc.hIconSm = LoadEmbeddedAppIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
     wc.lpszClassName = WindowClassName;
     wc.style = CS_DBLCLKS;
-    RegisterClassExW(&wc);
+    if (!RegisterClassExW(&wc))
+    {
+        AppendStartupLog(L"window-class", false, L"RegisterClassEx failed: " + std::to_wstring(GetLastError()));
+        CloseHandle(mutex);
+        if (comInitialized) CoUninitialize();
+        return 1;
+    }
 
     g_hwnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
@@ -7711,19 +7864,46 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
 
     if (!g_hwnd)
     {
+        AppendStartupLog(L"window-created", false, L"CreateWindowEx failed: " + std::to_wstring(GetLastError()));
         CloseHandle(mutex);
         if (comInitialized) CoUninitialize();
         return 1;
     }
+    AppendStartupLog(L"window-created", true, LLP_WINDOW_CLASS_NAME_WIDE);
 
     if (!g_diagnosticsUiMode)
     {
         RegisterCurrentHotkey();
+        AppendStartupLog(L"hotkey-registered", g_hotkeyRegistered, g_settings.hotkey);
         AddTrayIcon();
     }
     else
     {
         ShowSettingsWindow();
+    }
+
+    g_shellReadyTick = GetTickCount64();
+    AppendStartupLog(L"shell-ready", true, std::to_wstring(g_shellReadyTick - g_processStartTick) + L" ms");
+
+    g_startupProbePath = CommandLineValue(L"--startup-probe-file");
+    if (CommandLineHasArgument(L"--simulate-taskbar-created") && g_taskbarCreatedMessage != 0)
+    {
+        SendMessageW(g_hwnd, g_taskbarCreatedMessage, 0, 0);
+    }
+
+    bool startupProbeWritten = true;
+    if (!g_startupProbePath.empty())
+    {
+        startupProbeWritten = WriteFileUtf8(g_startupProbePath, BuildStartupProbeJson());
+        AppendStartupLog(L"startup-probe", startupProbeWritten, g_startupProbePath);
+    }
+
+    if (CommandLineHasArgument(L"--exit-after-startup-probe"))
+    {
+        DestroyWindow(g_hwnd);
+        CloseHandle(mutex);
+        if (comInitialized) CoUninitialize();
+        return startupProbeWritten ? 0 : 2;
     }
 
     MSG msg = {};

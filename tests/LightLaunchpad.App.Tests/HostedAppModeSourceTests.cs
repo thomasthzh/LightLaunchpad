@@ -661,21 +661,17 @@ public sealed class HostedAppModeSourceTests
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
 
         TestAssert.Contains("TrayIconRetryTimerId", source);
-        TestAssert.Contains("TrayIconPromotionRetryTimerId", source);
         TestAssert.Contains("g_taskbarCreatedMessage", source);
         TestAssert.Contains("RegisterWindowMessageW(L\"TaskbarCreated\")", source);
         TestAssert.Contains("Shell_NotifyIconW(NIM_ADD", source);
         TestAssert.Contains("Shell_NotifyIconW(NIM_SETVERSION", source);
         TestAssert.Contains("NOTIFYICON_VERSION_4", source);
-        TestAssert.Contains("PromoteTrayIconVisibility", source);
-        TestAssert.Contains("Control Panel\\\\NotifyIconSettings", source);
-        TestAssert.Contains("ExecutablePath", source);
-        TestAssert.Contains("IsPromoted", source);
-        TestAssert.Contains("RegEnumKeyExW", source);
-        TestAssert.Contains("RegSetValueExW", source);
         TestAssert.Contains("SetTimer(g_hwnd, TrayIconRetryTimerId", source);
-        TestAssert.Contains("SetTimer(g_hwnd, TrayIconPromotionRetryTimerId", source);
         TestAssert.Contains("KillTimer(g_hwnd, TrayIconRetryTimerId)", source);
+        TestAssert.DoesNotContain("PromoteTrayIconVisibility", source);
+        TestAssert.DoesNotContain("Control Panel\\\\NotifyIconSettings", source);
+        TestAssert.DoesNotContain("IsPromoted", source);
+        TestAssert.DoesNotContain("TrayIconPromotionRetryTimerId", source);
     }
 
     public static void NativeUiSource_HandlesTrayCallbacksFromNotifyIconVersion4()

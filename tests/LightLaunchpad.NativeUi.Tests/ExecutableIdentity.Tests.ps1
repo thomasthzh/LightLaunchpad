@@ -242,6 +242,7 @@ try {
     Assert-Equal 'development' $llpDiagnostics.channel 'Diagnostics channel mismatch.'
     Assert-Contains $llpExpectedCommit $llpDiagnostics.buildId 'Diagnostics build ID mismatch.'
     Assert-Equal "Local\LightLaunchpad.NativeUi.SingleInstance.development.$llpExpectedCommit" $llpDiagnostics.singletonName 'Diagnostics singleton name mismatch.'
+    Assert-Equal "LightLaunchpadNativeUiWindow.development.$llpExpectedCommit" $llpDiagnostics.windowClass 'Diagnostics IPC window class mismatch.'
     Assert-Equal ([System.IO.Path]::GetFullPath($llpExecutable)) ([System.IO.Path]::GetFullPath([string]$llpDiagnostics.executablePath)) 'Diagnostics executable path mismatch.'
     $llpExpectedStablePath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\LightLaunchpad\LightLaunchpad.NativeUi.exe'
     Assert-Equal $llpExpectedStablePath ([string]$llpDiagnostics.stableInstallPath) 'Diagnostics stable install path mismatch.'
@@ -319,6 +320,7 @@ try {
         "Version: 1.11.0-dev+$llpExpectedCommit",
         "Commit: $llpExpectedCommit",
         'Channel: development',
+        "IPC class: LightLaunchpadNativeUiWindow.development.$llpExpectedCommit",
         "Executable: $([System.IO.Path]::GetFullPath($llpExecutable))",
         'Build ID:',
         'Renderer: not initialized',
@@ -396,7 +398,7 @@ try {
 }
 finally {
     if ($llpUiProcess -and -not $llpUiProcess.HasExited) {
-        $llpMainWindow = [LightLaunchpad.Tests.NativeWindows]::FindWindowForProcess($llpUiProcess.Id, 'LightLaunchpadNativeUiWindow')
+        $llpMainWindow = [LightLaunchpad.Tests.NativeWindows]::FindWindowForProcess($llpUiProcess.Id, "LightLaunchpadNativeUiWindow.development.$llpExpectedCommit")
         [LightLaunchpad.Tests.NativeWindows]::CloseWindow($llpMainWindow)
         if (-not $llpUiProcess.WaitForExit(3000)) {
             Stop-Process -Id $llpUiProcess.Id -Force
