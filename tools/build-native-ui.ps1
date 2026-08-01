@@ -125,7 +125,9 @@ try {
 
     & $gpp `
         src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp `
+        src\LightLaunchpad.NativeUi\Catalog.cpp `
         src\LightLaunchpad.NativeUi\Persistence.cpp `
+        src\LightLaunchpad.NativeUi\ShellBroker.cpp `
         $temporaryResourceObject `
         -I $temporaryDirectory `
         -I src\LightLaunchpad.NativeUi `

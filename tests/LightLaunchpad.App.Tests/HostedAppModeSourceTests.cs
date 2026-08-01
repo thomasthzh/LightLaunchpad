@@ -102,7 +102,8 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("Shell_NotifyIconW", source);
         TestAssert.Contains("WM_PAINT", source);
         TestAssert.Contains("CreateCompatibleDC", source);
-        TestAssert.Contains("ShellExecuteW", source);
+        TestAssert.Contains("g_shellBroker.RequestLaunch", source);
+        TestAssert.Contains("g_shellBroker.RequestOpenFolder", source);
         TestAssert.DoesNotContain("LightLaunchpad.App.exe", source);
         TestAssert.DoesNotContain("CreateProcessW", source);
     }
@@ -110,27 +111,30 @@ public sealed class HostedAppModeSourceTests
     public static void NativeUiSource_ReadsExistingSettingsLayoutAndSearches()
     {
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var catalog = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "Catalog.cpp"));
 
         TestAssert.Contains("settings.json", source);
-        TestAssert.Contains("layout.json", source);
+        TestAssert.Contains("layout.json", catalog);
         TestAssert.Contains("LaunchpadFolder", source);
-        TestAssert.Contains("DisplayName", source);
-        TestAssert.Contains("SourcePath", source);
-        TestAssert.Contains("RegionId", source);
+        TestAssert.Contains("DisplayName", catalog);
+        TestAssert.Contains("SourcePath", catalog);
+        TestAssert.Contains("RegionId", catalog);
         TestAssert.Contains("Search", source);
     }
 
     public static void NativeUiSource_LoadsHighQualityShellIcons()
     {
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var broker = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "ShellBroker.cpp"));
 
-        TestAssert.Contains("SHGetImageList", source);
-        TestAssert.Contains("SHIL_JUMBO", source);
-        TestAssert.Contains("SHIL_EXTRALARGE", source);
-        TestAssert.Contains("IID_IImageList", source);
-        TestAssert.Contains("ILD_TRANSPARENT", source);
-        TestAssert.Contains("SHGFI_SYSICONINDEX", source);
-        TestAssert.DoesNotContain("SHGFI_USEFILEATTRIBUTES", source);
+        TestAssert.Contains("QueueItemIcon", source);
+        TestAssert.Contains("SHGetImageList", broker);
+        TestAssert.Contains("SHIL_JUMBO", broker);
+        TestAssert.Contains("SHIL_EXTRALARGE", broker);
+        TestAssert.Contains("IID_IImageList", broker);
+        TestAssert.Contains("ILD_TRANSPARENT", broker);
+        TestAssert.Contains("SHGFI_SYSICONINDEX", broker);
+        TestAssert.DoesNotContain("SHGFI_USEFILEATTRIBUTES", broker);
         TestAssert.DoesNotContain("Assets\\\\Alice.ico", source);
         TestAssert.DoesNotContain("Assets\\\\LightLaunchpad.ico", source);
     }
@@ -170,6 +174,7 @@ public sealed class HostedAppModeSourceTests
     public static void NativeUiSource_OffersBasicContextMenus()
     {
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var broker = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "ShellBroker.cpp"));
 
         TestAssert.Contains("ShowItemContextMenu", source);
         TestAssert.Contains("ShowRegionContextMenu", source);
@@ -179,7 +184,9 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("RegionDeleteCommand", source);
         TestAssert.Contains("RemoveItemsFromLayout", source);
         TestAssert.Contains("DeleteRegionAndMoveItems", source);
-        TestAssert.Contains("ShellExecuteW(g_hwnd, L\"open\", L\"explorer.exe\"", source);
+        TestAssert.Contains("RequestOpenLocation", source);
+        TestAssert.Contains("CLSID_FileOperation", broker);
+        TestAssert.Contains("FOF_ALLOWUNDO", broker);
     }
 
     public static void NativeUiSource_ProvidesNativeSettingsWindowAndSavesSettings()
@@ -240,13 +247,17 @@ public sealed class HostedAppModeSourceTests
     public static void NativeUiSource_SupportsNativeImportWithoutVuiImport()
     {
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var broker = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "ShellBroker.cpp"));
 
         TestAssert.Contains("WorkspaceImportFilesCommand", source);
         TestAssert.Contains("WorkspaceImportStartMenuCommand", source);
         TestAssert.Contains("ImportLaunchableFiles", source);
         TestAssert.Contains("ImportStartMenuApps", source);
         TestAssert.Contains("GetOpenFileNameW", source);
-        TestAssert.Contains("CopyLaunchableIntoLaunchpad", source);
+        TestAssert.Contains("RequestImportPaths", source);
+        TestAssert.Contains("RequestImportTree", source);
+        TestAssert.Contains("CreateShortcutToExecutable", broker);
+        TestAssert.Contains("FILE_ATTRIBUTE_REPARSE_POINT", broker);
         TestAssert.Contains("PROGRAMDATA", source);
         TestAssert.Contains("Microsoft\\\\Windows\\\\Start Menu\\\\Programs", source);
         TestAssert.DoesNotContain(".vui", source);
@@ -290,10 +301,11 @@ public sealed class HostedAppModeSourceTests
     public static void NativeUiSource_UsesExactSizedIconsAndGridKeyboardNavigation()
     {
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var broker = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "ShellBroker.cpp"));
 
-        TestAssert.Contains("ResolveShortcutIconPath", source);
-        TestAssert.Contains("LoadExactSizedIcon", source);
-        TestAssert.Contains("PrivateExtractIconsW", source);
+        TestAssert.Contains("GetIconLocation", broker);
+        TestAssert.Contains("LoadItemIcon", broker);
+        TestAssert.Contains("PrivateExtractIconsW", broker);
         TestAssert.Contains("MoveSelectionHorizontal", source);
         TestAssert.Contains("MoveSelectionVertical", source);
         TestAssert.Contains("ScrollSelectedIntoView", source);
@@ -401,12 +413,14 @@ public sealed class HostedAppModeSourceTests
     public static void NativeUiSource_DeletesLaunchpadItemsInsteadOfOnlyRemovingLayout()
     {
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var broker = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "ShellBroker.cpp"));
 
-        TestAssert.Contains("DeleteItemsFromLaunchpad", source);
-        TestAssert.Contains("DeleteLaunchpadItemFile", source);
-        TestAssert.Contains("IsPathInsideLaunchpadFolder", source);
-        TestAssert.Contains("DeleteFileW(sourcePath.c_str())", source);
-        TestAssert.Contains("RemoveItemsFromLayout(sourcePaths)", source);
+        TestAssert.Contains("RequestRecycle", source);
+        TestAssert.Contains("RemoveItemsFromLayout(result->affectedPaths)", source);
+        TestAssert.Contains("CLSID_FileOperation", broker);
+        TestAssert.Contains("IsDirectChild", broker);
+        TestAssert.Contains("FOF_ALLOWUNDO", broker);
+        TestAssert.DoesNotContain("DeleteFileW(sourcePath.c_str())", source);
         TestAssert.Contains("Text(L\"Delete icon\", L\"删除图标\")", source);
         TestAssert.Contains("Text(L\"Delete selected icons\", L\"删除已选图标\")", source);
         TestAssert.Contains("ForgetIconBounds", source);
@@ -451,10 +465,10 @@ public sealed class HostedAppModeSourceTests
         TestAssert.DoesNotContain("if (IsSpotlightMode()) return;", source);
         TestAssert.Contains("SetSpotlightLayeredOpacity", source);
         TestAssert.Contains("SpotlightGlassAlpha", source);
-        TestAssert.Contains("ShowSpotlightWithAnimation", source);
-        TestAssert.Contains("HideSpotlightWithAnimation", source);
-        TestAssert.Contains("SpotlightCloseAnimationOffset", source);
-        TestAssert.Contains("std::pow(1.0 - progress, 3.0)", source);
+        TestAssert.Contains("ShowSpotlightImmediately", source);
+        TestAssert.Contains("HideSpotlightImmediately", source);
+        TestAssert.DoesNotContain("Sleep(8);", source);
+        TestAssert.DoesNotContain("Sleep(7);", source);
         TestAssert.Contains("RenderSpotlightGlassDirect2D", source);
         TestAssert.Contains("CreateRadialGradientBrush", source);
         TestAssert.Contains("RenderSpotlightGlassGdi", source);

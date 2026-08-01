@@ -13,6 +13,7 @@ $llpSettingsPath = Join-Path $llpDataDirectory 'settings.json'
 $llpLegacyLayoutPath = Join-Path $llpDataDirectory 'layout.json'
 $llpFolderA = Join-Path $llpTempRoot 'Launchpad-A'
 $llpFolderB = Join-Path $llpTempRoot 'Launchpad-B'
+$llpFolderC = Join-Path $llpTempRoot 'Launchpad-C'
 $llpRocket = [char]::ConvertFromUtf32(0x1F680)
 $llpChineseApp = ([string][char]0x5E94) + ([char]0x7528)
 $llpChineseResearch = ([string][char]0x7814) + ([char]0x53D1)
@@ -92,7 +93,7 @@ try {
         'Vendored nlohmann/json 3.12.0 checksum mismatch.'
     Write-Output 'PASS Persistence_DependencyChecksumMatchesNlohmannJson_3_12_0'
 
-    New-Item -ItemType Directory -Force -Path $llpOutputDirectory, $llpDataDirectory, $llpLocalAppData, $llpUserProfile, $llpFolderA, $llpFolderB | Out-Null
+    New-Item -ItemType Directory -Force -Path $llpOutputDirectory, $llpDataDirectory, $llpLocalAppData, $llpUserProfile, $llpFolderA, $llpFolderB, $llpFolderC | Out-Null
     [System.IO.File]::WriteAllText($llpSourceA, '', [System.Text.UTF8Encoding]::new($false))
 
     $llpSettings = [ordered]@{
@@ -233,6 +234,20 @@ try {
     Assert-True ([string]$llpFutureLayoutProbe.layout.error -match 'Unsupported layout schema version 999') 'Future layout schema was not rejected with diagnostics.'
     Assert-Equal $llpFutureLayoutHash (Get-FileHash -Algorithm SHA256 -LiteralPath $llpLayoutAPath).Hash 'Rejected future layout schema was modified.'
     [System.IO.File]::WriteAllBytes($llpLayoutAPath, $llpValidLayoutBytes)
+
+    Set-ActiveLaunchpadFolder -Folder $llpFolderC
+    [System.IO.File]::WriteAllText(
+        $llpLegacyLayoutPath,
+        '{"SchemaVersion":999,"Regions":[],"Items":[]}',
+        [System.Text.UTF8Encoding]::new($false))
+    $llpFutureLegacyHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $llpLegacyLayoutPath).Hash
+    $llpArchiveCountBeforeFutureLegacy = @(Get-ChildItem -LiteralPath $llpDataDirectory -Filter 'layout.json.migrated-v1*' -File).Count
+    $llpFutureLegacyProbe = Invoke-PersistenceProbe -Executable $llpExecutable -Name 'future-legacy-layout-schema'
+    Assert-True ([string]$llpFutureLegacyProbe.layout.error -match 'Unsupported layout schema version 999') 'Future legacy layout schema was not rejected with diagnostics.'
+    Assert-Equal $llpFutureLegacyHash (Get-FileHash -Algorithm SHA256 -LiteralPath $llpLegacyLayoutPath).Hash 'Rejected future legacy layout was modified or archived.'
+    Assert-Equal $llpArchiveCountBeforeFutureLegacy @(Get-ChildItem -LiteralPath $llpDataDirectory -Filter 'layout.json.migrated-v1*' -File).Count 'Rejected future legacy layout created a migration archive.'
+    Remove-Item -LiteralPath $llpLegacyLayoutPath
+    Set-ActiveLaunchpadFolder -Folder $llpFolderA
     Write-Output 'PASS Persistence_ValidationRejectsInvalidFieldsAndUnsupportedSchemasWithoutMutation'
 
     Remove-Item -LiteralPath $llpSourceA

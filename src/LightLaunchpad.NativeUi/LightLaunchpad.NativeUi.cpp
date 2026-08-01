@@ -1,7 +1,6 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
-#include <commoncontrols.h>
 #include <commdlg.h>
 #include <d2d1.h>
 #include <dwmapi.h>
@@ -16,7 +15,9 @@
 
 #include "LightLaunchpad.BuildIdentity.generated.h"
 #include "LightLaunchpad.Version.h"
+#include "Catalog.h"
 #include "Persistence.h"
+#include "ShellBroker.h"
 
 #include <algorithm>
 #include <cmath>
@@ -27,16 +28,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
-
-#ifndef SHIL_EXTRALARGE
-#define SHIL_EXTRALARGE 0x2
-#endif
-
-#ifndef SHIL_JUMBO
-#define SHIL_JUMBO 0x4
-#endif
 
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
 #define DWMWA_WINDOW_CORNER_PREFERENCE 33
@@ -96,6 +90,7 @@ constexpr int WorkspaceImportFilesCommand = 2204;
 constexpr int WorkspaceImportStartMenuCommand = 2205;
 constexpr UINT WmTray = WM_APP + 72;
 constexpr UINT WmActivateInstance = WM_APP + 73;
+constexpr UINT WmShellBrokerResult = WM_APP + 74;
 constexpr wchar_t WindowClassName[] = LLP_WINDOW_CLASS_NAME_WIDE;
 constexpr wchar_t SettingsWindowClassName[] = L"LightLaunchpadNativeSettingsWindow";
 constexpr wchar_t TextInputWindowClassName[] = L"LightLaunchpadNativeTextInputWindow";
@@ -111,9 +106,6 @@ constexpr int SpotlightSearchSideInset = 68;
 constexpr int SpotlightSearchCornerRadius = 24;
 constexpr COLORREF SpotlightTransparentKey = RGB(1, 2, 3);
 constexpr BYTE SpotlightGlassAlpha = 200;
-constexpr int SpotlightAnimationSteps = 9;
-constexpr int SpotlightAnimationOffset = 18;
-constexpr int SpotlightCloseAnimationOffset = 12;
 constexpr size_t MaxResidentIconCount = 96;
 constexpr UINT_PTR DragAnimationTimerId = 0x4C5601;
 constexpr int DragTargetSettleMs = 55;
@@ -125,8 +117,6 @@ constexpr int TrayIconRetryMaxAttempts = 8;
 constexpr DWORD ActivationIpcTimeoutMs = 2000;
 constexpr size_t MaxStartupLogBytes = 256 * 1024;
 constexpr ULONG_PTR ActivationCopyDataId = 0x4C4C5001;
-const GUID NativeIID_IImageList = { 0x46eb5926, 0x582e, 0x4017, { 0x9f, 0xdf, 0xe8, 0x99, 0x8d, 0xaa, 0x09, 0x50 } };
-
 enum AccentState
 {
     ACCENT_DISABLED = 0,
@@ -219,6 +209,8 @@ struct LaunchItem
     std::wstring displayNameLower;
     std::wstring searchCandidateText;
     std::wstring searchCandidateLower;
+    std::wstring stableId;
+    bool iconRequestPending = false;
 };
 
 struct HitTile
@@ -377,10 +369,54 @@ bool g_layoutRecoveredFromBackup = false;
 bool g_layoutMigrated = false;
 std::wstring g_layoutPersistenceError;
 std::wstring g_layoutQuarantinePath;
+llp::shell::ShellBroker g_shellBroker;
+uint64_t g_catalogGeneration = 0;
+uint64_t g_requestedCatalogGeneration = 0;
+bool g_catalogRefreshPending = false;
+std::wstring g_catalogFolderIdentity;
+std::wstring g_catalogStatus = L"Catalog has not loaded yet.";
+DWORD g_catalogBrokerThreadId = 0;
+
+struct CatalogBrokerProbeState
+{
+    bool active = false;
+    int stage = 0;
+    DWORD delayMilliseconds = 0;
+    std::wstring outputPath;
+    ULONGLONG inputPostedTick = 0;
+    uint64_t inputResponseMilliseconds = 0;
+    size_t cachedItemCountBeforeRefresh = 0;
+    size_t cachedItemCountDuringRefresh = 0;
+    std::wstring cachedStableIdBeforeRefresh;
+    uint64_t refreshMilliseconds = 0;
+    DWORD brokerThreadId = 0;
+    std::wstring apartment;
+    bool shutdownPersistenceQueued = false;
+};
+
+struct ShellImportProbeState
+{
+    bool active = false;
+    int stage = 0;
+    int repeat = 2;
+    int firstImported = 0;
+    int secondImported = 0;
+    int firstSkippedReparsePoints = 0;
+    std::wstring outputPath;
+    std::wstring root;
+    std::wstring destination;
+    DWORD brokerThreadId = 0;
+    std::wstring apartment;
+};
+
+CatalogBrokerProbeState g_catalogBrokerProbe;
+ShellImportProbeState g_shellImportProbe;
 
 bool ShowTextInputDialog(const std::wstring& title, const std::wstring& label, const std::wstring& initialValue, std::wstring& result);
 bool RegisterCurrentHotkey();
 bool SaveLayout();
+void RequestCatalogRefresh(DWORD testDelayMilliseconds = 0);
+void QueueItemIcon(LaunchItem& item);
 void ShowSettingsWindow();
 void RebuildFiltered();
 void DestroyDirectRenderer();
@@ -583,14 +619,6 @@ std::wstring GetFileStem(const std::wstring& path)
     return stem;
 }
 
-bool IsLaunchablePath(const std::wstring& path)
-{
-    return EndsWithIgnoreCase(path, L".lnk")
-        || EndsWithIgnoreCase(path, L".url")
-        || EndsWithIgnoreCase(path, L".exe")
-        || EndsWithIgnoreCase(path, L".com");
-}
-
 std::wstring GetAppDataPath()
 {
     wchar_t appData[MAX_PATH] = L"";
@@ -737,12 +765,6 @@ std::wstring GetLayoutPath()
 {
     const auto dataPath = GetLightLaunchpadDataPath();
     return dataPath.empty() ? L"" : llp::persistence::ScopedLayoutPath(dataPath, g_settings.launchpadFolder);
-}
-
-std::wstring GetLegacyLayoutPath()
-{
-    const auto dataPath = GetLightLaunchpadDataPath();
-    return dataPath.empty() ? L"" : JoinPath(dataPath, L"layout.json");
 }
 
 std::wstring GetSettingsPath()
@@ -1050,222 +1072,6 @@ void AddDefaultRegion()
     }
 }
 
-bool IsDirectChildOfLaunchpadFolder(const std::wstring& sourcePath)
-{
-    if (sourcePath.empty() || g_settings.launchpadFolder.empty()) return false;
-    std::vector<wchar_t> parent(sourcePath.begin(), sourcePath.end());
-    parent.push_back(L'\0');
-    if (!PathRemoveFileSpecW(parent.data())) return false;
-    const auto normalizedParent = llp::persistence::NormalizeFolderIdentity(parent.data());
-    const auto normalizedLaunchpad = llp::persistence::NormalizeFolderIdentity(g_settings.launchpadFolder);
-    return CompareStringOrdinal(normalizedParent.c_str(), -1, normalizedLaunchpad.c_str(), -1, TRUE) == CSTR_EQUAL;
-}
-
-void LoadLayout()
-{
-    g_regions.clear();
-    g_items.clear();
-    g_missingLayoutItems.clear();
-    g_layoutRecoveredFromBackup = false;
-    g_layoutMigrated = false;
-    g_layoutPersistenceError.clear();
-    g_layoutQuarantinePath.clear();
-    const auto dataPath = GetLightLaunchpadDataPath();
-    if (dataPath.empty())
-    {
-        AddDefaultRegion();
-        return;
-    }
-
-    const auto layoutPath = GetLayoutPath();
-    const auto backupPath = layoutPath + L".bak";
-    const bool scopedStateExists = GetFileAttributesW(layoutPath.c_str()) != INVALID_FILE_ATTRIBUTES
-        || GetFileAttributesW(backupPath.c_str()) != INVALID_FILE_ATTRIBUTES;
-    auto loadResult = llp::persistence::LoadJsonWithRecovery(layoutPath);
-    bool migratedLegacyFile = false;
-    if (!loadResult.document.is_object() && !scopedStateExists)
-    {
-        auto legacyResult = llp::persistence::LoadJsonWithRecovery(GetLegacyLayoutPath());
-        if (legacyResult.document.is_object())
-        {
-            loadResult = std::move(legacyResult);
-            migratedLegacyFile = true;
-        }
-    }
-    g_layoutRecoveredFromBackup = loadResult.recoveredFromBackup;
-    g_layoutQuarantinePath = loadResult.quarantinePath;
-    if (loadResult.found || loadResult.recoveredFromBackup) g_layoutPersistenceError = loadResult.error;
-    if (!loadResult.document.is_object())
-    {
-        AddDefaultRegion();
-        return;
-    }
-
-    const Json& document = loadResult.document;
-    int schemaVersion = 1;
-    if (document.contains("SchemaVersion") && !TryGetJsonInt(document["SchemaVersion"], schemaVersion))
-    {
-        g_layoutPersistenceError = L"Layout SchemaVersion must be a supported integer.";
-        AddDefaultRegion();
-        return;
-    }
-    if (schemaVersion < 1 || schemaVersion > llp::persistence::CurrentSchemaVersion)
-    {
-        g_layoutPersistenceError = L"Unsupported layout schema version " + std::to_wstring(schemaVersion) + L".";
-        AddDefaultRegion();
-        return;
-    }
-    g_layoutMigrated = migratedLegacyFile || schemaVersion < llp::persistence::CurrentSchemaVersion;
-
-    const auto currentIdentity = llp::persistence::NormalizeFolderIdentity(g_settings.launchpadFolder);
-    if (!migratedLegacyFile && schemaVersion >= 2
-        && (!document.contains("FolderIdentity") || !document["FolderIdentity"].is_string()))
-    {
-        g_layoutPersistenceError = L"Schema v2 layout requires a string FolderIdentity.";
-        AddDefaultRegion();
-        return;
-    }
-    if (!migratedLegacyFile && document.contains("FolderIdentity") && document["FolderIdentity"].is_string())
-    {
-        const auto storedIdentity = llp::persistence::Utf8ToWide(document["FolderIdentity"].get<std::string>());
-        if (CompareStringOrdinal(storedIdentity.c_str(), -1, currentIdentity.c_str(), -1, TRUE) != CSTR_EQUAL)
-        {
-            g_layoutPersistenceError = L"Scoped layout folder identity does not match the active launchpad folder.";
-            AddDefaultRegion();
-            return;
-        }
-    }
-
-    if (document.contains("ViewMode") && document["ViewMode"].is_string())
-    {
-        const auto viewMode = llp::persistence::Utf8ToWide(document["ViewMode"].get<std::string>());
-        if (!viewMode.empty()) g_layoutViewMode = viewMode;
-    }
-
-    if (document.contains("Regions") && !document["Regions"].is_array())
-    {
-        AppendPersistenceError(g_layoutPersistenceError, L"Layout field Regions must be an array.");
-    }
-    else if (document.contains("Regions"))
-    {
-        for (const auto& regionDocument : document["Regions"])
-        {
-            if (!regionDocument.is_object() || g_regions.size() >= 1000) continue;
-            const auto id = regionDocument.contains("Id") && regionDocument["Id"].is_string()
-                ? llp::persistence::Utf8ToWide(regionDocument["Id"].get<std::string>())
-                : std::wstring{};
-            const auto name = regionDocument.contains("Name") && regionDocument["Name"].is_string()
-                ? llp::persistence::Utf8ToWide(regionDocument["Name"].get<std::string>())
-                : std::wstring{};
-            int order = static_cast<int>(g_regions.size());
-            if (regionDocument.contains("Order") && !TryGetJsonInt(regionDocument["Order"], order))
-            {
-                AppendPersistenceError(g_layoutPersistenceError, L"Layout region Order must be an in-range integer.");
-                order = static_cast<int>(g_regions.size());
-            }
-            if (!id.empty() && !name.empty() && !RegionExists(id)) g_regions.push_back({ id, name, order });
-        }
-    }
-    AddDefaultRegion();
-
-    if (document.contains("Items") && !document["Items"].is_array())
-    {
-        AppendPersistenceError(g_layoutPersistenceError, L"Layout field Items must be an array.");
-    }
-    else if (document.contains("Items"))
-    {
-        for (const auto& itemDocument : document["Items"])
-        {
-            if (!itemDocument.is_object() || g_items.size() + g_missingLayoutItems.size() >= 10000) continue;
-            auto sourcePath = itemDocument.contains("SourcePath") && itemDocument["SourcePath"].is_string()
-                ? llp::persistence::Utf8ToWide(itemDocument["SourcePath"].get<std::string>())
-                : std::wstring{};
-            auto displayName = itemDocument.contains("DisplayName") && itemDocument["DisplayName"].is_string()
-                ? llp::persistence::Utf8ToWide(itemDocument["DisplayName"].get<std::string>())
-                : std::wstring{};
-            auto regionId = itemDocument.contains("RegionId") && itemDocument["RegionId"].is_string()
-                ? llp::persistence::Utf8ToWide(itemDocument["RegionId"].get<std::string>())
-                : std::wstring{};
-            int order = static_cast<int>(g_items.size() + g_missingLayoutItems.size());
-            if (itemDocument.contains("Order") && !TryGetJsonInt(itemDocument["Order"], order))
-            {
-                AppendPersistenceError(g_layoutPersistenceError, L"Layout item Order must be an in-range integer.");
-                order = static_cast<int>(g_items.size() + g_missingLayoutItems.size());
-            }
-            if (sourcePath.empty() || !IsDirectChildOfLaunchpadFolder(sourcePath)) continue;
-            const bool duplicateSource = std::any_of(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
-                return SamePath(item.sourcePath, sourcePath);
-            }) || std::any_of(g_missingLayoutItems.begin(), g_missingLayoutItems.end(), [&](const LaunchItem& item) {
-                return SamePath(item.sourcePath, sourcePath);
-            });
-            if (duplicateSource)
-            {
-                AppendPersistenceError(g_layoutPersistenceError, L"Layout contains a duplicate stable source path; the later item was ignored.");
-                continue;
-            }
-            if (displayName.empty()) displayName = GetFileStem(sourcePath);
-            if (regionId.empty() || !RegionExists(regionId)) regionId = L"uncategorized";
-            LaunchItem item = { sourcePath, displayName, regionId, order, nullptr };
-            if (GetFileAttributesW(sourcePath.c_str()) != INVALID_FILE_ATTRIBUTES) g_items.push_back(std::move(item));
-            else g_missingLayoutItems.push_back(std::move(item));
-        }
-    }
-
-    if (g_layoutMigrated)
-    {
-        const bool migratedSaved = SaveLayout();
-        if (migratedLegacyFile && migratedSaved)
-        {
-            const auto legacyPath = GetLegacyLayoutPath();
-            std::wstring archivedPath = legacyPath + L".migrated-v1";
-            if (GetFileAttributesW(archivedPath.c_str()) != INVALID_FILE_ATTRIBUTES)
-            {
-                archivedPath += L"-" + std::to_wstring(GetTickCount64());
-            }
-            if (!MoveFileExW(legacyPath.c_str(), archivedPath.c_str(), MOVEFILE_WRITE_THROUGH))
-            {
-                g_layoutPersistenceError = L"Scoped layout was saved, but the legacy layout could not be archived.";
-            }
-        }
-    }
-}
-
-void AddMissingLaunchpadFolderItems()
-{
-    CreateDirectoryW(g_settings.launchpadFolder.c_str(), nullptr);
-    std::wstring search = JoinPath(g_settings.launchpadFolder, L"*");
-    WIN32_FIND_DATAW data = {};
-    HANDLE find = FindFirstFileW(search.c_str(), &data);
-    if (find == INVALID_HANDLE_VALUE) return;
-
-    do
-    {
-        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        std::wstring path = JoinPath(g_settings.launchpadFolder, data.cFileName);
-        if (!IsLaunchablePath(path)) continue;
-        const bool exists = std::any_of(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
-            return SamePath(item.sourcePath, path);
-        });
-        if (!exists)
-        {
-            auto missing = std::find_if(g_missingLayoutItems.begin(), g_missingLayoutItems.end(), [&](const LaunchItem& item) {
-                return SamePath(item.sourcePath, path);
-            });
-            if (missing != g_missingLayoutItems.end())
-            {
-                g_items.push_back(std::move(*missing));
-                g_missingLayoutItems.erase(missing);
-            }
-            else
-            {
-                g_items.push_back({ path, GetFileStem(path), L"uncategorized", static_cast<int>(g_items.size()), nullptr });
-            }
-        }
-    } while (FindNextFileW(find, &data));
-
-    FindClose(find);
-}
-
 void SortItems()
 {
     std::sort(g_items.begin(), g_items.end(), [](const LaunchItem& left, const LaunchItem& right) {
@@ -1382,6 +1188,12 @@ bool SaveLayout()
         });
         if (!alreadyVisible) appendItem(item);
     }
+    if (g_hwnd && g_shellBroker.IsRunning())
+    {
+        const auto requestId = g_shellBroker.RequestPersistJson(GetLayoutPath(), document.dump());
+        if (requestId == 0) g_layoutPersistenceError = L"The layout write could not be queued on the background broker.";
+        return requestId != 0;
+    }
     std::wstring error;
     const bool saved = llp::persistence::WriteJsonAtomicWithBackup(GetLayoutPath(), document, error);
     if (!saved) g_layoutPersistenceError = error;
@@ -1441,46 +1253,6 @@ void MoveItemsToTarget(const std::vector<std::wstring>& sourcePaths, const DropT
 void MoveItemToTarget(const std::wstring& sourcePath, const DropTarget& target)
 {
     MoveItemsToTarget(std::vector<std::wstring>{ sourcePath }, target);
-}
-
-std::wstring FullPath(const std::wstring& path)
-{
-    if (path.empty()) return L"";
-    const DWORD required = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
-    if (required == 0) return path;
-
-    std::vector<wchar_t> buffer(static_cast<size_t>(required) + 1, L'\0');
-    const DWORD written = GetFullPathNameW(path.c_str(), static_cast<DWORD>(buffer.size()), buffer.data(), nullptr);
-    if (written == 0 || written >= buffer.size()) return path;
-
-    std::wstring fullPath(buffer.data(), written);
-    while (fullPath.size() > 3 && (fullPath.back() == L'\\' || fullPath.back() == L'/'))
-    {
-        fullPath.pop_back();
-    }
-    return fullPath;
-}
-
-bool IsPathInsideLaunchpadFolder(const std::wstring& sourcePath)
-{
-    std::wstring root = FullPath(g_settings.launchpadFolder);
-    const std::wstring fullPath = FullPath(sourcePath);
-    if (root.empty() || fullPath.empty()) return false;
-    if (root.back() != L'\\' && root.back() != L'/')
-    {
-        root.push_back(L'\\');
-    }
-    if (fullPath.size() <= root.size()) return false;
-    return CompareStringOrdinal(fullPath.c_str(), static_cast<int>(root.size()), root.c_str(), static_cast<int>(root.size()), TRUE) == CSTR_EQUAL;
-}
-
-bool DeleteLaunchpadItemFile(const std::wstring& sourcePath)
-{
-    if (!IsPathInsideLaunchpadFolder(sourcePath)) return true;
-    const DWORD attributes = GetFileAttributesW(sourcePath.c_str());
-    if (attributes == INVALID_FILE_ATTRIBUTES) return true;
-    if (attributes & FILE_ATTRIBUTE_DIRECTORY) return false;
-    return DeleteFileW(sourcePath.c_str()) != FALSE;
 }
 
 void ForgetIconBounds(HICON icon)
@@ -1629,20 +1401,6 @@ void RemoveItemsFromLayout(const std::vector<std::wstring>& sourcePaths)
         }
     }
     RenumberItemsByRegion();
-}
-
-int DeleteItemsFromLaunchpad(const std::vector<std::wstring>& sourcePaths)
-{
-    int failed = 0;
-    for (const auto& sourcePath : sourcePaths)
-    {
-        if (!DeleteLaunchpadItemFile(sourcePath))
-        {
-            failed++;
-        }
-    }
-    RemoveItemsFromLayout(sourcePaths);
-    return failed;
 }
 
 void DeleteRegionAndMoveItems(const std::wstring& regionId)
@@ -1956,24 +1714,44 @@ void CancelSelectionBox(HWND hwnd)
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
-void ReloadData()
+LaunchItem LaunchItemFromCatalog(const llp::catalog::Item& source)
 {
-    g_catalogStarted = true;
-    if (g_catalogStartTick == 0) g_catalogStartTick = GetTickCount64();
+    LaunchItem item = { source.sourcePath, source.displayName, source.regionId, source.order, nullptr };
+    item.stableId = source.stableId;
+    return item;
+}
+
+void ApplyCatalogSnapshot(const llp::catalog::Snapshot& snapshot)
+{
+    if (snapshot.generation < g_requestedCatalogGeneration) return;
+    std::wstring focusedStableId;
+    if (g_selectedFilteredIndex >= 0 && g_selectedFilteredIndex < static_cast<int>(g_filtered.size()))
+    {
+        const int focusedItemIndex = g_filtered[g_selectedFilteredIndex];
+        if (focusedItemIndex >= 0 && focusedItemIndex < static_cast<int>(g_items.size())) focusedStableId = g_items[focusedItemIndex].stableId;
+    }
     const int previousIconSize = g_settings.iconSize;
     std::vector<LaunchItem> previousItems = std::move(g_items);
-    LoadSettings();
-    LoadLayout();
-    AddMissingLaunchpadFolderItems();
-    SortItems();
-    RebuildSearchIndex();
+
+    g_regions.clear();
+    g_regions.reserve(snapshot.regions.size());
+    for (const auto& region : snapshot.regions)
+    {
+        g_regions.push_back({ region.id, region.name, region.order });
+    }
+    g_items.clear();
+    g_items.reserve(snapshot.items.size());
+    for (const auto& source : snapshot.items) g_items.push_back(LaunchItemFromCatalog(source));
+    g_missingLayoutItems.clear();
+    g_missingLayoutItems.reserve(snapshot.missingItems.size());
+    for (const auto& source : snapshot.missingItems) g_missingLayoutItems.push_back(LaunchItemFromCatalog(source));
 
     if (previousIconSize == g_settings.iconSize)
     {
         for (auto& item : g_items)
         {
             auto found = std::find_if(previousItems.begin(), previousItems.end(), [&](const LaunchItem& previous) {
-                return previous.icon && SamePath(previous.sourcePath, item.sourcePath);
+                return previous.icon && previous.stableId == item.stableId;
             });
             if (found != previousItems.end())
             {
@@ -1984,27 +1762,33 @@ void ReloadData()
             }
         }
     }
+    for (auto& item : previousItems) ReleaseItemIcon(item);
 
-    for (auto& item : previousItems)
-    {
-        ReleaseItemIcon(item);
-    }
+    g_layoutViewMode = snapshot.viewMode;
+    g_layoutRecoveredFromBackup = snapshot.recoveredFromBackup;
+    g_layoutMigrated = snapshot.migratedLegacy;
+    g_layoutQuarantinePath = snapshot.quarantinePath;
+    g_layoutPersistenceError = snapshot.error;
+    g_catalogGeneration = snapshot.generation;
+    g_catalogFolderIdentity = snapshot.folderIdentity;
+    g_catalogRefreshPending = false;
+    g_catalogStatus = snapshot.error.empty()
+        ? L"Catalog snapshot published in " + std::to_wstring(snapshot.loadMilliseconds) + L" ms."
+        : L"Catalog snapshot published with diagnostics: " + snapshot.error;
 
-    if (previousIconSize != g_settings.iconSize)
+    RebuildSearchIndex();
+    RebuildFiltered();
+    if (!focusedStableId.empty())
     {
-        ReleaseAllResidentIcons();
+        for (int filteredIndex = 0; filteredIndex < static_cast<int>(g_filtered.size()); ++filteredIndex)
+        {
+            if (g_items[g_filtered[filteredIndex]].stableId == focusedStableId)
+            {
+                g_selectedFilteredIndex = filteredIndex;
+                break;
+            }
+        }
     }
-    else
-    {
-        g_iconBoundsCache.erase(
-            std::remove_if(g_iconBoundsCache.begin(), g_iconBoundsCache.end(), [](const IconOpaqueBoundsCacheEntry& entry) {
-                return !entry.icon || std::none_of(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
-                    return item.icon == entry.icon;
-                });
-            }),
-            g_iconBoundsCache.end());
-    }
-
     g_selectedSourcePaths.erase(
         std::remove_if(g_selectedSourcePaths.begin(), g_selectedSourcePaths.end(), [](const std::wstring& sourcePath) {
             return std::none_of(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
@@ -2017,6 +1801,55 @@ void ReloadData()
             return !RegionExists(regionId);
         }),
         g_selectedRegionIds.end());
+    if (g_hwnd) InvalidateRect(g_hwnd, nullptr, TRUE);
+}
+
+void RequestCatalogRefresh(DWORD testDelayMilliseconds)
+{
+    if (!g_shellBroker.IsRunning())
+    {
+        g_catalogStatus = L"Shell broker is not running; catalog refresh was not queued.";
+        return;
+    }
+    g_catalogStarted = true;
+    if (g_catalogStartTick == 0) g_catalogStartTick = GetTickCount64();
+    const auto requestedIdentity = llp::persistence::NormalizeFolderIdentity(g_settings.launchpadFolder);
+    if (!g_catalogFolderIdentity.empty()
+        && CompareStringOrdinal(g_catalogFolderIdentity.c_str(), -1, requestedIdentity.c_str(), -1, TRUE) != CSTR_EQUAL)
+    {
+        ReleaseAllResidentIcons();
+        g_items.clear();
+        g_missingLayoutItems.clear();
+        g_regions.clear();
+        AddDefaultRegion();
+        RebuildSearchIndex();
+        RebuildFiltered();
+    }
+    const uint64_t generation = ++g_requestedCatalogGeneration;
+    const auto requestId = g_shellBroker.RequestCatalog(
+        GetLightLaunchpadDataPath(),
+        g_settings.launchpadFolder,
+        generation,
+        testDelayMilliseconds);
+    g_catalogRefreshPending = requestId != 0;
+    g_catalogStatus = requestId != 0 ? L"Catalog refresh queued on Shell STA." : L"Catalog refresh queue failed.";
+}
+
+void ReloadData()
+{
+    RequestCatalogRefresh();
+}
+
+void QueueItemIcon(LaunchItem& item)
+{
+    if (item.icon)
+    {
+        item.iconLastUsed = ++g_iconUseCounter;
+        return;
+    }
+    if (item.iconRequestPending || !g_shellBroker.IsRunning()) return;
+    if (item.stableId.empty()) item.stableId = llp::catalog::StableItemId(item.sourcePath);
+    item.iconRequestPending = g_shellBroker.RequestIcon(item.stableId, item.sourcePath, g_settings.iconSize) != 0;
 }
 
 bool IsCjkCharacter(wchar_t ch)
@@ -2456,133 +2289,6 @@ void RebuildFiltered()
     }
 }
 
-HICON LoadShellImageListIcon(const std::wstring& path, int imageListSize)
-{
-    SHFILEINFOW info = {};
-    if (!SHGetFileInfoW(
-        path.c_str(),
-        0,
-        &info,
-        sizeof(info),
-        SHGFI_SYSICONINDEX | SHGFI_LARGEICON))
-    {
-        return nullptr;
-    }
-
-    IImageList* imageList = nullptr;
-    HRESULT hr = SHGetImageList(imageListSize, NativeIID_IImageList, reinterpret_cast<void**>(&imageList));
-    if (FAILED(hr) || !imageList)
-    {
-        return nullptr;
-    }
-
-    HICON icon = nullptr;
-    hr = imageList->GetIcon(info.iIcon, ILD_TRANSPARENT, &icon);
-    imageList->Release();
-    return SUCCEEDED(hr) ? icon : nullptr;
-}
-
-bool ResolveShortcutIconPath(const std::wstring& sourcePath, std::wstring& iconPath, int& iconIndex)
-{
-    iconPath = sourcePath;
-    iconIndex = 0;
-    if (!EndsWithIgnoreCase(sourcePath, L".lnk"))
-    {
-        return true;
-    }
-
-    IShellLinkW* link = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, reinterpret_cast<void**>(&link));
-    if (FAILED(hr) || !link) return false;
-
-    IPersistFile* file = nullptr;
-    hr = link->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&file));
-    if (SUCCEEDED(hr) && file)
-    {
-        hr = file->Load(sourcePath.c_str(), STGM_READ);
-        if (SUCCEEDED(hr))
-        {
-            wchar_t resolvedIcon[MAX_PATH] = L"";
-            int resolvedIndex = 0;
-            if (SUCCEEDED(link->GetIconLocation(resolvedIcon, ARRAYSIZE(resolvedIcon), &resolvedIndex)) && resolvedIcon[0] != L'\0')
-            {
-                iconPath = resolvedIcon;
-                iconIndex = resolvedIndex;
-            }
-            else
-            {
-                wchar_t target[MAX_PATH] = L"";
-                if (SUCCEEDED(link->GetPath(target, ARRAYSIZE(target), nullptr, SLGP_UNCPRIORITY)) && target[0] != L'\0')
-                {
-                    iconPath = target;
-                    iconIndex = 0;
-                }
-            }
-        }
-        file->Release();
-    }
-
-    link->Release();
-    return !iconPath.empty();
-}
-
-HICON LoadExactSizedIcon(const std::wstring& sourcePath, int size)
-{
-    std::wstring iconPath;
-    int iconIndex = 0;
-    ResolveShortcutIconPath(sourcePath, iconPath, iconIndex);
-    if (iconPath.empty()) iconPath = sourcePath;
-
-    HICON icon = nullptr;
-    UINT extracted = PrivateExtractIconsW(
-        iconPath.c_str(),
-        iconIndex,
-        size,
-        size,
-        &icon,
-        nullptr,
-        1,
-        0);
-    return extracted > 0 ? icon : nullptr;
-}
-
-void LoadItemIcon(LaunchItem& item)
-{
-    if (item.icon)
-    {
-        item.iconLastUsed = ++g_iconUseCounter;
-        return;
-    }
-    item.icon = LoadExactSizedIcon(item.sourcePath, g_settings.iconSize);
-    if (item.icon)
-    {
-        item.iconLastUsed = ++g_iconUseCounter;
-        return;
-    }
-    item.icon = LoadShellImageListIcon(item.sourcePath, SHIL_JUMBO);
-    if (!item.icon) item.icon = LoadShellImageListIcon(item.sourcePath, SHIL_EXTRALARGE);
-    if (item.icon)
-    {
-        item.iconLastUsed = ++g_iconUseCounter;
-        return;
-    }
-
-    SHFILEINFOW info = {};
-    if (SHGetFileInfoW(
-        item.sourcePath.c_str(),
-        0,
-        &info,
-        sizeof(info),
-        SHGFI_ICON | SHGFI_LARGEICON))
-    {
-        item.icon = info.hIcon;
-    }
-    if (item.icon)
-    {
-        item.iconLastUsed = ++g_iconUseCounter;
-    }
-}
-
 HICON LoadEmbeddedAppIcon(int width = 0, int height = 0)
 {
     HICON icon = reinterpret_cast<HICON>(
@@ -2810,8 +2516,8 @@ std::string BuildPersistenceProbeJson(bool settingsSaved, bool layoutSaved)
 int RunPersistenceProbe(const std::wstring& outputPath, bool resave)
 {
     LoadSettings();
-    LoadLayout();
-    AddMissingLaunchpadFolderItems();
+    g_requestedCatalogGeneration = 1;
+    ApplyCatalogSnapshot(llp::catalog::LoadSnapshot(GetLightLaunchpadDataPath(), g_settings.launchpadFolder, 1));
     const bool settingsSaved = !resave || SaveSettings(g_settings);
     const bool layoutSaved = !resave || SaveLayout();
     const bool probeSaved = WriteFileUtf8(outputPath, BuildPersistenceProbeJson(settingsSaved, layoutSaved));
@@ -2834,7 +2540,10 @@ std::wstring BuildDiagnosticsSummary()
     summary += L"Monitor: " + MonitorDiagnostics() + L"\r\n";
     summary += L"Startup: " + StartupCommand() + L"\r\n";
     summary += L"Hotkey: " + HotkeyDiagnostics() + L"\r\n";
-    summary += L"Settings status: " + g_settingsStatus;
+    summary += L"Settings status: " + g_settingsStatus + L"\r\n";
+    summary += L"Catalog: " + g_catalogStatus + L"\r\n";
+    summary += L"Catalog generation: " + std::to_wstring(g_catalogGeneration) + L"\r\n";
+    summary += L"Shell broker thread: " + (g_catalogBrokerThreadId == 0 ? L"not published" : std::to_wstring(g_catalogBrokerThreadId));
     return summary;
 }
 
@@ -2885,6 +2594,182 @@ bool CommandLineHasArgument(const wchar_t* expected)
     }
     LocalFree(arguments);
     return found;
+}
+
+int CommandLineIntValue(const wchar_t* name, int fallback, int minimum, int maximum)
+{
+    const auto value = CommandLineValue(name);
+    if (value.empty()) return fallback;
+    wchar_t* end = nullptr;
+    const long parsed = std::wcstol(value.c_str(), &end, 10);
+    if (!end || *end != L'\0') return fallback;
+    return std::clamp(static_cast<int>(parsed), minimum, maximum);
+}
+
+std::string BuildCatalogBrokerProbeJson()
+{
+    Json document = {
+        { "brokerApartment", llp::persistence::WideToUtf8(g_catalogBrokerProbe.apartment) },
+        { "uiThreadId", GetCurrentThreadId() },
+        { "brokerThreadId", g_catalogBrokerProbe.brokerThreadId },
+        { "cachedItemCountBeforeRefresh", g_catalogBrokerProbe.cachedItemCountBeforeRefresh },
+        { "cachedItemCountDuringRefresh", g_catalogBrokerProbe.cachedItemCountDuringRefresh },
+        { "cachedStableIdBeforeRefresh", llp::persistence::WideToUtf8(g_catalogBrokerProbe.cachedStableIdBeforeRefresh) },
+        { "cachedStableIdAfterRefresh", g_items.empty() ? "" : llp::persistence::WideToUtf8(g_items.front().stableId) },
+        { "inputEcho", llp::persistence::WideToUtf8(g_searchText) },
+        { "inputResponseMs", g_catalogBrokerProbe.inputResponseMilliseconds },
+        { "refreshMs", g_catalogBrokerProbe.refreshMilliseconds },
+        { "catalogGeneration", g_catalogGeneration },
+        { "shutdownPersistenceQueued", g_catalogBrokerProbe.shutdownPersistenceQueued }
+    };
+    return document.dump(2) + "\n";
+}
+
+std::string BuildShellImportProbeJson()
+{
+    Json document = {
+        { "brokerApartment", llp::persistence::WideToUtf8(g_shellImportProbe.apartment) },
+        { "brokerThreadId", g_shellImportProbe.brokerThreadId },
+        { "firstImported", g_shellImportProbe.firstImported },
+        { "secondImported", g_shellImportProbe.secondImported },
+        { "skippedReparsePoints", g_shellImportProbe.firstSkippedReparsePoints }
+    };
+    return document.dump(2) + "\n";
+}
+
+void HandleShellBrokerResult(LPARAM lParam)
+{
+    std::unique_ptr<llp::shell::Result> result(reinterpret_cast<llp::shell::Result*>(lParam));
+    if (!result) return;
+    g_catalogBrokerThreadId = result->brokerThreadId;
+    switch (result->kind)
+    {
+    case llp::shell::ResultKind::Catalog:
+        if (g_catalogBrokerProbe.active)
+        {
+            g_catalogBrokerProbe.brokerThreadId = result->brokerThreadId;
+            g_catalogBrokerProbe.apartment = result->apartment;
+            if (g_catalogBrokerProbe.stage == 0)
+            {
+                if (!result->snapshot) break;
+                ApplyCatalogSnapshot(*result->snapshot);
+                g_catalogBrokerProbe.cachedItemCountBeforeRefresh = g_items.size();
+                if (!g_items.empty()) g_catalogBrokerProbe.cachedStableIdBeforeRefresh = g_items.front().stableId;
+                g_catalogBrokerProbe.stage = 1;
+                PostMessageW(g_hwnd, WM_HOTKEY, static_cast<WPARAM>(g_activeHotkeyId), 0);
+            }
+            else
+            {
+                g_catalogBrokerProbe.refreshMilliseconds = result->elapsedMilliseconds;
+                if (!result->snapshot) break;
+                ApplyCatalogSnapshot(*result->snapshot);
+                if (!g_items.empty()) g_items.front().displayName = L"Shutdown Flush Sentinel";
+                g_catalogBrokerProbe.shutdownPersistenceQueued = SaveLayout();
+                const bool saved = WriteFileUtf8(g_catalogBrokerProbe.outputPath, BuildCatalogBrokerProbeJson());
+                g_catalogBrokerProbe.active = false;
+                DestroyWindow(g_hwnd);
+                if (!saved) PostQuitMessage(2);
+            }
+        }
+        else
+        {
+            if (result->snapshot) ApplyCatalogSnapshot(*result->snapshot);
+        }
+        break;
+    case llp::shell::ResultKind::Icon:
+    {
+        auto found = std::find_if(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
+            return item.stableId == result->stableId;
+        });
+        if (found != g_items.end())
+        {
+            found->iconRequestPending = false;
+            if (result->icon && result->iconSize == g_settings.iconSize)
+            {
+                ReleaseItemIcon(*found);
+                found->icon = result->icon;
+                found->iconLastUsed = ++g_iconUseCounter;
+                result->icon = nullptr;
+                InvalidateRect(g_hwnd, nullptr, FALSE);
+            }
+            else if (result->iconSize != g_settings.iconSize)
+            {
+                QueueItemIcon(*found);
+            }
+        }
+        if (result->icon) DestroyIcon(result->icon);
+        break;
+    }
+    case llp::shell::ResultKind::ImportTree:
+        if (g_shellImportProbe.active)
+        {
+            g_shellImportProbe.brokerThreadId = result->brokerThreadId;
+            g_shellImportProbe.apartment = result->apartment;
+            if (g_shellImportProbe.stage == 0)
+            {
+                g_shellImportProbe.firstImported = result->imported;
+                g_shellImportProbe.firstSkippedReparsePoints = result->skippedReparsePoints;
+                g_shellImportProbe.stage = 1;
+                g_shellBroker.RequestImportTree(g_shellImportProbe.root, g_shellImportProbe.destination);
+            }
+            else
+            {
+                g_shellImportProbe.secondImported = result->imported;
+                const bool saved = WriteFileUtf8(g_shellImportProbe.outputPath, BuildShellImportProbeJson());
+                g_shellImportProbe.active = false;
+                DestroyWindow(g_hwnd);
+                if (!saved) PostQuitMessage(2);
+            }
+        }
+        else
+        {
+            RequestCatalogRefresh();
+            if (!result->succeeded && !result->error.empty())
+            {
+                MessageBoxW(g_hwnd, result->error.c_str(), L"LightLaunchpad import", MB_ICONWARNING | MB_OK);
+            }
+        }
+        break;
+    case llp::shell::ResultKind::Recycle:
+        if (!result->affectedPaths.empty())
+        {
+            RemoveItemsFromLayout(result->affectedPaths);
+            g_missingLayoutItems.erase(
+                std::remove_if(g_missingLayoutItems.begin(), g_missingLayoutItems.end(), [&](const LaunchItem& item) {
+                    return ContainsPath(result->affectedPaths, item.sourcePath);
+                }),
+                g_missingLayoutItems.end());
+            SortItems();
+            SaveLayout();
+            RebuildFiltered();
+            InvalidateRect(g_hwnd, nullptr, TRUE);
+        }
+        RequestCatalogRefresh();
+        if (!result->succeeded && !result->error.empty())
+        {
+            MessageBoxW(g_hwnd, result->error.c_str(), L"LightLaunchpad Shell operation", MB_ICONWARNING | MB_OK);
+        }
+        break;
+    case llp::shell::ResultKind::Launch:
+    case llp::shell::ResultKind::OpenFolder:
+    case llp::shell::ResultKind::OpenLocation:
+        if (!result->succeeded && !result->error.empty())
+        {
+            MessageBoxW(g_hwnd, result->error.c_str(), L"LightLaunchpad Shell operation", MB_ICONWARNING | MB_OK);
+        }
+        break;
+    case llp::shell::ResultKind::Persistence:
+        if (result->succeeded)
+        {
+            g_layoutPersistenceError.clear();
+        }
+        else
+        {
+            g_layoutPersistenceError = result->error;
+            MessageBoxW(g_hwnd, result->error.c_str(), L"LightLaunchpad layout save", MB_ICONWARNING | MB_OK);
+        }
+        break;
+    }
 }
 
 std::wstring DefaultStartupLogPath()
@@ -3592,78 +3477,43 @@ void PrewarmNativeUiForShow()
     {
         if (hit.itemIndex < 0 || hit.itemIndex >= static_cast<int>(g_filtered.size())) continue;
         if (hit.bounds.bottom < preloadTop || hit.bounds.top > preloadBottom) continue;
-        LoadItemIcon(g_items[g_filtered[hit.itemIndex]]);
+        QueueItemIcon(g_items[g_filtered[hit.itemIndex]]);
         loaded++;
         if (loaded >= preloadLimit) break;
     }
 }
 
-void ShowSpotlightWithAnimation()
+void ShowSpotlightImmediately()
 {
-    RECT finalRect = {};
-    GetWindowRect(g_hwnd, &finalRect);
-    const int width = finalRect.right - finalRect.left;
-    const int height = finalRect.bottom - finalRect.top;
-
-    SetSpotlightLayeredOpacity(0);
-    SetWindowPos(
-        g_hwnd,
-        HWND_TOPMOST,
-        finalRect.left,
-        finalRect.top - SpotlightAnimationOffset,
-        width,
-        height,
-        SWP_NOACTIVATE);
+    if (!g_hwnd) return;
+    // LLP-017 will restore motion with a compositor-driven timeline. Keep this
+    // path immediate until then so opening Spotlight never blocks the UI thread.
+    SetSpotlightLayeredOpacity(SpotlightGlassAlpha);
     ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     RedrawWindow(g_hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
-
-    for (int step = 1; step <= SpotlightAnimationSteps; ++step)
-    {
-        const double progress = step / static_cast<double>(SpotlightAnimationSteps);
-        const double eased = 1.0 - std::pow(1.0 - progress, 3.0);
-        const BYTE alpha = static_cast<BYTE>(std::round(SpotlightGlassAlpha * eased));
-        const int y = finalRect.top - static_cast<int>(std::round((1.0 - eased) * SpotlightAnimationOffset));
-        SetWindowPos(g_hwnd, HWND_TOPMOST, finalRect.left, y, width, height, SWP_NOACTIVATE);
-        SetSpotlightLayeredOpacity(alpha);
-        Sleep(8);
-    }
-
-    SetWindowPos(g_hwnd, HWND_TOPMOST, finalRect.left, finalRect.top, width, height, SWP_NOACTIVATE);
-    SetSpotlightLayeredOpacity(SpotlightGlassAlpha);
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
-void HideSpotlightWithAnimation()
+void HideSpotlightImmediately()
 {
     if (!g_hwnd || !IsWindowVisible(g_hwnd))
     {
         return;
     }
 
-    RECT startRect = {};
-    GetWindowRect(g_hwnd, &startRect);
-    const int width = startRect.right - startRect.left;
-    const int height = startRect.bottom - startRect.top;
-
-    for (int step = 1; step <= SpotlightAnimationSteps; ++step)
-    {
-        const double progress = step / static_cast<double>(SpotlightAnimationSteps);
-        const double eased = 1.0 - std::pow(1.0 - progress, 3.0);
-        const BYTE alpha = static_cast<BYTE>(std::round(SpotlightGlassAlpha * (1.0 - eased)));
-        const int y = startRect.top - static_cast<int>(std::round(eased * SpotlightCloseAnimationOffset));
-        SetWindowPos(g_hwnd, HWND_TOPMOST, startRect.left, y, width, height, SWP_NOACTIVATE);
-        SetSpotlightLayeredOpacity(alpha);
-        Sleep(7);
-    }
-
     ShowWindow(g_hwnd, SW_HIDE);
-    SetWindowPos(g_hwnd, HWND_TOPMOST, startRect.left, startRect.top, width, height, SWP_NOACTIVATE);
     SetSpotlightLayeredOpacity(SpotlightGlassAlpha);
 }
 
 void ShowNativeUi()
 {
-    ReloadData();
+    if (!g_catalogRefreshPending)
+    {
+        const DWORD probeDelay = g_catalogBrokerProbe.active && g_catalogBrokerProbe.stage == 1
+            ? g_catalogBrokerProbe.delayMilliseconds
+            : 0;
+        RequestCatalogRefresh(probeDelay);
+    }
     ResetSearchForOpen();
     RebuildFiltered();
     PositionWindow();
@@ -3681,7 +3531,7 @@ void ShowNativeUi()
     PrewarmNativeUiForShow();
     if (IsSpotlightMode())
     {
-        ShowSpotlightWithAnimation();
+        ShowSpotlightImmediately();
     }
     else
     {
@@ -3691,6 +3541,13 @@ void ShowNativeUi()
     SetForegroundWindow(g_hwnd);
     ActivateSearchInput();
     InvalidateRect(g_hwnd, nullptr, TRUE);
+    if (g_catalogBrokerProbe.active
+        && g_catalogBrokerProbe.stage == 1
+        && g_catalogBrokerProbe.inputPostedTick == 0)
+    {
+        g_catalogBrokerProbe.inputPostedTick = GetTickCount64();
+        PostMessageW(g_hwnd, WM_CHAR, L'x', 0);
+    }
 }
 
 void HideNativeUi()
@@ -3698,7 +3555,7 @@ void HideNativeUi()
     g_searchInputActive = false;
     if (IsSpotlightMode())
     {
-        HideSpotlightWithAnimation();
+        HideSpotlightImmediately();
     }
     else
     {
@@ -3723,8 +3580,8 @@ void LaunchItemAtFilteredIndex(int filteredIndex)
 {
     if (filteredIndex < 0 || filteredIndex >= static_cast<int>(g_filtered.size())) return;
     auto& item = g_items[g_filtered[filteredIndex]];
-    ShellExecuteW(g_hwnd, L"open", item.sourcePath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-    HideNativeUi();
+    if (g_shellBroker.RequestLaunch(item.sourcePath) != 0) HideNativeUi();
+    else MessageBoxW(g_hwnd, L"The Shell broker is unavailable; the item was not launched.", L"LightLaunchpad launch", MB_ICONWARNING | MB_OK);
 }
 
 bool HasExceededDragThreshold(POINT point)
@@ -6120,7 +5977,7 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
                 if (!baseLayerOnly)
                 {
                     DrawIconBackplateDirect(target, visualTileRect, selected);
-                    LoadItemIcon(item);
+                    QueueItemIcon(item);
                     if (item.icon)
                     {
                         const int icon = g_settings.iconSize;
@@ -6314,7 +6171,7 @@ void PaintContent(HDC dc, const RECT& client)
                 DrawAppTileSurface(dc, visualTileRect, selected);
                 if (!baseLayerOnly)
                 {
-                    LoadItemIcon(item);
+                    QueueItemIcon(item);
                     if (item.icon)
                     {
                         const int icon = g_settings.iconSize;
@@ -7076,49 +6933,10 @@ bool RestoreStartupRegistration(const StartupRegistrationSnapshot& snapshot)
 
 void OpenLaunchpadFolder()
 {
-    CreateDirectoryW(g_settings.launchpadFolder.c_str(), nullptr);
-    ShellExecuteW(g_hwnd, L"open", g_settings.launchpadFolder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-}
-
-std::wstring UniqueLaunchpadDestination(const std::wstring& sourcePath)
-{
-    const wchar_t* fileName = PathFindFileNameW(sourcePath.c_str());
-    std::wstring name = fileName && *fileName ? fileName : L"Imported.lnk";
-    std::wstring stem = name;
-    std::wstring extension;
-    const auto dot = stem.find_last_of(L'.');
-    if (dot != std::wstring::npos)
+    if (g_shellBroker.RequestOpenFolder(g_settings.launchpadFolder) == 0)
     {
-        extension = stem.substr(dot);
-        stem.resize(dot);
+        MessageBoxW(g_hwnd, L"The Shell broker is unavailable; the launchpad folder was not opened.", L"LightLaunchpad", MB_ICONWARNING | MB_OK);
     }
-
-    std::wstring destination = JoinPath(g_settings.launchpadFolder, name.c_str());
-    int index = 2;
-    while (GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES)
-    {
-        const std::wstring candidate = stem + L" (" + std::to_wstring(index++) + L")" + extension;
-        destination = JoinPath(g_settings.launchpadFolder, candidate.c_str());
-    }
-    return destination;
-}
-
-bool CopyLaunchableIntoLaunchpad(const std::wstring& sourcePath)
-{
-    if (!IsLaunchablePath(sourcePath)) return false;
-    CreateDirectoryW(g_settings.launchpadFolder.c_str(), nullptr);
-    const auto destination = UniqueLaunchpadDestination(sourcePath);
-    if (SamePath(sourcePath, destination)) return false;
-    return CopyFileW(sourcePath.c_str(), destination.c_str(), TRUE) != FALSE;
-}
-
-void RefreshAfterImport()
-{
-    ReloadData();
-    SortItems();
-    SaveLayout();
-    RebuildFiltered();
-    InvalidateRect(g_hwnd, nullptr, TRUE);
 }
 
 void ImportLaunchableFiles()
@@ -7134,13 +6952,13 @@ void ImportLaunchableFiles()
     ofn.lpstrTitle = Text(L"Import launchable files", L"导入可启动文件");
     if (!GetOpenFileNameW(&ofn)) return;
 
-    int imported = 0;
+    std::vector<std::wstring> sources;
     const wchar_t* cursor = buffer.data();
     std::wstring first = cursor;
     cursor += first.size() + 1;
     if (*cursor == L'\0')
     {
-        imported += CopyLaunchableIntoLaunchpad(first) ? 1 : 0;
+        sources.push_back(first);
     }
     else
     {
@@ -7148,53 +6966,34 @@ void ImportLaunchableFiles()
         while (*cursor)
         {
             const std::wstring path = JoinPath(directory, cursor);
-            imported += CopyLaunchableIntoLaunchpad(path) ? 1 : 0;
+            sources.push_back(path);
             cursor += lstrlenW(cursor) + 1;
         }
     }
 
-    if (imported > 0) RefreshAfterImport();
-}
-
-void ImportLaunchableTree(const std::wstring& root, int& imported)
-{
-    if (root.empty()) return;
-    std::wstring search = JoinPath(root, L"*");
-    WIN32_FIND_DATAW data = {};
-    HANDLE find = FindFirstFileW(search.c_str(), &data);
-    if (find == INVALID_HANDLE_VALUE) return;
-
-    do
+    if (!sources.empty() && g_shellBroker.RequestImportPaths(sources, g_settings.launchpadFolder) == 0)
     {
-        if (lstrcmpW(data.cFileName, L".") == 0 || lstrcmpW(data.cFileName, L"..") == 0) continue;
-        const std::wstring path = JoinPath(root, data.cFileName);
-        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-        {
-            ImportLaunchableTree(path, imported);
-        }
-        else
-        {
-            imported += CopyLaunchableIntoLaunchpad(path) ? 1 : 0;
-        }
-    } while (FindNextFileW(find, &data));
-
-    FindClose(find);
+        MessageBoxW(g_hwnd, L"The Shell broker is unavailable; no files were imported.", L"LightLaunchpad import", MB_ICONWARNING | MB_OK);
+    }
 }
 
 void ImportStartMenuApps()
 {
-    int imported = 0;
     const auto appData = GetAppDataPath();
     const auto programData = GetProgramDataPath();
+    int queued = 0;
     if (!appData.empty())
     {
-        ImportLaunchableTree(JoinPath(appData, L"Microsoft\\Windows\\Start Menu\\Programs"), imported);
+        queued += g_shellBroker.RequestImportTree(JoinPath(appData, L"Microsoft\\Windows\\Start Menu\\Programs"), g_settings.launchpadFolder) != 0 ? 1 : 0;
     }
     if (!programData.empty())
     {
-        ImportLaunchableTree(JoinPath(programData, L"Microsoft\\Windows\\Start Menu\\Programs"), imported);
+        queued += g_shellBroker.RequestImportTree(JoinPath(programData, L"Microsoft\\Windows\\Start Menu\\Programs"), g_settings.launchpadFolder) != 0 ? 1 : 0;
     }
-    if (imported > 0) RefreshAfterImport();
+    if (queued == 0)
+    {
+        MessageBoxW(g_hwnd, L"The Shell broker is unavailable; Start Menu import was not queued.", L"LightLaunchpad import", MB_ICONWARNING | MB_OK);
+    }
 }
 
 bool SameHotkey(const std::wstring& left, const std::wstring& right)
@@ -7570,11 +7369,6 @@ void HandleTrayNotification(LPARAM lParam)
     }
 }
 
-std::wstring ExplorerSelectArguments(const std::wstring& sourcePath)
-{
-    return L"/select,\"" + sourcePath + L"\"";
-}
-
 void LaunchItemBySourcePath(const std::wstring& sourcePath)
 {
     auto found = std::find_if(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
@@ -7582,15 +7376,17 @@ void LaunchItemBySourcePath(const std::wstring& sourcePath)
     });
     if (found != g_items.end())
     {
-        ShellExecuteW(g_hwnd, L"open", found->sourcePath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        HideNativeUi();
+        if (g_shellBroker.RequestLaunch(found->sourcePath) != 0) HideNativeUi();
+        else MessageBoxW(g_hwnd, L"The Shell broker is unavailable; the item was not launched.", L"LightLaunchpad launch", MB_ICONWARNING | MB_OK);
     }
 }
 
 void OpenItemLocation(const std::wstring& sourcePath)
 {
-    const auto arguments = ExplorerSelectArguments(sourcePath);
-    ShellExecuteW(g_hwnd, L"open", L"explorer.exe", arguments.c_str(), nullptr, SW_SHOWNORMAL);
+    if (g_shellBroker.RequestOpenLocation(sourcePath) == 0)
+    {
+        MessageBoxW(g_hwnd, L"The Shell broker is unavailable; the item location was not opened.", L"LightLaunchpad", MB_ICONWARNING | MB_OK);
+    }
 }
 
 void ShowItemContextMenu(POINT point, int filteredIndex)
@@ -7753,14 +7549,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (LOWORD(wParam) == ItemOpenLocationCommand && !g_contextItemPaths.empty()) OpenItemLocation(g_contextItemPaths.front());
         if (LOWORD(wParam) == ItemRemoveCommand && !g_contextItemPaths.empty())
         {
-            const int failed = DeleteItemsFromLaunchpad(g_contextItemPaths);
-            SortItems();
-            SaveLayout();
-            RebuildFiltered();
-            InvalidateRect(hwnd, nullptr, TRUE);
-            if (failed > 0)
+            if (g_shellBroker.RequestRecycle(g_settings.launchpadFolder, g_contextItemPaths) == 0)
             {
-                MessageBoxW(hwnd, Text(L"Some icons could not be deleted from disk.", L"部分图标无法从磁盘删除。"), Text(L"Delete icon", L"删除图标"), MB_ICONWARNING | MB_OK);
+                MessageBoxW(hwnd, Text(L"The Shell broker is unavailable; no icons were deleted.", L"Shell 后台不可用，未删除任何图标。"), Text(L"Delete icon", L"删除图标"), MB_ICONWARNING | MB_OK);
             }
         }
         if (LOWORD(wParam) == RegionRenameCommand && !g_contextRegionId.empty())
@@ -7791,6 +7582,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WmTray:
         HandleTrayNotification(lParam);
+        return 0;
+    case WmShellBrokerResult:
+        HandleShellBrokerResult(lParam);
         return 0;
     case WM_PAINT:
         PaintWindow(hwnd);
@@ -8055,6 +7849,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             g_searchText.push_back(static_cast<wchar_t>(wParam));
         }
+        if (g_catalogBrokerProbe.active
+            && g_catalogBrokerProbe.stage == 1
+            && g_catalogBrokerProbe.inputResponseMilliseconds == 0)
+        {
+            g_catalogBrokerProbe.inputResponseMilliseconds = GetTickCount64() - g_catalogBrokerProbe.inputPostedTick;
+            g_catalogBrokerProbe.cachedItemCountDuringRefresh = g_items.size();
+        }
         g_scrollOffset = 0;
         RebuildFiltered();
         ClearSearchCompletion();
@@ -8082,7 +7883,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     case WM_DESTROY:
+    {
         KillTimer(hwnd, DragAnimationTimerId);
+        g_shellBroker.Stop();
+        MSG pendingBrokerResult = {};
+        while (PeekMessageW(&pendingBrokerResult, hwnd, WmShellBrokerResult, WmShellBrokerResult, PM_REMOVE))
+        {
+            auto* pending = reinterpret_cast<llp::shell::Result*>(pendingBrokerResult.lParam);
+            if (pending)
+            {
+                if (pending->icon) DestroyIcon(pending->icon);
+                delete pending;
+            }
+        }
         RemoveTrayIcon();
         UnregisterHotKey(hwnd, g_activeHotkeyId);
         ReleaseSpotlightLayerBuffer();
@@ -8096,6 +7909,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         ReleaseAllResidentIcons();
         PostQuitMessage(0);
         return 0;
+    }
     default:
         return DefWindowProcW(hwnd, message, wParam, lParam);
     }
@@ -8119,6 +7933,16 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     {
         return RunPersistenceProbe(persistenceProbeFile, CommandLineHasArgument(L"--persistence-resave"));
     }
+    g_catalogBrokerProbe.outputPath = CommandLineValue(L"--catalog-broker-probe-file");
+    g_catalogBrokerProbe.active = !g_catalogBrokerProbe.outputPath.empty();
+    g_catalogBrokerProbe.delayMilliseconds = static_cast<DWORD>(CommandLineIntValue(L"--catalog-broker-delay-ms", 1200, 0, 10000));
+    g_shellImportProbe.outputPath = CommandLineValue(L"--shell-import-probe-file");
+    g_shellImportProbe.active = !g_shellImportProbe.outputPath.empty();
+    g_shellImportProbe.root = CommandLineValue(L"--shell-import-root");
+    g_shellImportProbe.destination = CommandLineValue(L"--shell-import-destination");
+    g_shellImportProbe.repeat = CommandLineIntValue(L"--shell-import-repeat", 2, 2, 2);
+    if (g_catalogBrokerProbe.active && g_shellImportProbe.active) return 2;
+    if (g_shellImportProbe.active && (g_shellImportProbe.root.empty() || g_shellImportProbe.destination.empty())) return 2;
     g_diagnosticsUiMode = CommandLineHasArgument(L"--diagnostics-ui");
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
     const HRESULT coInitializeResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -8207,13 +8031,16 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     }
     AppendStartupLog(L"window-created", true, LLP_WINDOW_CLASS_NAME_WIDE);
 
-    if (!g_diagnosticsUiMode)
+    const bool shellBrokerStarted = g_shellBroker.Start(g_hwnd, WmShellBrokerResult);
+    AppendStartupLog(L"shell-broker", shellBrokerStarted, shellBrokerStarted ? L"dedicated STA queued" : L"thread creation failed");
+
+    if (!g_diagnosticsUiMode && !g_catalogBrokerProbe.active && !g_shellImportProbe.active)
     {
         RegisterCurrentHotkey();
         AppendStartupLog(L"hotkey-registered", g_hotkeyRegistered, g_settings.hotkey);
         AddTrayIcon();
     }
-    else
+    else if (g_diagnosticsUiMode)
     {
         ShowSettingsWindow();
     }
@@ -8240,6 +8067,29 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         CloseHandle(mutex);
         if (comInitialized) CoUninitialize();
         return startupProbeWritten ? 0 : 2;
+    }
+
+    if (shellBrokerStarted)
+    {
+        if (g_catalogBrokerProbe.active)
+        {
+            RequestCatalogRefresh();
+        }
+        else if (g_shellImportProbe.active)
+        {
+            g_shellBroker.RequestImportTree(g_shellImportProbe.root, g_shellImportProbe.destination);
+        }
+        else if (!g_diagnosticsUiMode)
+        {
+            RequestCatalogRefresh();
+        }
+    }
+    else if (g_catalogBrokerProbe.active || g_shellImportProbe.active)
+    {
+        DestroyWindow(g_hwnd);
+        CloseHandle(mutex);
+        if (comInitialized) CoUninitialize();
+        return 2;
     }
 
     MSG msg = {};
