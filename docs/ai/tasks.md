@@ -45,7 +45,7 @@
 
 ### LLP-003 - Shell-First Startup And Singleton Activation
 
-- Status: `in_progress`
+- Status: `done`
 - Depends on: LLP-002
 - Purpose: tray, hotkey, and second-instance activation must work before catalog I/O.
 - Likely files: extract `AppHost`, `Diagnostics`, and IPC modules from `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`; update build script inputs.
@@ -58,11 +58,11 @@
   - Simulate a slow/unavailable launch folder; tray and settings still appear promptly.
   - Start the EXE twice; one process remains and the first instance becomes active.
   - Restart Explorer; tray menu and settings recover.
-- Completion notes: Started after LLP-002 post-commit gates passed. Next RED targets second-instance activation and shell-first startup timing without modifying the user's running/startup build.
+- Completion notes: Completed with implementation commit `33a139e`. The real NativeUi EXE now creates its channel-specific hidden window and shell integrations without catalog I/O, uses bounded `WM_COPYDATA` singleton activation with explicit mismatch reporting, retries tray registration at most eight times, restores on `TaskbarCreated`, and writes a 256 KiB-bounded JSONL startup log. Real-EXE tests covered an unavailable UNC catalog, same-build activation/one-process ownership, stable 1.11.0-vs-1.12.0 mismatch, direct recovery simulation, and an actual Explorer restart with tray/settings recovery. Post-commit AppHost behavior 4/4, identity behavior 5/5, Core 33/33, legacy App 74/74, native build/diagnostics, runtime safety, and diff gates passed. Verified EXE: 556,544 bytes, SHA256 `FE560F080969DFC355BCB226D339529892A9816EF1802EBB4D196EB2C030C93D`.
 
 ### LLP-004 - Transactional Hotkey And Settings Writes
 
-- Status: `pending`
+- Status: `in_progress`
 - Depends on: LLP-003
 - Purpose: a failed settings change must never destroy the working launch path.
 - Likely files: `AppHost`, `SettingsStore`, Native settings UI, hotkey parser/registrar.
@@ -74,7 +74,7 @@
 - Verify:
   - Register a known conflicting hotkey; old hotkey continues to work and the setting shows the reason.
   - Save to an unwritable destination; UI retains the prior value and reports failure.
-- Completion notes: Not started.
+- Completion notes: Started immediately after LLP-003 verification and documentation. Next RED targets transactional hotkey replacement and settings write rollback/failure feedback against production NativeUi behavior.
 
 ## Milestone B: Reliable Data And Instant Response
 

@@ -2,15 +2,54 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 04:21:35 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 04:48:00 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `a9037bb`
+- HEAD: `33a139e`
 - Remote main: `origin/main@33e91c2`
-- Active task: `LLP-003 - Shell-First Startup And Singleton Activation` (`in_progress`)
-- Completed tasks: `LLP-001`, `LLP-002`
-- Next task after verification: `LLP-004 - Transactional Hotkey And Settings Writes`
-- Goal status: active in Codex; LLP-003 is the only task in progress.
+- Active task: `LLP-004 - Transactional Hotkey And Settings Writes` (`in_progress`)
+- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`
+- Next task after verification: `LLP-005 - Standard Persistence And Folder-Scoped Layout`
+- Goal status: active in Codex; LLP-004 is the only task in progress.
+
+## LLP-003 Execution Evidence
+
+Status at 2026-08-02 04:48 +08:00: complete.
+
+Changed files in scope:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - shell-first startup order, channel-specific IPC window, bounded singleton activation, explicit mismatch/failure feedback, bounded tray retries, `TaskbarCreated` recovery, startup/runtime probes, and a 256 KiB-bounded local JSONL startup log. Initial catalog/layout/search work is deferred until the product is opened.
+- `tools/build-native-ui.ps1` - injects stable or commit-specific development window-class identity alongside the singleton identity.
+- `tests/LightLaunchpad.NativeUi.Tests/AppHost.Tests.ps1` - real-EXE shell-first, unavailable-folder, same-build IPC, stable mismatch, one-process, taskbar recovery, settings reachability, log-bound, and optional real Explorer-restart checks in isolated application-data roots.
+- `tests/LightLaunchpad.NativeUi.Tests/ExecutableIdentity.Tests.ps1` - verifies and locates the generated IPC class in diagnostics and real NativeUi windows.
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs` - removes the obsolete private tray-registry contract and keeps only the supported Shell notification/recovery architecture checks.
+
+TDD and debugging evidence:
+
+- RED: the new architecture test found `IsPromoted` and the private `NotifyIconSettings` mutation before that route was removed.
+- RED: with an unavailable UNC launch folder, the pre-change real EXE did not complete the shell-first startup probe within five seconds because startup entered catalog work first.
+- GREEN: `powershell -NoProfile -ExecutionPolicy Bypass -File tests\LightLaunchpad.NativeUi.Tests\AppHost.Tests.ps1` passes four named real-EXE checks: private-registry ban, shell-first/recovery, matching activation/one process, and mismatch activation/reporting.
+- GREEN, real Explorer: the same test with `-RestartExplorer` stopped and restarted the current-session Explorer shell, observed `TaskbarCreated`, re-added the real tray icon (`recoveryCount=1`, `trayAttempts=2`), and reopened the real settings window.
+- A post-commit parallel .NET run initially hit `CS2012` because Core and App simultaneously wrote `LightLaunchpad.Core.dll`; process inspection showed a test-orchestration file lock. Rerunning the two shared-output suites sequentially passed and no product change was made for the harness-only race.
+
+Fresh post-commit verification against `33a139efd932`:
+
+- NativeUi AppHost behavior: 4/4 passed; final isolated metrics were `shellReadyMs=31`, `probeExitMs=336`, `settingsWindowMs=164`, and `logBytes=1085` with an unavailable launch folder.
+- Real Explorer recovery run: passed with `shellReadyMs=31`, `probeExitMs=248`, `settingsWindowMs=166`, `logBytes=1083`, recovery count 1, and tray-add attempts 2.
+- NativeUi identity behavior: 5/5 passed, including real PE/manifest, diagnostics, channel separation, Win32 settings diagnostics, and package identity gates.
+- Core tests: `33/33 tests passed`.
+- Legacy App/source suite: `74/74 tests passed`; retained only as historical regression coverage.
+- Native build and diagnostics: `release\llp003-postcommit\LightLaunchpad.NativeUi.exe`, 556,544 bytes, SHA256 `FE560F080969DFC355BCB226D339529892A9816EF1802EBB4D196EB2C030C93D`, `ProductVersion=1.11.0-dev+33a139efd932.dirty`, `FileVersion=1.11.0.0`, diagnostics commit `33a139efd932`, development channel, commit-specific IPC class, and commit-specific singleton.
+- `git diff --check` and cached diff checks: exit 0; only Git line-ending notices appeared while staging.
+
+Safety, UI, and evidence limits:
+
+- The Explorer recovery test used only an isolated development EXE/configuration and ensured Explorer was running again in `finally`. It left no development process behind.
+- After Explorer recovery, protected PID 22560 still ran `artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe` with unchanged SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; the Run value still pointed to that exact file.
+- No stable install, `C:\TOOL`, Run entry, push, tag, or release action was performed. `LLP_reconstruction/` and ignored `LightLaunchpad.NativeUi.o` stayed outside staging.
+- Screenshot evidence is not applicable to this lifecycle/IPC task. The real settings window was located and restored through Win32 process/window inspection; visual/DPI acceptance remains assigned to LLP-012 and LLP-015.
+- Scoped implementation commit: `33a139e` (`feat: make native startup shell-first`).
+- Task transition: LLP-003 marked `done`; LLP-004 marked as the sole `in_progress` task.
 
 ## LLP-002 Execution Evidence
 
