@@ -2,15 +2,68 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 09:05:16 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 09:59:54 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `7bb1d0a`
+- HEAD: `689dc61`
 - Remote main: `origin/main@33e91c2`
-- Active task: `LLP-010 - Launchpad Browse/Edit Separation` (`in_progress`)
-- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`
-- Next task after verification: `LLP-011 - Favorites, Safe Delete, And Undo`
-- Goal status: active in Codex; LLP-010 is the only task in progress.
+- Active task: `LLP-011 - Favorites, Safe Delete, And Undo` (`in_progress`)
+- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`
+- Next task after verification: `LLP-012 - DPI, Monitor, Accessibility, And Scene Geometry`
+- Goal status: active in Codex; LLP-011 is the only task in progress.
+
+## LLP-010 Execution Evidence
+
+Status at 2026-08-02 09:59 +08:00: complete.
+
+Changed files in scope:
+
+- `src/LightLaunchpad.NativeUi/InteractionState.{h,cpp}` - production `LaunchpadState` with explicit Browse/Edit intent, launch-vs-selection actions, Enter behavior, and capability guards for selection, marquee, item drag, and region drag.
+- `src/LightLaunchpad.NativeUi/SceneGeometry.{h,cpp}` - one portable scene snapshot for item/region content and viewport rectangles, columns, scrolling, empty regions, hit lookup, and intersection.
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - integrates Edit/Done and Ctrl+E, Browse single-click press/release launch, edit-only selection/context/organization paths, keyboard focus ownership, shared geometry across D2D/GDI drawing and interaction consumers, eight tile visual states, and an isolated real-EXE Launchpad probe. The obsolete 1.16x, -4 px focused-tile backdrop sample is now 1.0x with zero displacement.
+- `tools/build-native-ui.ps1` and `tests/LightLaunchpad.NativeUi.Tests/{AppHost,ExecutableIdentity}.Tests.ps1` - compile/copy `SceneGeometry` in normal and clean-source builds.
+- `tests/LightLaunchpad.NativeUi.Tests/InteractionState.Tests.cpp` - direct production Browse/Edit semantics, extended from 5 to 7 named checks.
+- `tests/LightLaunchpad.NativeUi.Tests/SceneGeometry.Tests.{cpp,ps1}` - exact draw/hit/scroll geometry at 100%, 150%, and 200% metrics, searched layout, empty regions, and bounds lookup.
+- `tests/LightLaunchpad.NativeUi.Tests/LaunchpadFlowBehavior.Tests.ps1` - Per-Monitor-V2 isolated real NativeUi EXE, Shell launch markers, Browse/Edit gesture probe, keyboard/mouse paths, and eight screenshot states.
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs` - updates historical regression strings for the new visual-state/shared-preview structure and bans the retired 1.16x focus sampling; this suite is not visual or interaction authority.
+- `docs/ai/{tasks,progress}.md` - records verified completion and activates LLP-011.
+
+TDD and systematic-debugging evidence:
+
+- RED: production Launchpad tests initially lacked explicit Browse/Edit types. GREEN proves Browse click/Enter launch intent while all edit gestures are rejected, and Edit selection/toggle succeeds while Enter cannot accidentally launch.
+- RED: `SceneGeometry` did not exist. GREEN uses its exact item/region slots for rendering, hit testing, keyboard columns, scrolling, marquee intersection, and drop computation; all three scale fixtures match draw and hit rectangles byte-for-byte.
+- The first real-EXE mouse run missed its visible tile even though the hit cache contained two entries. Probe evidence showed sent `(108,216)` arrived as `(162,324)`, exactly 1.5x, identifying cross-process DPI virtualization in the PowerShell driver. The driver now enters Per-Monitor-V2 before creating or addressing windows, after which the full flow passes.
+- The real flow performs two successful Browse Shell launches. A Browse drag is explicitly rejected; Edit click, Ctrl-click, Enter, marquee, multi-item drag, and region drag produce no extra launch; `maxSelectedItems=2`, mode transitions are exactly Edit then Done, and Browse retains zero persistent selections.
+- Product-design audit expanded a two-item drag fixture to three items so keyboard focus and a real unselected drop target could be inspected, rather than inferred from code. The final drag frame shows a green target and a separate `2 apps` source badge.
+- Static prohibition review found legacy focused-tile backdrop sampling at 1.16x/-4 px. A regression assertion failed RED, production moved to 1.0x/zero displacement, and App 74/74 plus both real Spotlight/Launchpad flows returned GREEN. The remaining `Sleep(25)` is bounded secondary-instance IPC polling, not UI animation; ShellBroker's test-only delay runs on its worker.
+- Three historical App source assertions expected the retired boolean-selection and render-loop spellings. They were updated to follow the new enum/resolver, unified background, and cached `hideTileForDrag` structure; production code was not regressed to satisfy strings.
+
+Fresh verification against implementation commit `689dc61619fd`:
+
+- `tests\LightLaunchpad.NativeUi.Tests\InteractionState.Tests.ps1` - 7/7 passed.
+- `tests\LightLaunchpad.NativeUi.Tests\SceneGeometry.Tests.ps1` - 3/3 passed, including exact 100/150/200% draw-hit-scroll correspondence.
+- `tests\LightLaunchpad.NativeUi.Tests\LaunchpadFlowBehavior.Tests.ps1` - real EXE passed two browse launches and all edit-only/no-accidental-launch checks; `launches=2`, `editSelections=3` (two selection presses plus drag start), `maxSelected=2`.
+- `tests\LightLaunchpad.NativeUi.Tests\SpotlightFlowBehavior.Tests.ps1` - canonical paths remained green; 7 opens, 2 launches, input-ready samples `46,46,47,47,47,47,63` ms, P95 63 ms.
+- `tests\LightLaunchpad.NativeUi.Tests\TextInput.Tests.ps1` - 7/7 passed; 2,000 production edit+undo samples measured 200 ns P95.
+- `tests\LightLaunchpad.NativeUi.Tests\TextInputBehavior.Tests.ps1` - real UIA/keyboard/clipboard/IME flow passed; final value `中a文b末`, caret 5, candidate point `(153,76)`.
+- `tests\LightLaunchpad.NativeUi.Tests\SearchIndex.Tests.ps1` - 7/7 passed; 300-item rebuild 352 microseconds and cached pinyin-query P95 88 microseconds.
+- `tests\LightLaunchpad.NativeUi.Tests\CatalogShellBroker.Tests.ps1` - 3/3 passed; input response 0 ms during a 1,890 ms refresh, generation 2, import counts 1 then 0, skipped reparse points 1, and future history unchanged.
+- `tests\LightLaunchpad.NativeUi.Tests\Persistence.Tests.ps1` - 7/7 passed.
+- `tests\LightLaunchpad.NativeUi.Tests\SettingsTransactions.Tests.ps1` - 3/3 passed.
+- `tests\LightLaunchpad.NativeUi.Tests\AppHost.Tests.ps1` - 4/4 passed; `shellReadyMs=32`, `probeExitMs=375`, `settingsWindowMs=160`, `logBytes=1279`.
+- `tests\LightLaunchpad.NativeUi.Tests\ExecutableIdentity.Tests.ps1` - 5/5 passed.
+- `dotnet run --project tests\LightLaunchpad.Core.Tests\LightLaunchpad.Core.Tests.csproj` - 33/33 passed.
+- `dotnet run --project tests\LightLaunchpad.App.Tests\LightLaunchpad.App.Tests.csproj` - 74/74 passed; historical regression baseline only.
+- Post-commit build/diagnostics - `artifacts\native-ui-llp010-postcommit\LightLaunchpad.NativeUi.exe`, 1,650,176 bytes, SHA256 `C23EF857CE56875FEC0705AB0F7E51AC5B3357EDD927F2C6C3AE91450B9DFA69`, version `1.11.0-dev+689dc61619fd92f5880a0caf567d10d8b778630c.dirty`; executable path, commit, development singleton/window class, Per-Monitor-V2 identity, and protected startup path matched.
+
+Visual, safety, and evidence limits:
+
+- `product-design:audit` accepted eight current-run real-EXE frames under `artifacts\native-ui-llp010-final\visual-evidence`: Browse normal, hover, pressed, keyboard focus; Edit no-selection, selected, multiselected; and drag source plus green drop target. Edit/Done identity and all state boundaries remain readable without nested glass or magnified backdrop sampling.
+- The production geometry module directly proves shared scaled metrics at 100%, 150%, and 200%; actual multi-monitor/OS-DPI screenshots, increased text size, high contrast, and reduced transparency remain explicitly assigned to LLP-012 and are not claimed here.
+- Protected PID 22560 still runs `artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe` with unchanged SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run remains its exact quoted path, the stable install remains absent, and the `C:\TOOL` EXE remains SHA256 `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`.
+- `LLP_reconstruction/` remains untracked/unstaged and ignored `LightLaunchpad.NativeUi.o` was not adopted. No stable-install, startup, `C:\TOOL`, push, tag, or release mutation occurred.
+- Scoped implementation commit: `689dc61` (`feat(native-ui): separate launchpad browse and edit modes`).
+- Task transition: LLP-010 marked `done`; LLP-011 marked as the sole `in_progress` task.
 
 ## LLP-009 Execution Evidence
 

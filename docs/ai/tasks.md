@@ -165,7 +165,7 @@
 
 ### LLP-010 - Launchpad Browse/Edit Separation
 
-- Status: `in_progress`
+- Status: `done`
 - Depends on: LLP-009
 - Purpose: remove the launch-versus-selection conflict.
 - Likely files: `InteractionState`, Launchpad controller, context menus, region/drag layout code.
@@ -178,11 +178,11 @@
   - Browse mode cannot accidentally select or rearrange.
   - Edit mode cannot accidentally launch from a selection click.
   - Hit targets match drawn tiles at 100%, 150%, and 200% DPI.
-- Completion notes: Started immediately after LLP-009 post-commit verification. First RED target: production interaction tests showing that current Launchpad browse clicks still enter selection/drag paths instead of launching immediately and that edit-only selection/region/marquee/drag state is not guarded by an explicit mode.
+- Completion notes: Completed in implementation commit `689dc61`. NativeUi now opens Launchpad in explicit Browse mode, where single-click/Enter launch and persistent selection, marquee, item drag, and region drag are unavailable; Edit/Done (plus Ctrl+E) gates organization gestures and requires an explicit menu command to launch. A production `LaunchpadState`, shared `SceneGeometry` snapshot, and distinct normal/hover/keyboard/selected/multiselected/pressed/drag-source/drop-target states are used by D2D/GDI drawing and interaction consumers. Production geometry tests prove identical draw/hit/scroll slots at 100%, 150%, and 200% metrics. A Per-Monitor-V2 isolated real NativeUi EXE performed two exact browse launches while edit selection, Ctrl-selection, Enter, marquee, item drag, and region drag produced no launch; product-design audit accepted eight current-run state screenshots. The prohibited 1.16x/negative-offset focus backdrop sampling was removed. Full native, Core 33/33, and historical App 74/74 gates passed. Verified post-commit EXE: 1,650,176 bytes, SHA256 `C23EF857CE56875FEC0705AB0F7E51AC5B3357EDD927F2C6C3AE91450B9DFA69`.
 
 ### LLP-011 - Favorites, Safe Delete, And Undo
 
-- Status: `pending`
+- Status: `in_progress`
 - Depends on: LLP-010
 - Purpose: make organization direct and forgiving.
 - Likely files: `InteractionState`, `Catalog`, `ShellBroker`, persistence, context menus, transient feedback surface.
@@ -193,7 +193,7 @@
   - Ensure region deletion only moves items to Uncategorized and can be reversed during the same action window.
 - Verify:
   - Delete, undo, failed delete, batch partial failure, favorite ranking, and restart persistence all pass production behavior tests.
-- Completion notes: Not started.
+- Completion notes: Started immediately after LLP-010 post-commit verification. First RED targets: favorite persistence/ranking across restart, Recycle Bin success-before-layout-commit, failed/partial batch preservation, time-limited undo, and reversible region deletion.
 
 ## Milestone D: Adaptive Material And Motion
 
