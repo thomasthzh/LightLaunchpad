@@ -344,7 +344,7 @@ try {
     foreach ($llpNativeFile in @('LightLaunchpad.NativeUi.cpp', 'LightLaunchpad.NativeUi.rc', 'LightLaunchpad.NativeUi.manifest', 'LightLaunchpad.Version.h')) {
         Copy-Item -LiteralPath (Join-Path $llpRepoRoot "src\LightLaunchpad.NativeUi\$llpNativeFile") -Destination (Join-Path $llpCleanSourceRoot "src\LightLaunchpad.NativeUi\$llpNativeFile")
     }
-    foreach ($llpPersistenceFile in @('Catalog.cpp', 'Catalog.h', 'InteractionState.cpp', 'InteractionState.h', 'Persistence.cpp', 'Persistence.h', 'SearchAccessibility.cpp', 'SearchAccessibility.h', 'SearchIndex.cpp', 'SearchIndex.h', 'ShellBroker.cpp', 'ShellBroker.h', 'TextInput.cpp', 'TextInput.h')) {
+    foreach ($llpPersistenceFile in @('Catalog.cpp', 'Catalog.h', 'InteractionState.cpp', 'InteractionState.h', 'Persistence.cpp', 'Persistence.h', 'SceneGeometry.cpp', 'SceneGeometry.h', 'SearchAccessibility.cpp', 'SearchAccessibility.h', 'SearchIndex.cpp', 'SearchIndex.h', 'ShellBroker.cpp', 'ShellBroker.h', 'TextInput.cpp', 'TextInput.h')) {
         Copy-Item -LiteralPath (Join-Path $llpRepoRoot "src\LightLaunchpad.NativeUi\$llpPersistenceFile") -Destination (Join-Path $llpCleanSourceRoot "src\LightLaunchpad.NativeUi\$llpPersistenceFile")
     }
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\third_party\nlohmann\json.hpp') -Destination (Join-Path $llpCleanSourceRoot 'src\third_party\nlohmann\json.hpp')

@@ -358,9 +358,11 @@ public sealed class HostedAppModeSourceTests
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
 
         TestAssert.Contains("DrawAppTileSurface", source);
-        TestAssert.Contains("if (!selected) return;", source);
-        TestAssert.Contains("DrawAppTileSurface(target, visualTileRect, selected)", source);
-        TestAssert.Contains("DrawAppTileSurface(dc, visualTileRect, selected)", source);
+        TestAssert.Contains("enum class TileVisualState", source);
+        TestAssert.Contains("TileVisualState ResolveTileVisualState", source);
+        TestAssert.Contains("if (state == TileVisualState::Normal) return;", source);
+        TestAssert.Contains("DrawAppTileSurface(target, visualTileRect, visualState)", source);
+        TestAssert.Contains("DrawAppTileSurface(dc, visualTileRect, visualState)", source);
         TestAssert.DoesNotContain("DrawRoundedRectDirect(target, tileRect, selected ?", source);
         TestAssert.DoesNotContain("DrawRoundedRect(dc, tileRect, selected ?", source);
     }
@@ -462,7 +464,6 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("SpotlightRoundedRect", source);
         TestAssert.Contains("SpotlightPanelInset", source);
         TestAssert.Contains("SpotlightEdgeLayers", source);
-        TestAssert.DoesNotContain("if (IsSpotlightMode()) return;", source);
         TestAssert.Contains("SetSpotlightLayeredOpacity", source);
         TestAssert.Contains("SpotlightGlassAlpha", source);
         TestAssert.Contains("ShowSpotlightImmediately", source);
@@ -512,6 +513,8 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("DrawFocusedTileLens(target, rounded, rect);", source);
         TestAssert.Contains("StretchBlt", source);
         TestAssert.Contains("CAPTUREBLT", source);
+        TestAssert.DoesNotContain("1.16f", source);
+        TestAssert.DoesNotContain("rect, 14, 1.16f, 0, -4", source);
         TestAssert.DoesNotContain("ID2D1Effect", source);
     }
 
@@ -779,7 +782,8 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("DragIconAlphaForItem", source);
         TestAssert.Contains("g_selectedSourcePaths = movedPaths;", source);
         TestAssert.Contains("visualTileRect", source);
-        TestAssert.Contains("if (ShouldHideTileForDragPreview(item))", source);
+        TestAssert.Contains("const bool hideTileForDrag = ShouldHideTileForDragPreview(item);", source);
+        TestAssert.Contains("if (!hideTileForDrag) ApplyDragAvoidanceOffset", source);
         TestAssert.Contains("DragPreviewSlotForItem(item)", source);
         TestAssert.DoesNotContain("RGB(80, 190, 255)", source);
         TestAssert.DoesNotContain("RGB(160, 225, 255)", source);

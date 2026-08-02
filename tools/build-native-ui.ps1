@@ -128,6 +128,7 @@ try {
         src\LightLaunchpad.NativeUi\Catalog.cpp `
         src\LightLaunchpad.NativeUi\InteractionState.cpp `
         src\LightLaunchpad.NativeUi\Persistence.cpp `
+        src\LightLaunchpad.NativeUi\SceneGeometry.cpp `
         src\LightLaunchpad.NativeUi\SearchAccessibility.cpp `
         src\LightLaunchpad.NativeUi\SearchIndex.cpp `
         src\LightLaunchpad.NativeUi\ShellBroker.cpp `

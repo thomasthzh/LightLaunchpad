@@ -9,6 +9,59 @@ namespace
 const std::wstring EmptyStableId;
 }
 
+void LaunchpadState::Open()
+{
+    editing_ = false;
+}
+
+void LaunchpadState::EnterEdit()
+{
+    editing_ = true;
+}
+
+bool LaunchpadState::ExitEdit()
+{
+    if (!editing_) return false;
+    editing_ = false;
+    return true;
+}
+
+bool LaunchpadState::IsEditing() const
+{
+    return editing_;
+}
+
+LaunchpadClickAction LaunchpadState::ClickItem(bool additive) const
+{
+    if (!editing_) return LaunchpadClickAction::LaunchItem;
+    return additive ? LaunchpadClickAction::ToggleItemSelection : LaunchpadClickAction::SelectItem;
+}
+
+LaunchpadEnterAction LaunchpadState::EnterOnFocusedItem() const
+{
+    return editing_ ? LaunchpadEnterAction::None : LaunchpadEnterAction::LaunchFocusedItem;
+}
+
+bool LaunchpadState::AllowsSelection() const
+{
+    return editing_;
+}
+
+bool LaunchpadState::AllowsMarquee() const
+{
+    return editing_;
+}
+
+bool LaunchpadState::AllowsItemDrag() const
+{
+    return editing_;
+}
+
+bool LaunchpadState::AllowsRegionDrag() const
+{
+    return editing_;
+}
+
 void SpotlightState::Open()
 {
     focus_ = FocusArea::Search;

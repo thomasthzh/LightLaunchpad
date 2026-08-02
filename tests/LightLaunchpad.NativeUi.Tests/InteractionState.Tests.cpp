@@ -11,6 +11,9 @@ using llp::interaction::Direction;
 using llp::interaction::EnterAction;
 using llp::interaction::EscapeAction;
 using llp::interaction::FocusArea;
+using llp::interaction::LaunchpadClickAction;
+using llp::interaction::LaunchpadEnterAction;
+using llp::interaction::LaunchpadState;
 using llp::interaction::SpotlightState;
 
 int passed = 0;
@@ -109,6 +112,34 @@ void TestRefreshPreservesStableFocusAndCannotLaunchReplacement()
     Require(state.EnterResults() && state.FocusedResultIndex() == 0, "Explicit Down did not re-establish a safe result focus.");
     Pass("InteractionState_RefreshPreservesStableIdAndNeverSubstitutesLaunch");
 }
+
+void TestLaunchpadBrowseModeLaunchesAndRejectsEditingGestures()
+{
+    LaunchpadState state;
+    state.Open();
+    Require(!state.IsEditing(), "Launchpad did not open in browse mode.");
+    Require(state.ClickItem(false) == LaunchpadClickAction::LaunchItem, "Browse click did not launch the item.");
+    Require(state.ClickItem(true) == LaunchpadClickAction::LaunchItem, "Ctrl+click bypassed browse launch semantics.");
+    Require(state.EnterOnFocusedItem() == LaunchpadEnterAction::LaunchFocusedItem, "Browse Enter did not launch the focused item.");
+    Require(!state.AllowsSelection() && !state.AllowsMarquee() && !state.AllowsItemDrag() && !state.AllowsRegionDrag(), "Browse mode exposed an editing gesture.");
+    Pass("InteractionState_LaunchpadBrowseLaunchesAndRejectsEditingGestures");
+}
+
+void TestLaunchpadEditModeSelectsWithoutAccidentalLaunch()
+{
+    LaunchpadState state;
+    state.Open();
+    state.EnterEdit();
+    Require(state.IsEditing(), "Explicit edit command did not enter edit mode.");
+    Require(state.ClickItem(false) == LaunchpadClickAction::SelectItem, "Edit click did not select the item.");
+    Require(state.ClickItem(true) == LaunchpadClickAction::ToggleItemSelection, "Edit Ctrl+click did not toggle multiselection.");
+    Require(state.EnterOnFocusedItem() == LaunchpadEnterAction::None, "Edit Enter could accidentally launch from selection focus.");
+    Require(state.AllowsSelection() && state.AllowsMarquee() && state.AllowsItemDrag() && state.AllowsRegionDrag(), "Edit mode did not enable all organization gestures.");
+    Require(state.ExitEdit(), "Done/Esc did not report leaving edit mode.");
+    Require(!state.IsEditing(), "Done/Esc left Launchpad in edit mode.");
+    Require(!state.ExitEdit(), "Exiting browse mode reported a false edit transition.");
+    Pass("InteractionState_LaunchpadEditSelectsWithoutAccidentalLaunch");
+}
 }
 
 int main()
@@ -120,8 +151,10 @@ int main()
         TestPrintableInputAndTabTraverseSearchResultsAndAuxiliary();
         TestEscapeReturnsFocusThenClearsQueryThenCloses();
         TestRefreshPreservesStableFocusAndCannotLaunchReplacement();
-        std::cout << passed << "/5 tests passed\n";
-        return passed == 5 ? 0 : 1;
+        TestLaunchpadBrowseModeLaunchesAndRejectsEditingGestures();
+        TestLaunchpadEditModeSelectsWithoutAccidentalLaunch();
+        std::cout << passed << "/7 tests passed\n";
+        return passed == 7 ? 0 : 1;
     }
     catch (const std::exception& exception)
     {

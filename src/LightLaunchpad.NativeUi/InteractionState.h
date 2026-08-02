@@ -35,6 +35,38 @@ enum class EscapeAction
     Close
 };
 
+enum class LaunchpadClickAction
+{
+    LaunchItem,
+    SelectItem,
+    ToggleItemSelection
+};
+
+enum class LaunchpadEnterAction
+{
+    None,
+    LaunchFocusedItem
+};
+
+class LaunchpadState
+{
+public:
+    void Open();
+    void EnterEdit();
+    bool ExitEdit();
+
+    bool IsEditing() const;
+    LaunchpadClickAction ClickItem(bool additive) const;
+    LaunchpadEnterAction EnterOnFocusedItem() const;
+    bool AllowsSelection() const;
+    bool AllowsMarquee() const;
+    bool AllowsItemDrag() const;
+    bool AllowsRegionDrag() const;
+
+private:
+    bool editing_ = false;
+};
+
 class SpotlightState
 {
 public:

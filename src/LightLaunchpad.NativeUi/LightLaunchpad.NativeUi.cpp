@@ -18,6 +18,7 @@
 #include "Catalog.h"
 #include "InteractionState.h"
 #include "Persistence.h"
+#include "SceneGeometry.h"
 #include "SearchAccessibility.h"
 #include "SearchIndex.h"
 #include "ShellBroker.h"
@@ -92,6 +93,7 @@ constexpr int WorkspaceSelectAllCommand = 2202;
 constexpr int WorkspaceClearSelectionCommand = 2203;
 constexpr int WorkspaceImportFilesCommand = 2204;
 constexpr int WorkspaceImportStartMenuCommand = 2205;
+constexpr int WorkspaceToggleEditCommand = 2206;
 constexpr UINT WmTray = WM_APP + 72;
 constexpr UINT WmActivateInstance = WM_APP + 73;
 constexpr UINT WmShellBrokerResult = WM_APP + 74;
@@ -268,6 +270,18 @@ enum class DragMode
     Region
 };
 
+enum class TileVisualState
+{
+    Normal,
+    Hover,
+    KeyboardFocus,
+    Selected,
+    MultiSelected,
+    Pressed,
+    DragSource,
+    DropTarget
+};
+
 struct SpotlightLayerBuffer
 {
     int width = 0;
@@ -308,6 +322,7 @@ std::vector<std::wstring> g_selectedRegionIds;
 llp::input::TextBuffer g_searchInput;
 llp::accessibility::SearchAccessibility g_searchAccessibility;
 llp::interaction::SpotlightState g_spotlightState;
+llp::interaction::LaunchpadState g_launchpadState;
 bool g_searchInputActive = false;
 bool g_searchPointerSelecting = false;
 int g_searchTextOffset = 0;
@@ -316,6 +331,8 @@ int g_scrollOffset = 0;
 int g_contentHeight = 0;
 std::wstring g_layoutViewMode = L"InlineRegions";
 bool g_mouseDown = false;
+int g_hoveredFilteredIndex = -1;
+int g_pressedFilteredIndex = -1;
 bool g_dragActive = false;
 DragMode g_dragMode = DragMode::None;
 int g_dragFilteredIndex = -1;
@@ -443,9 +460,35 @@ struct SpotlightFlowProbeState
     std::vector<std::wstring> focusedResultPaths;
 };
 
+struct LaunchpadFlowProbeState
+{
+    bool active = false;
+    bool readyWritten = false;
+    bool blockedBrowseDragRecorded = false;
+    std::wstring outputPath;
+    std::wstring readyPath;
+    int hotkeyMessages = 0;
+    int modeTransitions = 0;
+    int browsePresses = 0;
+    int browseClickLaunches = 0;
+    int editSelectionClicks = 0;
+    int maxSelectedItems = 0;
+    int marqueeBegins = 0;
+    int itemDragBegins = 0;
+    int regionDragBegins = 0;
+    int blockedBrowseDrags = 0;
+    int successfulLaunches = 0;
+    int lastPointerX = -1;
+    int lastPointerY = -1;
+    int lastHitCount = 0;
+    int lastMatchedIndex = -1;
+    std::vector<std::wstring> requestedPaths;
+};
+
 CatalogBrokerProbeState g_catalogBrokerProbe;
 ShellImportProbeState g_shellImportProbe;
 SpotlightFlowProbeState g_spotlightFlowProbe;
+LaunchpadFlowProbeState g_launchpadFlowProbe;
 
 bool ShowTextInputDialog(const std::wstring& title, const std::wstring& label, const std::wstring& initialValue, std::wstring& result);
 bool RegisterCurrentHotkey();
@@ -453,6 +496,7 @@ bool SaveLayout();
 void RequestCatalogRefresh(DWORD testDelayMilliseconds = 0);
 void QueueItemIcon(LaunchItem& item);
 void ShowSettingsWindow();
+void ShowWorkspaceContextMenu(POINT point);
 void RebuildFiltered();
 void DestroyDirectRenderer();
 void RemoveTrayIcon();
@@ -471,6 +515,7 @@ void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client);
 int CalculateColumnCount(const RECT& client);
 std::wstring NormalizeHotkeyText(const std::wstring& value);
 void RequestSearchRepaint(HWND hwnd, bool erase);
+void ResetDragState();
 void UpdateImeWindowPosition(HWND hwnd);
 
 template <typename T>
@@ -565,7 +610,8 @@ RECT ContentClipRect(const RECT& client)
 RECT SearchRect(const RECT& client)
 {
     const int sideInset = IsSpotlightMode() ? SpotlightSearchSideInset : 48;
-    return { sideInset, SearchTop(), client.right - sideInset, SearchBottom() };
+    const int right = IsSpotlightMode() ? client.right - sideInset : client.right - 148;
+    return { sideInset, SearchTop(), std::max<LONG>(sideInset, right), SearchBottom() };
 }
 
 RECT SearchTextRect(const RECT& searchRect)
@@ -576,6 +622,11 @@ RECT SearchTextRect(const RECT& searchRect)
 RECT SpotlightAuxiliaryRect(const RECT& client)
 {
     return { client.right - 76, client.bottom - 60, client.right - 28, client.bottom - 20 };
+}
+
+RECT LaunchpadEditRect(const RECT& client)
+{
+    return { client.right - 132, SearchTop(), client.right - 48, SearchBottom() };
 }
 
 std::wstring SearchCommittedText()
@@ -995,6 +1046,7 @@ bool ContainsPath(const std::vector<std::wstring>& paths, const std::wstring& so
 
 void SetSingleSelection(const std::wstring& sourcePath)
 {
+    if (!IsSpotlightMode() && !g_launchpadState.AllowsSelection()) return;
     g_selectedSourcePaths.clear();
     if (!sourcePath.empty())
     {
@@ -1004,6 +1056,7 @@ void SetSingleSelection(const std::wstring& sourcePath)
 
 void ToggleSelection(const std::wstring& sourcePath)
 {
+    if (!IsSpotlightMode() && !g_launchpadState.AllowsSelection()) return;
     auto found = std::find_if(g_selectedSourcePaths.begin(), g_selectedSourcePaths.end(), [&](const std::wstring& path) {
         return SamePath(path, sourcePath);
     });
@@ -1036,6 +1089,7 @@ bool ContainsRegionId(const std::vector<std::wstring>& regionIds, const std::wst
 
 void SetSingleRegionSelection(const std::wstring& regionId)
 {
+    if (!g_launchpadState.AllowsSelection()) return;
     g_selectedRegionIds.clear();
     if (!regionId.empty())
     {
@@ -1045,6 +1099,7 @@ void SetSingleRegionSelection(const std::wstring& regionId)
 
 void ToggleRegionSelection(const std::wstring& regionId)
 {
+    if (!g_launchpadState.AllowsSelection()) return;
     auto found = std::find_if(g_selectedRegionIds.begin(), g_selectedRegionIds.end(), [&](const std::wstring& id) {
         return CompareStringOrdinal(id.c_str(), -1, regionId.c_str(), -1, TRUE) == CSTR_EQUAL;
     });
@@ -1591,6 +1646,7 @@ void DeleteSelectedRegions(const std::vector<std::wstring>& regionIds)
 
 void SelectAllItems()
 {
+    if (!g_launchpadState.AllowsSelection()) return;
     g_selectedSourcePaths.clear();
     for (int filteredIndex : g_filtered)
     {
@@ -1643,6 +1699,51 @@ RECT SelectionViewportRect()
     return NormalizeRect(start, current);
 }
 
+RECT WinRect(const llp::geometry::Rect& rect)
+{
+    return { rect.left, rect.top, rect.right, rect.bottom };
+}
+
+llp::geometry::Scene BuildCurrentSceneGeometry(const RECT& client)
+{
+    llp::geometry::LayoutRequest request;
+    request.clientWidth = static_cast<int>(client.right - client.left);
+    request.tileSize = TileSize();
+    request.gap = TileGap();
+    request.left = IsSpotlightMode() ? SpotlightContentInset : 44;
+    request.initialContentTop = 114;
+    request.regionHeaderHeight = 38;
+    request.scrollOffset = g_scrollOffset;
+    request.groupByRegion = SearchCommittedText().empty();
+    request.items.reserve(g_filtered.size());
+    std::vector<std::wstring> shownRegionIds;
+    for (int filteredIndex = 0; filteredIndex < static_cast<int>(g_filtered.size()); ++filteredIndex)
+    {
+        const int itemIndex = g_filtered[filteredIndex];
+        if (itemIndex < 0 || itemIndex >= static_cast<int>(g_items.size())) continue;
+        const auto& item = g_items[itemIndex];
+        request.items.push_back({ filteredIndex, item.regionId });
+        if (std::none_of(shownRegionIds.begin(), shownRegionIds.end(), [&](const std::wstring& id) {
+            return CompareStringOrdinal(id.c_str(), -1, item.regionId.c_str(), -1, TRUE) == CSTR_EQUAL;
+        }))
+        {
+            shownRegionIds.push_back(item.regionId);
+        }
+    }
+    if (request.groupByRegion && !IsSpotlightMode())
+    {
+        for (const auto& region : OrderedRegions())
+        {
+            if (IsUncategorizedRegion(region.id)) continue;
+            const bool shown = std::any_of(shownRegionIds.begin(), shownRegionIds.end(), [&](const std::wstring& id) {
+                return CompareStringOrdinal(id.c_str(), -1, region.id.c_str(), -1, TRUE) == CSTR_EQUAL;
+            });
+            if (!shown) request.emptyRegionIds.push_back(region.id);
+        }
+    }
+    return llp::geometry::BuildScene(request);
+}
+
 std::vector<HitTile> BuildContentHitTiles()
 {
     std::vector<HitTile> hits;
@@ -1650,48 +1751,17 @@ std::vector<HitTile> BuildContentHitTiles()
 
     RECT client = {};
     GetClientRect(g_hwnd, &client);
-    const int tileSize = TileSize();
-    const int gap = TileGap();
-    const int left = 44;
-    const int columns = CalculateColumnCount(client);
-    int column = 0;
-    int x = left;
-    int y = 114;
-    std::wstring activeRegion;
-    const bool groupByRegion = SearchCommittedText().empty();
-
-    hits.reserve(g_filtered.size());
-    for (int filteredIndex = 0; filteredIndex < static_cast<int>(g_filtered.size()); ++filteredIndex)
-    {
-        const auto& item = g_items[g_filtered[filteredIndex]];
-        if (groupByRegion && activeRegion != item.regionId)
-        {
-            if (column != 0)
-            {
-                y += tileSize + gap;
-                column = 0;
-                x = left;
-            }
-            activeRegion = item.regionId;
-            y += 38;
-        }
-
-        hits.push_back({ { x, y, x + tileSize, y + tileSize }, filteredIndex });
-        x += tileSize + gap;
-        column++;
-        if (column >= columns)
-        {
-            column = 0;
-            x = left;
-            y += tileSize + gap;
-        }
-    }
+    const auto scene = BuildCurrentSceneGeometry(client);
+    hits.reserve(scene.items.size());
+    for (const auto& item : scene.items) hits.push_back({ WinRect(item.contentBounds), item.filteredIndex });
 
     return hits;
 }
 
 void BeginSelectionBox(HWND hwnd, POINT point, bool additive)
 {
+    if (!g_launchpadState.AllowsMarquee()) return;
+    if (g_launchpadFlowProbe.active) g_launchpadFlowProbe.marqueeBegins++;
     g_selectionBoxActive = true;
     g_selectionBoxAdditive = additive;
     g_selectionBoxStart = SelectionContentPointFromClient(point);
@@ -2384,6 +2454,30 @@ std::string BuildSpotlightFlowProbeJson()
     return document.dump(2) + "\n";
 }
 
+std::string BuildLaunchpadFlowProbeJson()
+{
+    Json requestedPaths = Json::array();
+    for (const auto& path : g_launchpadFlowProbe.requestedPaths) requestedPaths.push_back(llp::persistence::WideToUtf8(path));
+    Json document = {
+        { "configuredHotkey", llp::persistence::WideToUtf8(g_settings.hotkey) },
+        { "hotkeyMessages", g_launchpadFlowProbe.hotkeyMessages },
+        { "modeTransitions", g_launchpadFlowProbe.modeTransitions },
+        { "browsePresses", g_launchpadFlowProbe.browsePresses },
+        { "browseClickLaunches", g_launchpadFlowProbe.browseClickLaunches },
+        { "editSelectionClicks", g_launchpadFlowProbe.editSelectionClicks },
+        { "maxSelectedItems", g_launchpadFlowProbe.maxSelectedItems },
+        { "marqueeBegins", g_launchpadFlowProbe.marqueeBegins },
+        { "itemDragBegins", g_launchpadFlowProbe.itemDragBegins },
+        { "regionDragBegins", g_launchpadFlowProbe.regionDragBegins },
+        { "blockedBrowseDrags", g_launchpadFlowProbe.blockedBrowseDrags },
+        { "successfulLaunches", g_launchpadFlowProbe.successfulLaunches },
+        { "requestedPaths", requestedPaths },
+        { "finalMode", g_launchpadState.IsEditing() ? "edit" : "browse" },
+        { "finalSelectedItems", g_selectedSourcePaths.size() }
+    };
+    return document.dump(2) + "\n";
+}
+
 bool WriteSpotlightFlowReadyState()
 {
     if (!g_spotlightFlowProbe.active || g_spotlightFlowProbe.readyPath.empty()) return false;
@@ -2405,6 +2499,25 @@ bool WriteSpotlightFlowReadyState()
         { "focusedResultPath", llp::persistence::WideToUtf8(focusedResultPath) }
     };
     return WriteFileUtf8(g_spotlightFlowProbe.readyPath, ready.dump(2) + "\n");
+}
+
+bool WriteLaunchpadFlowReadyState()
+{
+    if (!g_launchpadFlowProbe.active || g_launchpadFlowProbe.readyPath.empty()) return false;
+    const Json ready = {
+        { "itemCount", g_items.size() },
+        { "filteredCount", g_filtered.size() },
+        { "displayMode", llp::persistence::WideToUtf8(g_settings.displayMode) },
+        { "catalogGeneration", g_catalogGeneration },
+        { "lastPointerX", g_launchpadFlowProbe.lastPointerX },
+        { "lastPointerY", g_launchpadFlowProbe.lastPointerY },
+        { "lastHitCount", g_launchpadFlowProbe.lastHitCount },
+        { "lastMatchedIndex", g_launchpadFlowProbe.lastMatchedIndex },
+        { "browsePresses", g_launchpadFlowProbe.browsePresses },
+        { "browseClickLaunches", g_launchpadFlowProbe.browseClickLaunches },
+        { "requestedPaths", g_launchpadFlowProbe.requestedPaths.size() }
+    };
+    return WriteFileUtf8(g_launchpadFlowProbe.readyPath, ready.dump(2) + "\n");
 }
 
 std::string BuildShellImportProbeJson()
@@ -2460,6 +2573,7 @@ void HandleShellBrokerResult(LPARAM lParam)
             {
                 ApplyCatalogSnapshot(*result->snapshot, result->history.get(), result->historyWritable);
                 if (g_spotlightFlowProbe.active) g_spotlightFlowProbe.readyWritten = WriteSpotlightFlowReadyState();
+                if (g_launchpadFlowProbe.active) g_launchpadFlowProbe.readyWritten = WriteLaunchpadFlowReadyState();
             }
         }
         break;
@@ -2539,6 +2653,7 @@ void HandleShellBrokerResult(LPARAM lParam)
         break;
     case llp::shell::ResultKind::Launch:
         if (g_spotlightFlowProbe.active && result->succeeded) g_spotlightFlowProbe.successfulLaunches++;
+        if (g_launchpadFlowProbe.active && result->succeeded) g_launchpadFlowProbe.successfulLaunches++;
         if (result->succeeded && !result->stableId.empty() && g_settings.trackLaunchHistory)
         {
             g_searchHistory.RecordLaunch(result->stableId, CurrentUnixMilliseconds());
@@ -2892,6 +3007,7 @@ void ActivateSearchInput()
         g_spotlightState.FocusSearch();
         g_selectedFilteredIndex = -1;
     }
+    else g_selectedFilteredIndex = -1;
     g_searchInputActive = true;
     if (g_hwnd)
     {
@@ -3339,6 +3455,12 @@ void ShowNativeUi()
         RequestCatalogRefresh(probeDelay);
     }
     if (IsSpotlightMode()) g_spotlightState.Open();
+    else
+    {
+        g_launchpadState.Open();
+        ResetDragState();
+        ClearAllSelection();
+    }
     ResetSearchForOpen();
     RebuildFiltered();
     PositionWindow();
@@ -3411,6 +3533,7 @@ void LaunchItemAtFilteredIndex(int filteredIndex)
     if (g_shellBroker.RequestLaunch(item.sourcePath) != 0)
     {
         if (g_spotlightFlowProbe.active) g_spotlightFlowProbe.requestedPaths.push_back(item.sourcePath);
+        if (g_launchpadFlowProbe.active) g_launchpadFlowProbe.requestedPaths.push_back(item.sourcePath);
         HideNativeUi();
     }
     else MessageBoxW(g_hwnd, L"The Shell broker is unavailable; the item was not launched.", L"LightLaunchpad launch", MB_ICONWARNING | MB_OK);
@@ -3604,6 +3727,7 @@ RegionDropTarget FindRegionDropTarget(POINT point)
 void ResetDragState()
 {
     g_mouseDown = false;
+    g_pressedFilteredIndex = -1;
     g_dragActive = false;
     g_dragMode = DragMode::None;
     g_dragFilteredIndex = -1;
@@ -3617,9 +3741,29 @@ void ResetDragState()
     g_dragVisualOffsets.clear();
 }
 
+void SetLaunchpadEditing(bool editing)
+{
+    if (IsSpotlightMode()) return;
+    const bool changed = g_launchpadState.IsEditing() != editing;
+    KillTimer(g_hwnd, DragAnimationTimerId);
+    if (g_selectionBoxActive)
+    {
+        g_selectionBoxActive = false;
+        if (GetCapture() == g_hwnd) ReleaseCapture();
+    }
+    ResetDragState();
+    ClearAllSelection();
+    if (editing) g_launchpadState.EnterEdit();
+    else g_launchpadState.ExitEdit();
+    if (changed && g_launchpadFlowProbe.active) g_launchpadFlowProbe.modeTransitions++;
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
 void BeginDrag(HWND hwnd, POINT point)
 {
+    if (!g_launchpadState.AllowsItemDrag()) return;
     if (g_dragFilteredIndex < 0 || g_dragFilteredIndex >= static_cast<int>(g_filtered.size())) return;
+    if (g_launchpadFlowProbe.active) g_launchpadFlowProbe.itemDragBegins++;
     g_dragActive = true;
     g_dragMode = DragMode::Items;
     g_dragCurrent = point;
@@ -3634,7 +3778,9 @@ void BeginDrag(HWND hwnd, POINT point)
 
 void BeginRegionDrag(HWND hwnd, POINT point)
 {
+    if (!g_launchpadState.AllowsRegionDrag()) return;
     if (g_pendingRegionDragId.empty()) return;
+    if (g_launchpadFlowProbe.active) g_launchpadFlowProbe.regionDragBegins++;
     g_dragActive = true;
     g_dragMode = DragMode::Region;
     g_dragCurrent = point;
@@ -4951,12 +5097,12 @@ void DrawSearchFocusLens(HDC dc, const RECT& rect, bool active)
 
 void DrawFocusedTileLens(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect)
 {
-    DrawLiquidGlassFocusLens(target, rounded, rect, 1.16f, 0.42f, 0.0f, -4.0f);
+    DrawLiquidGlassFocusLens(target, rounded, rect, 1.0f, 0.30f, 0.0f, 0.0f);
 }
 
 void DrawFocusedTileLens(HDC dc, const RECT& rect)
 {
-    DrawLiquidGlassFocusLens(dc, rect, 14, 1.16f, 0, -4);
+    DrawLiquidGlassFocusLens(dc, rect, 14, 1.0f, 0, 0);
 }
 
 void DrawSearchLiquidSpecular(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, bool active)
@@ -5099,9 +5245,26 @@ void DrawSearchGlassSurface(HDC dc, const RECT& rect, bool active)
     DrawSearchFocusGlow(dc, rect, active);
 }
 
-void DrawAppTileSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool selected)
+void DrawAppTileSurface(ID2D1DCRenderTarget* target, const RECT& rect, TileVisualState state)
 {
-    if (!selected) return;
+    if (state == TileVisualState::Normal) return;
+    if (state != TileVisualState::KeyboardFocus)
+    {
+        COLORREF fill = RGB(28, 45, 64);
+        COLORREF rim = RGB(82, 108, 136);
+        if (state == TileVisualState::Selected) { fill = RGB(34, 82, 112); rim = RGB(112, 185, 226); }
+        else if (state == TileVisualState::MultiSelected) { fill = RGB(45, 72, 116); rim = RGB(150, 174, 238); }
+        else if (state == TileVisualState::Pressed) { fill = RGB(22, 54, 82); rim = RGB(154, 210, 244); }
+        else if (state == TileVisualState::DragSource) { fill = RGB(70, 62, 46); rim = RGB(210, 180, 116); }
+        else if (state == TileVisualState::DropTarget) { fill = RGB(36, 78, 68); rim = RGB(116, 202, 174); }
+        DrawRoundedRectDirect(target, rect, fill, rim, 14.0f);
+        if (state == TileVisualState::MultiSelected)
+        {
+            RECT inner = { rect.left + 3, rect.top + 3, rect.right - 3, rect.bottom - 3 };
+            DrawRoundedRectDirect(target, inner, fill, RGB(205, 218, 255), 11.0f);
+        }
+        return;
+    }
 
     const auto rounded = D2D1::RoundedRect(D2DRect(rect), 14.0f, 14.0f);
     DrawFocusedTileLens(target, rounded, rect);
@@ -5204,11 +5367,28 @@ void DrawIconBackplateDirect(ID2D1DCRenderTarget* target, const RECT& rect, bool
     SafeRelease(shadowStops);
 }
 
-void DrawAppTileSurface(HDC dc, const RECT& rect, bool selected)
+void DrawAppTileSurface(HDC dc, const RECT& rect, TileVisualState state)
 {
-    if (!selected) return;
-    DrawFocusedTileLens(dc, rect);
-    DrawRoundedRect(dc, rect, RGB(42, 82, 118), RGB(130, 190, 255), 12);
+    if (state == TileVisualState::Normal) return;
+    if (state == TileVisualState::KeyboardFocus)
+    {
+        DrawFocusedTileLens(dc, rect);
+        DrawRoundedRect(dc, rect, RGB(42, 82, 118), RGB(130, 190, 255), 12);
+        return;
+    }
+    COLORREF fill = RGB(28, 45, 64);
+    COLORREF rim = RGB(82, 108, 136);
+    if (state == TileVisualState::Selected) { fill = RGB(34, 82, 112); rim = RGB(112, 185, 226); }
+    else if (state == TileVisualState::MultiSelected) { fill = RGB(45, 72, 116); rim = RGB(150, 174, 238); }
+    else if (state == TileVisualState::Pressed) { fill = RGB(22, 54, 82); rim = RGB(154, 210, 244); }
+    else if (state == TileVisualState::DragSource) { fill = RGB(70, 62, 46); rim = RGB(210, 180, 116); }
+    else if (state == TileVisualState::DropTarget) { fill = RGB(36, 78, 68); rim = RGB(116, 202, 174); }
+    DrawRoundedRect(dc, rect, fill, rim, 12);
+    if (state == TileVisualState::MultiSelected)
+    {
+        RECT inner = { rect.left + 3, rect.top + 3, rect.right - 3, rect.bottom - 3 };
+        DrawRoundedRect(dc, inner, fill, RGB(205, 218, 255), 10);
+    }
 }
 
 void DrawTextDirect(
@@ -5272,6 +5452,24 @@ void UpdateSearchTextOffset(int caretWidth, int totalWidth, int visibleWidth)
     else if (caretWidth - g_searchTextOffset < margin)
         g_searchTextOffset = std::max(0, caretWidth - margin);
     g_searchTextOffset = std::clamp(g_searchTextOffset, 0, std::max(0, totalWidth - visibleWidth + margin));
+}
+
+TileVisualState ResolveTileVisualState(const LaunchItem& item, int filteredIndex)
+{
+    if (g_dragActive && ContainsPath(g_dragSourcePaths, item.sourcePath)) return TileVisualState::DragSource;
+    if (IsDropHintItem(item)) return TileVisualState::DropTarget;
+    if (filteredIndex == g_pressedFilteredIndex) return TileVisualState::Pressed;
+    if (!IsSpotlightMode() && g_launchpadState.IsEditing() && IsSelected(item.sourcePath))
+    {
+        return g_selectedSourcePaths.size() > 1 ? TileVisualState::MultiSelected : TileVisualState::Selected;
+    }
+    if (filteredIndex == g_selectedFilteredIndex
+        && (IsSpotlightMode() ? g_spotlightState.Focus() == llp::interaction::FocusArea::Results : !g_searchInputActive))
+    {
+        return TileVisualState::KeyboardFocus;
+    }
+    if (filteredIndex == g_hoveredFilteredIndex) return TileVisualState::Hover;
+    return TileVisualState::Normal;
 }
 
 RECT SearchCaretRect(const RECT& textRect, int prefixWidth)
@@ -5438,6 +5636,46 @@ void DrawSpotlightAuxiliary(HDC dc, const RECT& client)
     HFONT font = CreateFontW(16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     HGDIOBJ oldFont = SelectObject(dc, font);
     DrawTextClipped(dc, L"...", rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, focused ? RGB(18, 48, 74) : RGB(232, 241, 250));
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+}
+
+void DrawLaunchpadModeControl(ID2D1DCRenderTarget* target, const RECT& client)
+{
+    if (IsSpotlightMode() || IsSpotlightBaseLayerPass()) return;
+    const bool editing = g_launchpadState.IsEditing();
+    const RECT rect = LaunchpadEditRect(client);
+    DrawRoundedRectDirect(
+        target,
+        rect,
+        editing ? RGB(86, 158, 224) : RGB(39, 57, 78),
+        editing ? RGB(220, 241, 255) : RGB(128, 151, 178),
+        18.0f);
+    DrawTextDirect(
+        target,
+        g_tileTextFormat,
+        editing ? L"Done" : L"Edit",
+        rect,
+        editing ? RGB(18, 48, 74) : RGB(232, 241, 250),
+        DWRITE_TEXT_ALIGNMENT_CENTER,
+        DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+        DWRITE_WORD_WRAPPING_NO_WRAP);
+}
+
+void DrawLaunchpadModeControl(HDC dc, const RECT& client)
+{
+    if (IsSpotlightMode() || IsSpotlightBaseLayerPass()) return;
+    const bool editing = g_launchpadState.IsEditing();
+    const RECT rect = LaunchpadEditRect(client);
+    DrawRoundedRect(
+        dc,
+        rect,
+        editing ? RGB(86, 158, 224) : RGB(39, 57, 78),
+        editing ? RGB(220, 241, 255) : RGB(128, 151, 178),
+        18);
+    HFONT font = CreateFontW(15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    DrawTextClipped(dc, editing ? L"Done" : L"Edit", rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, editing ? RGB(18, 48, 74) : RGB(232, 241, 250));
     SelectObject(dc, oldFont);
     DeleteObject(font);
 }
@@ -5744,12 +5982,14 @@ void RenderFrameDirect2D(ID2D1DCRenderTarget* target, const RECT& client)
 {
     DrawGlassBackground(target, client);
     DrawSearchSurface(target, client);
+    DrawLaunchpadModeControl(target, client);
 }
 
 void RenderFrameGdi(HDC dc, const RECT& client)
 {
     DrawGlassBackground(dc, client);
     DrawSearchSurface(dc, client);
+    DrawLaunchpadModeControl(dc, client);
 }
 
 void RenderDeferredIconOverlay(HDC dc, const RECT& client, const std::vector<PendingIconDraw>& pendingIcons)
@@ -5800,176 +6040,71 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
 
     target->PushAxisAlignedClip(D2DRect(metrics.contentClip), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-    int column = 0;
-    int x = metrics.left;
-    int y = metrics.initialY;
-    std::wstring activeRegion;
-    int contentBottom = y;
-
-    if (g_filtered.empty())
+    const auto scene = BuildCurrentSceneGeometry(client);
+    g_contentHeight = scene.contentHeight;
+    for (const auto& region : scene.regions)
     {
-        bool hasShownRegion = false;
-        for (const auto& region : OrderedRegions())
+        const RECT bounds = WinRect(region.viewportBounds);
+        if (IsRegionSelected(region.regionId))
         {
-            if (IsUncategorizedRegion(region.id)) continue;
-            hasShownRegion = true;
-            if (column != 0)
-            {
-                y += metrics.tileSize + metrics.gap;
-                column = 0;
-                x = metrics.left;
-            }
-            if (IsRegionSelected(region.id))
-            {
-                RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
-                DrawRoundedRectDirect(target, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10.0f);
-            }
-            if (!baseLayerOnly)
-            {
-                RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
-                DrawTextDirect(target, g_headerTextFormat, RegionName(region.id), headerRect, RGB(220, 232, 248), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
-            }
-            g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, region.id });
-            y += 38;
-            contentBottom = std::max(contentBottom, static_cast<int>(y) + g_scrollOffset);
+            RECT selectedRect = { bounds.left, bounds.top - 4, bounds.right, bounds.top + 32 };
+            DrawRoundedRectDirect(target, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10.0f);
         }
-        if (!hasShownRegion)
+        if (!baseLayerOnly)
         {
-            RECT emptyRect = { metrics.left, y + 60, metrics.right, y + 120 };
-            if (!baseLayerOnly)
-            {
-                const bool initialSpotlight = IsSpotlightMode() && SearchCommittedText().empty();
-                DrawTextDirect(
-                    target,
-                    g_headerTextFormat,
-                    initialSpotlight ? L"Type to search" : L"No matching apps",
-                    emptyRect,
-                    initialSpotlight ? RGB(138, 164, 190) : RGB(210, 220, 235),
-                    DWRITE_TEXT_ALIGNMENT_CENTER,
-                    DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-                    DWRITE_WORD_WRAPPING_NO_WRAP);
-            }
+            RECT headerRect = { bounds.left + 8, bounds.top, bounds.right, bounds.top + 28 };
+            DrawTextDirect(target, g_headerTextFormat, RegionName(region.regionId), headerRect, RGB(220, 232, 248), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
         }
-        g_contentHeight = contentBottom + 44;
+        g_regionHits.push_back({ bounds, bounds, region.regionId });
     }
-    else
+    if (scene.items.empty() && scene.regions.empty() && !baseLayerOnly)
     {
-        std::vector<std::wstring> shownRegionIds;
-        for (int filteredIndex = 0; filteredIndex < static_cast<int>(g_filtered.size()); ++filteredIndex)
+        RECT emptyRect = { metrics.left, metrics.initialY + 60, metrics.right, metrics.initialY + 120 };
+        const bool initialSpotlight = IsSpotlightMode() && SearchCommittedText().empty();
+        DrawTextDirect(
+            target,
+            g_headerTextFormat,
+            initialSpotlight ? L"Type to search" : L"No matching apps",
+            emptyRect,
+            initialSpotlight ? RGB(138, 164, 190) : RGB(210, 220, 235),
+            DWRITE_TEXT_ALIGNMENT_CENTER,
+            DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+            DWRITE_WORD_WRAPPING_NO_WRAP);
+    }
+    for (const auto& slot : scene.items)
+    {
+        if (slot.filteredIndex < 0 || slot.filteredIndex >= static_cast<int>(g_filtered.size())) continue;
+        auto& item = g_items[g_filtered[slot.filteredIndex]];
+        RECT visualTileRect = WinRect(slot.viewportBounds);
+        const bool hideTileForDrag = ShouldHideTileForDragPreview(item);
+        if (!hideTileForDrag) ApplyDragAvoidanceOffset(visualTileRect, item, metrics.tileSize, metrics.gap, metrics.columns);
+        auto regionHit = std::find_if(g_regionHits.begin(), g_regionHits.end(), [&](const RegionHit& hit) {
+            return CompareStringOrdinal(hit.regionId.c_str(), -1, item.regionId.c_str(), -1, TRUE) == CSTR_EQUAL;
+        });
+        if (!hideTileForDrag && regionHit != g_regionHits.end()) regionHit->bounds.bottom = std::max(regionHit->bounds.bottom, visualTileRect.bottom + metrics.gap);
+        if (!hideTileForDrag && visualTileRect.bottom >= ContentClipTop() && visualTileRect.top <= client.bottom)
         {
-            auto& item = g_items[g_filtered[filteredIndex]];
-            if (metrics.groupByRegion && activeRegion != item.regionId)
-            {
-                if (column != 0)
-                {
-                    y += metrics.tileSize + metrics.gap;
-                    column = 0;
-                    x = metrics.left;
-                }
-                activeRegion = item.regionId;
-                shownRegionIds.push_back(activeRegion);
-                RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
-                if (IsRegionSelected(activeRegion))
-                {
-                    RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
-                    DrawRoundedRectDirect(target, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10.0f);
-                }
-                if (!baseLayerOnly)
-                {
-                    DrawTextDirect(target, g_headerTextFormat, RegionName(activeRegion), headerRect, RGB(220, 232, 248), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
-                }
-                g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, activeRegion });
-                y += 38;
-            }
-
-            RECT tileRect = { x, y, x + metrics.tileSize, y + metrics.tileSize };
-            RECT visualTileRect = tileRect;
-            bool hideTileForDrag = false;
-            if (ShouldHideTileForDragPreview(item))
-            {
-                hideTileForDrag = true;
-            }
-            else
-            {
-                ApplyDragAvoidanceOffset(visualTileRect, item, metrics.tileSize, metrics.gap, metrics.columns);
-            }
-
-            if (!hideTileForDrag && !g_regionHits.empty() && CompareStringOrdinal(g_regionHits.back().regionId.c_str(), -1, item.regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
-            {
-                g_regionHits.back().bounds.bottom = std::max(g_regionHits.back().bounds.bottom, visualTileRect.bottom + metrics.gap);
-            }
-            if (!hideTileForDrag && visualTileRect.bottom >= ContentClipTop() && visualTileRect.top <= client.bottom)
-            {
-                const bool keyboardFocused = filteredIndex == g_selectedFilteredIndex
-                    && (!IsSpotlightMode() || g_spotlightState.Focus() == llp::interaction::FocusArea::Results);
-                const bool selected = keyboardFocused || (!IsSpotlightMode() && IsSelected(item.sourcePath));
-                DrawAppTileSurface(target, visualTileRect, selected);
-                if (!baseLayerOnly)
-                {
-                    DrawIconBackplateDirect(target, visualTileRect, selected);
-                    QueueItemIcon(item);
-                    if (item.icon)
-                    {
-                        const int icon = g_settings.iconSize;
-                        const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
-                        const int iconY = visualTileRect.top + 14;
-                        pendingIcons.push_back({ item.icon, iconX, iconY, icon, DragIconAlphaForItem(item) });
-                    }
-
-                    RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
-                    const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
-                    DrawTextDirect(target, g_tileTextFormat, item.displayName, labelRect, labelColor, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP);
-                }
-                g_hits.push_back({ visualTileRect, filteredIndex });
-            }
-
-            x += metrics.tileSize + metrics.gap;
-            column++;
-            if (column >= metrics.columns)
-            {
-                column = 0;
-                x = metrics.left;
-                y += metrics.tileSize + metrics.gap;
-            }
-            contentBottom = std::max(contentBottom, static_cast<int>(visualTileRect.bottom) + metrics.gap + g_scrollOffset);
-        }
-
-        for (const auto& region : OrderedRegions())
-        {
-            if (IsUncategorizedRegion(region.id)) continue;
-            bool alreadyShown = false;
-            for (const auto& id : shownRegionIds)
-            {
-                if (CompareStringOrdinal(id.c_str(), -1, region.id.c_str(), -1, TRUE) == CSTR_EQUAL)
-                {
-                    alreadyShown = true;
-                    break;
-                }
-            }
-            if (alreadyShown) continue;
-
-            if (column != 0)
-            {
-                y += metrics.tileSize + metrics.gap;
-                column = 0;
-                x = metrics.left;
-            }
-            if (IsRegionSelected(region.id))
-            {
-                RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
-                DrawRoundedRectDirect(target, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10.0f);
-            }
+            const TileVisualState visualState = ResolveTileVisualState(item, slot.filteredIndex);
+            const bool emphasizedIcon = visualState != TileVisualState::Normal && visualState != TileVisualState::Hover;
+            DrawAppTileSurface(target, visualTileRect, visualState);
             if (!baseLayerOnly)
             {
-                RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
-                DrawTextDirect(target, g_headerTextFormat, RegionName(region.id), headerRect, RGB(220, 232, 248), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
+                DrawIconBackplateDirect(target, visualTileRect, emphasizedIcon);
+                QueueItemIcon(item);
+                if (item.icon)
+                {
+                    const int icon = g_settings.iconSize;
+                    const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
+                    const int iconY = visualTileRect.top + 14;
+                    pendingIcons.push_back({ item.icon, iconX, iconY, icon, DragIconAlphaForItem(item) });
+                }
+                RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
+                const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
+                DrawTextDirect(target, g_tileTextFormat, item.displayName, labelRect, labelColor, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP);
             }
-            g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, region.id });
-            y += 38;
-            contentBottom = std::max(contentBottom, static_cast<int>(y) + g_scrollOffset);
+            g_hits.push_back({ visualTileRect, slot.filteredIndex });
         }
-
-        g_contentHeight = contentBottom + 44;
+        g_contentHeight = std::max(g_contentHeight, static_cast<int>(visualTileRect.bottom) + g_scrollOffset + metrics.gap + 44);
     }
 
     target->PopAxisAlignedClip();
@@ -6006,174 +6141,68 @@ void PaintContent(HDC dc, const RECT& client)
     HRGN contentClip = CreateRectRgn(metrics.contentClip.left, metrics.contentClip.top, metrics.contentClip.right, metrics.contentClip.bottom);
     SelectClipRgn(dc, contentClip);
 
-    int column = 0;
-    int x = metrics.left;
-    int y = metrics.initialY;
-    std::wstring activeRegion;
-    int contentBottom = y;
-
     SelectObject(dc, headerFont);
-    if (g_filtered.empty())
+    const auto scene = BuildCurrentSceneGeometry(client);
+    g_contentHeight = scene.contentHeight;
+    for (const auto& region : scene.regions)
     {
-        bool hasShownRegion = false;
-        for (const auto& region : OrderedRegions())
+        const RECT bounds = WinRect(region.viewportBounds);
+        if (IsRegionSelected(region.regionId))
         {
-            if (IsUncategorizedRegion(region.id)) continue;
-            hasShownRegion = true;
-            if (column != 0)
-            {
-                y += metrics.tileSize + metrics.gap;
-                column = 0;
-                x = metrics.left;
-            }
-            if (IsRegionSelected(region.id))
-            {
-                RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
-                DrawRoundedRect(dc, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10);
-            }
-            if (!baseLayerOnly)
-            {
-                RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
-                DrawTextClipped(dc, RegionName(region.id), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(220, 232, 248));
-            }
-            g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, region.id });
-            y += 38;
-            contentBottom = std::max(contentBottom, static_cast<int>(y) + g_scrollOffset);
+            RECT selectedRect = { bounds.left, bounds.top - 4, bounds.right, bounds.top + 32 };
+            DrawRoundedRect(dc, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10);
         }
-        if (!hasShownRegion)
+        if (!baseLayerOnly)
         {
-            RECT emptyRect = { metrics.left, y + 60, metrics.right, y + 120 };
-            if (!baseLayerOnly)
-            {
-                const bool initialSpotlight = IsSpotlightMode() && SearchCommittedText().empty();
-                DrawTextClipped(
-                    dc,
-                    initialSpotlight ? L"Type to search" : L"No matching apps",
-                    emptyRect,
-                    DT_CENTER | DT_SINGLELINE | DT_VCENTER,
-                    initialSpotlight ? RGB(138, 164, 190) : RGB(210, 220, 235));
-            }
+            RECT headerRect = { bounds.left + 8, bounds.top, bounds.right, bounds.top + 28 };
+            DrawTextClipped(dc, RegionName(region.regionId), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(220, 232, 248));
         }
-        g_contentHeight = contentBottom + 44;
+        g_regionHits.push_back({ bounds, bounds, region.regionId });
     }
-    else
+    if (scene.items.empty() && scene.regions.empty() && !baseLayerOnly)
     {
-        std::vector<std::wstring> shownRegionIds;
-        for (int filteredIndex = 0; filteredIndex < static_cast<int>(g_filtered.size()); ++filteredIndex)
+        RECT emptyRect = { metrics.left, metrics.initialY + 60, metrics.right, metrics.initialY + 120 };
+        const bool initialSpotlight = IsSpotlightMode() && SearchCommittedText().empty();
+        DrawTextClipped(
+            dc,
+            initialSpotlight ? L"Type to search" : L"No matching apps",
+            emptyRect,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+            initialSpotlight ? RGB(138, 164, 190) : RGB(210, 220, 235));
+    }
+    for (const auto& slot : scene.items)
+    {
+        if (slot.filteredIndex < 0 || slot.filteredIndex >= static_cast<int>(g_filtered.size())) continue;
+        auto& item = g_items[g_filtered[slot.filteredIndex]];
+        RECT visualTileRect = WinRect(slot.viewportBounds);
+        const bool hideTileForDrag = ShouldHideTileForDragPreview(item);
+        if (!hideTileForDrag) ApplyDragAvoidanceOffset(visualTileRect, item, metrics.tileSize, metrics.gap, metrics.columns);
+        auto regionHit = std::find_if(g_regionHits.begin(), g_regionHits.end(), [&](const RegionHit& hit) {
+            return CompareStringOrdinal(hit.regionId.c_str(), -1, item.regionId.c_str(), -1, TRUE) == CSTR_EQUAL;
+        });
+        if (!hideTileForDrag && regionHit != g_regionHits.end()) regionHit->bounds.bottom = std::max(regionHit->bounds.bottom, visualTileRect.bottom + metrics.gap);
+        if (!hideTileForDrag && visualTileRect.bottom >= ContentClipTop() && visualTileRect.top <= client.bottom)
         {
-            auto& item = g_items[g_filtered[filteredIndex]];
-            if (metrics.groupByRegion && activeRegion != item.regionId)
-            {
-                if (column != 0)
-                {
-                    y += metrics.tileSize + metrics.gap;
-                    column = 0;
-                    x = metrics.left;
-                }
-                activeRegion = item.regionId;
-                shownRegionIds.push_back(activeRegion);
-                RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
-                if (IsRegionSelected(activeRegion))
-                {
-                    RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
-                    DrawRoundedRect(dc, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10);
-                }
-                if (!baseLayerOnly)
-                {
-                    DrawTextClipped(dc, RegionName(activeRegion), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(220, 232, 248));
-                }
-                g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, activeRegion });
-                y += 38;
-            }
-
-            RECT tileRect = { x, y, x + metrics.tileSize, y + metrics.tileSize };
-            RECT visualTileRect = tileRect;
-            bool hideTileForDrag = false;
-            if (ShouldHideTileForDragPreview(item))
-            {
-                hideTileForDrag = true;
-            }
-            else
-            {
-                ApplyDragAvoidanceOffset(visualTileRect, item, metrics.tileSize, metrics.gap, metrics.columns);
-            }
-
-            if (!hideTileForDrag && !g_regionHits.empty() && CompareStringOrdinal(g_regionHits.back().regionId.c_str(), -1, item.regionId.c_str(), -1, TRUE) == CSTR_EQUAL)
-            {
-                g_regionHits.back().bounds.bottom = std::max(g_regionHits.back().bounds.bottom, visualTileRect.bottom + metrics.gap);
-            }
-            if (!hideTileForDrag && visualTileRect.bottom >= ContentClipTop() && visualTileRect.top <= client.bottom)
-            {
-                const bool keyboardFocused = filteredIndex == g_selectedFilteredIndex
-                    && (!IsSpotlightMode() || g_spotlightState.Focus() == llp::interaction::FocusArea::Results);
-                const bool selected = keyboardFocused || (!IsSpotlightMode() && IsSelected(item.sourcePath));
-                DrawAppTileSurface(dc, visualTileRect, selected);
-                if (!baseLayerOnly)
-                {
-                    QueueItemIcon(item);
-                    if (item.icon)
-                    {
-                        const int icon = g_settings.iconSize;
-                        const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
-                        const int iconY = visualTileRect.top + 14;
-                        DrawFittedIcon(dc, iconX, iconY, item.icon, icon, DragIconAlphaForItem(item));
-                    }
-
-                    SelectObject(dc, tileFont);
-                    RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
-                    const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
-                    DrawTextClipped(dc, item.displayName, labelRect, DT_CENTER | DT_WORDBREAK | DT_END_ELLIPSIS, labelColor);
-                }
-                g_hits.push_back({ visualTileRect, filteredIndex });
-            }
-
-            x += metrics.tileSize + metrics.gap;
-            column++;
-            if (column >= metrics.columns)
-            {
-                column = 0;
-                x = metrics.left;
-                y += metrics.tileSize + metrics.gap;
-            }
-            contentBottom = std::max(contentBottom, static_cast<int>(visualTileRect.bottom) + metrics.gap + g_scrollOffset);
-        }
-
-        for (const auto& region : OrderedRegions())
-        {
-            if (IsUncategorizedRegion(region.id)) continue;
-            bool alreadyShown = false;
-            for (const auto& id : shownRegionIds)
-            {
-                if (CompareStringOrdinal(id.c_str(), -1, region.id.c_str(), -1, TRUE) == CSTR_EQUAL)
-                {
-                    alreadyShown = true;
-                    break;
-                }
-            }
-            if (alreadyShown) continue;
-
-            if (column != 0)
-            {
-                y += metrics.tileSize + metrics.gap;
-                column = 0;
-                x = metrics.left;
-            }
-            if (IsRegionSelected(region.id))
-            {
-                RECT selectedRect = { metrics.left, y - 4, metrics.right, y + 32 };
-                DrawRoundedRect(dc, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10);
-            }
+            const TileVisualState visualState = ResolveTileVisualState(item, slot.filteredIndex);
+            DrawAppTileSurface(dc, visualTileRect, visualState);
             if (!baseLayerOnly)
             {
-                RECT headerRect = { metrics.left + 8, y, metrics.right, y + 28 };
-                DrawTextClipped(dc, RegionName(region.id), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(220, 232, 248));
+                QueueItemIcon(item);
+                if (item.icon)
+                {
+                    const int icon = g_settings.iconSize;
+                    const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
+                    const int iconY = visualTileRect.top + 14;
+                    DrawFittedIcon(dc, iconX, iconY, item.icon, icon, DragIconAlphaForItem(item));
+                }
+                SelectObject(dc, tileFont);
+                RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
+                const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
+                DrawTextClipped(dc, item.displayName, labelRect, DT_CENTER | DT_WORDBREAK | DT_END_ELLIPSIS, labelColor);
             }
-            g_regionHits.push_back({ { metrics.left, y, metrics.right, y + 38 }, { metrics.left, y, metrics.right, y + 38 }, region.id });
-            y += 38;
-            contentBottom = std::max(contentBottom, static_cast<int>(y) + g_scrollOffset);
+            g_hits.push_back({ visualTileRect, slot.filteredIndex });
         }
-
-        g_contentHeight = contentBottom + 44;
+        g_contentHeight = std::max(g_contentHeight, static_cast<int>(visualTileRect.bottom) + g_scrollOffset + metrics.gap + 44);
     }
 
     if (!baseLayerOnly)
@@ -6446,10 +6475,7 @@ void ClampScroll()
 
 int CalculateColumnCount(const RECT& client)
 {
-    const int gap = TileGap();
-    const int left = IsSpotlightMode() ? SpotlightContentInset : 44;
-    const int right = client.right - left;
-    return std::max(1, (right - left + gap) / (TileSize() + gap));
+    return BuildCurrentSceneGeometry(client).columns;
 }
 
 bool EstimateTileBoundsForFilteredIndex(int targetFilteredIndex, RECT& bounds)
@@ -6458,48 +6484,11 @@ bool EstimateTileBoundsForFilteredIndex(int targetFilteredIndex, RECT& bounds)
 
     RECT client = {};
     GetClientRect(g_hwnd, &client);
-    const int tileSize = TileSize();
-    const int gap = TileGap();
-    const int columns = CalculateColumnCount(client);
-    const int left = 44;
-    int column = 0;
-    int x = left;
-    int logicalY = 114;
-    std::wstring activeRegion;
-    const bool groupByRegion = SearchCommittedText().empty();
-
-    for (int filteredIndex = 0; filteredIndex <= targetFilteredIndex; ++filteredIndex)
-    {
-        const auto& item = g_items[g_filtered[filteredIndex]];
-        if (groupByRegion && activeRegion != item.regionId)
-        {
-            if (column != 0)
-            {
-                logicalY += tileSize + gap;
-                column = 0;
-                x = left;
-            }
-            activeRegion = item.regionId;
-            logicalY += 38;
-        }
-
-        if (filteredIndex == targetFilteredIndex)
-        {
-            bounds = { x, logicalY - g_scrollOffset, x + tileSize, logicalY + tileSize - g_scrollOffset };
-            return true;
-        }
-
-        x += tileSize + gap;
-        column++;
-        if (column >= columns)
-        {
-            column = 0;
-            x = left;
-            logicalY += tileSize + gap;
-        }
-    }
-
-    return false;
+    const auto scene = BuildCurrentSceneGeometry(client);
+    const auto* item = scene.FindItem(targetFilteredIndex);
+    if (!item) return false;
+    bounds = WinRect(item->viewportBounds);
+    return true;
 }
 
 void ScrollSelectedIntoView()
@@ -6566,8 +6555,11 @@ void SelectFilteredIndex(int index)
         ApplySpotlightInteractionState(true);
         return;
     }
+    g_searchInputActive = false;
+    g_searchAccessibility.NotifyFocusChanged();
     const auto& item = g_items[g_filtered[g_selectedFilteredIndex]];
-    SetSingleSelection(item.sourcePath);
+    if (g_launchpadState.IsEditing()) SetSingleSelection(item.sourcePath);
+    else ClearAllSelection();
     ScrollSelectedIntoView();
     RequestSearchRepaint(g_hwnd, false);
 }
@@ -6583,7 +6575,14 @@ void MoveSelectionVertical(int delta)
     if (g_filtered.empty()) return;
     RECT client = {};
     GetClientRect(g_hwnd, &client);
-    SelectFilteredIndex(g_selectedFilteredIndex + delta * CalculateColumnCount(client));
+    const int columns = CalculateColumnCount(client);
+    if (!IsSpotlightMode() && delta < 0 && g_selectedFilteredIndex >= 0 && g_selectedFilteredIndex < columns)
+    {
+        ActivateSearchInput();
+        RequestSearchRepaint(g_hwnd, false);
+        return;
+    }
+    SelectFilteredIndex(g_selectedFilteredIndex + delta * columns);
 }
 
 std::wstring GetControlText(HWND hwnd, int controlId, int maxChars = 2048)
@@ -7342,19 +7341,23 @@ void ShowItemContextMenu(POINT point, int filteredIndex)
 {
     if (filteredIndex < 0 || filteredIndex >= static_cast<int>(g_filtered.size())) return;
     const auto& item = g_items[g_filtered[filteredIndex]];
-    if (!IsSelected(item.sourcePath))
+    if (g_launchpadState.IsEditing() && !IsSelected(item.sourcePath))
     {
         SetSingleSelection(item.sourcePath);
     }
-    g_contextItemPaths = ResolveDragSourcePaths(item);
+    g_contextItemPaths = g_launchpadState.IsEditing() ? ResolveDragSourcePaths(item) : std::vector<std::wstring>{ item.sourcePath };
 
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, ItemLaunchCommand, Text(L"Launch", L"启动"));
-    AppendMenuW(menu, g_contextItemPaths.size() > 1 ? MF_STRING | MF_GRAYED : MF_STRING, ItemRenameCommand, Text(L"Rename", L"重命名"));
     AppendMenuW(menu, MF_STRING, ItemOpenLocationCommand, Text(L"Open file location", L"打开文件位置"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, ItemRemoveCommand, g_contextItemPaths.size() > 1 ? Text(L"Delete selected icons", L"删除已选图标") : Text(L"Delete icon", L"删除图标"));
+    if (g_launchpadState.IsEditing())
+    {
+        AppendMenuW(menu, g_contextItemPaths.size() > 1 ? MF_STRING | MF_GRAYED : MF_STRING, ItemRenameCommand, Text(L"Rename", L"重命名"));
+        AppendMenuW(menu, MF_STRING, ItemRemoveCommand, g_contextItemPaths.size() > 1 ? Text(L"Delete selected icons", L"删除已选图标") : Text(L"Delete icon", L"删除图标"));
+    }
+    else AppendMenuW(menu, MF_STRING, WorkspaceToggleEditCommand, Text(L"Edit apps and regions", L"编辑应用与区域"));
     ClientToScreen(g_hwnd, &point);
     SetForegroundWindow(g_hwnd);
     TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, g_hwnd, nullptr);
@@ -7363,6 +7366,11 @@ void ShowItemContextMenu(POINT point, int filteredIndex)
 
 void ShowRegionContextMenu(POINT point, const std::wstring& regionId)
 {
+    if (!g_launchpadState.IsEditing())
+    {
+        ShowWorkspaceContextMenu(point);
+        return;
+    }
     g_contextRegionId = regionId;
     if (!IsRegionSelected(regionId))
     {
@@ -7392,13 +7400,17 @@ void ShowWorkspaceContextMenu(POINT point)
 {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
-    AppendMenuW(menu, MF_STRING, WorkspaceCreateRegionCommand, Text(L"Create region", L"新建 region"));
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, WorkspaceImportFilesCommand, Text(L"Import files", L"导入文件"));
-    AppendMenuW(menu, MF_STRING, WorkspaceImportStartMenuCommand, Text(L"Import Start Menu apps", L"导入开始菜单应用"));
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, WorkspaceSelectAllCommand, Text(L"Select all", L"全选"));
-    AppendMenuW(menu, MF_STRING, WorkspaceClearSelectionCommand, Text(L"Clear selection", L"清除选择"));
+    AppendMenuW(menu, MF_STRING, WorkspaceToggleEditCommand, g_launchpadState.IsEditing() ? Text(L"Done editing", L"完成编辑") : Text(L"Edit apps and regions", L"编辑应用与区域"));
+    if (g_launchpadState.IsEditing())
+    {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, WorkspaceCreateRegionCommand, Text(L"Create region", L"新建 region"));
+        AppendMenuW(menu, MF_STRING, WorkspaceImportFilesCommand, Text(L"Import files", L"导入文件"));
+        AppendMenuW(menu, MF_STRING, WorkspaceImportStartMenuCommand, Text(L"Import Start Menu apps", L"导入开始菜单应用"));
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, WorkspaceSelectAllCommand, Text(L"Select all", L"全选"));
+        AppendMenuW(menu, MF_STRING, WorkspaceClearSelectionCommand, Text(L"Clear selection", L"清除选择"));
+    }
     ClientToScreen(g_hwnd, &point);
     SetForegroundWindow(g_hwnd);
     TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, g_hwnd, nullptr);
@@ -7565,7 +7577,9 @@ void AccessibilityFocus(void*)
 
 bool AccessibilitySearchHasFocus(void*)
 {
-    return !IsSpotlightMode() || g_spotlightState.Focus() == llp::interaction::FocusArea::Search;
+    return IsSpotlightMode()
+        ? g_spotlightState.Focus() == llp::interaction::FocusArea::Search
+        : g_searchInputActive;
 }
 
 void AccessibilityTextChanged(void*)
@@ -7664,6 +7678,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             const ULONGLONG started = GetTickCount64();
             ToggleNativeUi();
+            if (g_launchpadFlowProbe.active && IsWindowVisible(hwnd)) g_launchpadFlowProbe.hotkeyMessages++;
             if (g_spotlightFlowProbe.active && IsWindowVisible(hwnd))
             {
                 g_spotlightFlowProbe.hotkeyMessages++;
@@ -7680,20 +7695,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (LOWORD(wParam) == TraySettingsCommand) ShowSettingsWindow();
         if (LOWORD(wParam) == TrayExitCommand) DestroyWindow(hwnd);
         if (LOWORD(wParam) == ItemLaunchCommand && !g_contextItemPaths.empty()) LaunchItemBySourcePath(g_contextItemPaths.front());
-        if (LOWORD(wParam) == ItemRenameCommand && g_contextItemPaths.size() == 1) RenameItem(g_contextItemPaths.front());
+        if (LOWORD(wParam) == WorkspaceToggleEditCommand && !IsSpotlightMode()) SetLaunchpadEditing(!g_launchpadState.IsEditing());
+        if (LOWORD(wParam) == ItemRenameCommand && g_launchpadState.IsEditing() && g_contextItemPaths.size() == 1) RenameItem(g_contextItemPaths.front());
         if (LOWORD(wParam) == ItemOpenLocationCommand && !g_contextItemPaths.empty()) OpenItemLocation(g_contextItemPaths.front());
-        if (LOWORD(wParam) == ItemRemoveCommand && !g_contextItemPaths.empty())
+        if (LOWORD(wParam) == ItemRemoveCommand && g_launchpadState.IsEditing() && !g_contextItemPaths.empty())
         {
             if (g_shellBroker.RequestRecycle(g_settings.launchpadFolder, g_contextItemPaths) == 0)
             {
                 MessageBoxW(hwnd, Text(L"The Shell broker is unavailable; no icons were deleted.", L"Shell 后台不可用，未删除任何图标。"), Text(L"Delete icon", L"删除图标"), MB_ICONWARNING | MB_OK);
             }
         }
-        if (LOWORD(wParam) == RegionRenameCommand && !g_contextRegionId.empty())
+        if (LOWORD(wParam) == RegionRenameCommand && g_launchpadState.IsEditing() && !g_contextRegionId.empty())
         {
             RenameRegion(g_contextRegionId);
         }
-        if (LOWORD(wParam) == RegionDeleteCommand && !g_contextRegionId.empty())
+        if (LOWORD(wParam) == RegionDeleteCommand && g_launchpadState.IsEditing() && !g_contextRegionId.empty())
         {
             DeleteRegionAndMoveItems(g_contextRegionId);
             SortItems();
@@ -7701,19 +7717,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             RebuildFiltered();
             InvalidateRect(hwnd, nullptr, TRUE);
         }
-        if (LOWORD(wParam) == RegionRenameSelectedCommand && !g_contextRegionIds.empty())
+        if (LOWORD(wParam) == RegionRenameSelectedCommand && g_launchpadState.IsEditing() && !g_contextRegionIds.empty())
         {
             RenameSelectedRegions(g_contextRegionIds);
         }
-        if (LOWORD(wParam) == RegionDeleteSelectedCommand && !g_contextRegionIds.empty())
+        if (LOWORD(wParam) == RegionDeleteSelectedCommand && g_launchpadState.IsEditing() && !g_contextRegionIds.empty())
         {
             DeleteSelectedRegions(g_contextRegionIds);
         }
-        if (LOWORD(wParam) == WorkspaceCreateRegionCommand) CreateRegion();
-        if (LOWORD(wParam) == WorkspaceImportFilesCommand) ImportLaunchableFiles();
-        if (LOWORD(wParam) == WorkspaceImportStartMenuCommand) ImportStartMenuApps();
-        if (LOWORD(wParam) == WorkspaceSelectAllCommand) SelectAllItems();
-        if (LOWORD(wParam) == WorkspaceClearSelectionCommand) ClearAllSelection();
+        if (LOWORD(wParam) == WorkspaceCreateRegionCommand && g_launchpadState.IsEditing()) CreateRegion();
+        if (LOWORD(wParam) == WorkspaceImportFilesCommand && g_launchpadState.IsEditing()) ImportLaunchableFiles();
+        if (LOWORD(wParam) == WorkspaceImportStartMenuCommand && g_launchpadState.IsEditing()) ImportStartMenuApps();
+        if (LOWORD(wParam) == WorkspaceSelectAllCommand && g_launchpadState.IsEditing()) SelectAllItems();
+        if (LOWORD(wParam) == WorkspaceClearSelectionCommand && g_launchpadState.IsEditing()) ClearAllSelection();
         return 0;
     case WmTray:
         HandleTrayNotification(lParam);
@@ -7755,6 +7771,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_LBUTTONDOWN:
     {
         POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (g_launchpadFlowProbe.active)
+        {
+            g_launchpadFlowProbe.lastPointerX = point.x;
+            g_launchpadFlowProbe.lastPointerY = point.y;
+            g_launchpadFlowProbe.lastHitCount = static_cast<int>(g_hits.size());
+            g_launchpadFlowProbe.lastMatchedIndex = -1;
+        }
         if (IsSpotlightMode() && !IsPointInsideSpotlightGlass(point))
         {
             HideNativeUi();
@@ -7783,6 +7806,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             SearchCaretChanged(hwnd);
             return 0;
         }
+        if (!IsSpotlightMode())
+        {
+            const RECT editRect = LaunchpadEditRect(client);
+            if (PtInRect(&editRect, point))
+            {
+                SetLaunchpadEditing(!g_launchpadState.IsEditing());
+                return 0;
+            }
+        }
         if (IsSpotlightMode())
         {
             const RECT auxiliaryRect = SpotlightAuxiliaryRect(client);
@@ -7800,22 +7832,46 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             if (PtInRect(&hit.bounds, point))
             {
+                if (g_launchpadFlowProbe.active) g_launchpadFlowProbe.lastMatchedIndex = hit.itemIndex;
                 if (IsSpotlightMode())
                 {
                     LaunchItemAtFilteredIndex(hit.itemIndex);
                     return 0;
                 }
                 g_selectedFilteredIndex = hit.itemIndex;
+                g_searchInputActive = false;
+                g_searchAccessibility.NotifyFocusChanged();
+                const auto action = g_launchpadState.ClickItem((wParam & MK_CONTROL) != 0);
+                if (action == llp::interaction::LaunchpadClickAction::LaunchItem)
+                {
+                    if (g_launchpadFlowProbe.active)
+                    {
+                        g_launchpadFlowProbe.browsePresses++;
+                        g_launchpadFlowProbe.blockedBrowseDragRecorded = false;
+                        WriteLaunchpadFlowReadyState();
+                    }
+                    ClearAllSelection();
+                    g_pressedFilteredIndex = hit.itemIndex;
+                    g_mouseDown = true;
+                    SetCapture(hwnd);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
                 if (hit.itemIndex >= 0 && hit.itemIndex < static_cast<int>(g_filtered.size()))
                 {
                     const auto& item = g_items[g_filtered[hit.itemIndex]];
-                    if (wParam & MK_CONTROL)
+                    if (action == llp::interaction::LaunchpadClickAction::ToggleItemSelection)
                     {
                         ToggleSelection(item.sourcePath);
                     }
                     else if (!IsSelected(item.sourcePath))
                     {
                         SetSingleSelection(item.sourcePath);
+                    }
+                    if (g_launchpadFlowProbe.active)
+                    {
+                        g_launchpadFlowProbe.editSelectionClicks++;
+                        g_launchpadFlowProbe.maxSelectedItems = std::max(g_launchpadFlowProbe.maxSelectedItems, static_cast<int>(g_selectedSourcePaths.size()));
                     }
                 }
                 g_mouseDown = SearchDisplayText().empty();
@@ -7826,11 +7882,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 return 0;
             }
         }
+        if (g_launchpadFlowProbe.active) WriteLaunchpadFlowReadyState();
         if (IsSpotlightMode()) return 0;
-        for (const auto& regionHit : g_regionHits)
+        if (g_launchpadState.AllowsSelection()) for (const auto& regionHit : g_regionHits)
         {
             if (PtInRect(&regionHit.headerBounds, point))
             {
+                g_searchInputActive = false;
+                g_searchAccessibility.NotifyFocusChanged();
                 if (wParam & MK_CONTROL)
                 {
                     ToggleRegionSelection(regionHit.regionId);
@@ -7847,7 +7906,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 return 0;
             }
         }
-        if (point.y >= ContentClipTop())
+        if (g_launchpadState.AllowsMarquee() && point.y >= ContentClipTop())
         {
             g_selectionBoxAdditive = (wParam & MK_CONTROL) != 0;
             BeginSelectionBox(hwnd, point, g_selectionBoxAdditive);
@@ -7860,6 +7919,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_MOUSEMOVE:
     {
         POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        int hovered = -1;
+        for (const auto& hit : g_hits)
+        {
+            if (PtInRect(&hit.bounds, point))
+            {
+                hovered = hit.itemIndex;
+                break;
+            }
+        }
+        if (hovered != g_hoveredFilteredIndex)
+        {
+            g_hoveredFilteredIndex = hovered;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        TRACKMOUSEEVENT tracking = { sizeof(tracking), TME_LEAVE, hwnd, 0 };
+        TrackMouseEvent(&tracking);
         if (g_searchPointerSelecting)
         {
             g_searchInput.SetCaret(SearchTextPositionFromClientX(hwnd, point.x), true);
@@ -7871,7 +7946,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             UpdateSelectionBox(point);
             return 0;
         }
-        if (g_mouseDown && !g_dragActive && HasExceededDragThreshold(point))
+        if (g_launchpadState.IsEditing() && g_mouseDown && !g_dragActive && HasExceededDragThreshold(point))
         {
             if (g_dragFilteredIndex >= 0)
             {
@@ -7882,6 +7957,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 BeginRegionDrag(hwnd, point);
             }
         }
+        else if (!IsSpotlightMode() && !g_launchpadState.IsEditing() && g_mouseDown && HasExceededDragThreshold(point)
+            && g_launchpadFlowProbe.active && !g_launchpadFlowProbe.blockedBrowseDragRecorded)
+        {
+            g_launchpadFlowProbe.blockedBrowseDragRecorded = true;
+            g_launchpadFlowProbe.blockedBrowseDrags++;
+        }
         if (g_dragActive)
         {
             UpdateDrag(point);
@@ -7889,6 +7970,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     }
+    case WM_MOUSELEAVE:
+        if (g_hoveredFilteredIndex != -1)
+        {
+            g_hoveredFilteredIndex = -1;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
     case WM_LBUTTONUP:
         if (g_searchPointerSelecting)
         {
@@ -7911,6 +7999,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             else
             {
                 CompleteDrag(hwnd);
+            }
+            return 0;
+        }
+        if (!IsSpotlightMode() && !g_launchpadState.IsEditing() && g_pressedFilteredIndex >= 0)
+        {
+            POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            const int pressed = g_pressedFilteredIndex;
+            bool activate = false;
+            for (const auto& hit : g_hits)
+            {
+                if (hit.itemIndex == pressed && PtInRect(&hit.bounds, point))
+                {
+                    activate = true;
+                    break;
+                }
+            }
+            ResetDragState();
+            if (GetCapture() == hwnd) ReleaseCapture();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            if (activate)
+            {
+                if (g_launchpadFlowProbe.active) g_launchpadFlowProbe.browseClickLaunches++;
+                LaunchItemAtFilteredIndex(pressed);
             }
             return 0;
         }
@@ -7943,6 +8054,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
     case WM_LBUTTONDBLCLK:
     {
+        if (!IsSpotlightMode() && g_launchpadState.IsEditing()) return 0;
         POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         for (const auto& hit : g_hits)
         {
@@ -8000,7 +8112,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                     HideNativeUi();
                 }
             }
+            else if (g_launchpadState.IsEditing()) SetLaunchpadEditing(false);
             else HideNativeUi();
+            return 0;
+        }
+        if (!IsSpotlightMode() && control && wParam == L'E')
+        {
+            SetLaunchpadEditing(!g_launchpadState.IsEditing());
             return 0;
         }
         if (IsSpotlightMode() && wParam == VK_TAB)
@@ -8009,8 +8127,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             ApplySpotlightInteractionState(true);
             return 0;
         }
-        const bool searchFocused = !IsSpotlightMode()
-            || g_spotlightState.Focus() == llp::interaction::FocusArea::Search;
+        const bool searchFocused = IsSpotlightMode()
+            ? g_spotlightState.Focus() == llp::interaction::FocusArea::Search
+            : g_searchInputActive;
         if (searchFocused && control && wParam == L'A')
         {
             g_searchInput.SelectAll();
@@ -8069,12 +8188,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                     ShowSettingsWindow();
                 }
             }
-            else LaunchItemAtFilteredIndex(g_selectedFilteredIndex);
+            else if (g_launchpadState.EnterOnFocusedItem() == llp::interaction::LaunchpadEnterAction::LaunchFocusedItem)
+            {
+                LaunchItemAtFilteredIndex(g_searchInputActive ? 0 : g_selectedFilteredIndex);
+            }
             return 0;
         }
         if (wParam == VK_RIGHT)
         {
             if (IsSpotlightMode() && !searchFocused) MoveSpotlightResult(llp::interaction::Direction::Right);
+            else if (!IsSpotlightMode() && !searchFocused) MoveSelectionHorizontal(1);
             else
             {
                 g_searchInput.MoveCaret(control ? llp::input::Move::WordRight : llp::input::Move::Right, shift);
@@ -8085,6 +8208,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (wParam == VK_LEFT)
         {
             if (IsSpotlightMode() && !searchFocused) MoveSpotlightResult(llp::interaction::Direction::Left);
+            else if (!IsSpotlightMode() && !searchFocused) MoveSelectionHorizontal(-1);
             else
             {
                 g_searchInput.MoveCaret(control ? llp::input::Move::WordLeft : llp::input::Move::Left, shift);
@@ -8099,6 +8223,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 g_spotlightState.FocusResult(0);
                 ApplySpotlightInteractionState(true);
             }
+            else if (!IsSpotlightMode() && !searchFocused && !g_filtered.empty()) SelectFilteredIndex(0);
             else
             {
                 g_searchInput.MoveCaret(llp::input::Move::Home, shift);
@@ -8113,6 +8238,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 g_spotlightState.FocusResult(static_cast<int>(g_filtered.size()) - 1);
                 ApplySpotlightInteractionState(true);
             }
+            else if (!IsSpotlightMode() && !searchFocused && !g_filtered.empty()) SelectFilteredIndex(static_cast<int>(g_filtered.size()) - 1);
             else
             {
                 g_searchInput.MoveCaret(llp::input::Move::End, shift);
@@ -8132,6 +8258,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 if (searchFocused || g_spotlightState.FocusedResultIndex() < 0) EnterSpotlightResults();
                 else MoveSpotlightResult(llp::interaction::Direction::Down);
             }
+            else if (searchFocused) SelectFilteredIndex(0);
             else MoveSelectionVertical(1);
             return 0;
         }
@@ -8221,6 +8348,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         KillTimer(hwnd, DragAnimationTimerId);
         if (!g_textInputProbePath.empty()) WriteFileUtf8(g_textInputProbePath, BuildTextInputProbeJson());
         if (g_spotlightFlowProbe.active) WriteFileUtf8(g_spotlightFlowProbe.outputPath, BuildSpotlightFlowProbeJson());
+        if (g_launchpadFlowProbe.active) WriteFileUtf8(g_launchpadFlowProbe.outputPath, BuildLaunchpadFlowProbeJson());
         g_searchAccessibility.Shutdown();
         g_shellBroker.Stop();
         MSG pendingBrokerResult = {};
@@ -8283,13 +8411,18 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     g_spotlightFlowProbe.outputPath = CommandLineValue(L"--spotlight-flow-probe-file");
     g_spotlightFlowProbe.readyPath = CommandLineValue(L"--spotlight-flow-ready-file");
     g_spotlightFlowProbe.active = !g_spotlightFlowProbe.outputPath.empty();
+    g_launchpadFlowProbe.outputPath = CommandLineValue(L"--launchpad-flow-probe-file");
+    g_launchpadFlowProbe.readyPath = CommandLineValue(L"--launchpad-flow-ready-file");
+    g_launchpadFlowProbe.active = !g_launchpadFlowProbe.outputPath.empty();
     const int activeBehaviorProbes = (g_catalogBrokerProbe.active ? 1 : 0)
         + (g_shellImportProbe.active ? 1 : 0)
         + (textInputProbeActive ? 1 : 0)
-        + (g_spotlightFlowProbe.active ? 1 : 0);
+        + (g_spotlightFlowProbe.active ? 1 : 0)
+        + (g_launchpadFlowProbe.active ? 1 : 0);
     if (activeBehaviorProbes > 1) return 2;
     if (g_shellImportProbe.active && (g_shellImportProbe.root.empty() || g_shellImportProbe.destination.empty())) return 2;
     if (g_spotlightFlowProbe.active && g_spotlightFlowProbe.readyPath.empty()) return 2;
+    if (g_launchpadFlowProbe.active && g_launchpadFlowProbe.readyPath.empty()) return 2;
     g_diagnosticsUiMode = CommandLineHasArgument(L"--diagnostics-ui");
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
     const HRESULT coInitializeResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -8388,7 +8521,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     const bool shellBrokerStarted = g_shellBroker.Start(g_hwnd, WmShellBrokerResult);
     AppendStartupLog(L"shell-broker", shellBrokerStarted, shellBrokerStarted ? L"dedicated STA queued" : L"thread creation failed");
 
-    if (!g_diagnosticsUiMode && !g_catalogBrokerProbe.active && !g_shellImportProbe.active && !textInputProbeActive && !g_spotlightFlowProbe.active)
+    if (!g_diagnosticsUiMode && !g_catalogBrokerProbe.active && !g_shellImportProbe.active && !textInputProbeActive && !g_spotlightFlowProbe.active && !g_launchpadFlowProbe.active)
     {
         RegisterCurrentHotkey();
         AppendStartupLog(L"hotkey-registered", g_hotkeyRegistered, g_settings.hotkey);
@@ -8438,7 +8571,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
             RequestCatalogRefresh();
         }
     }
-    else if (g_catalogBrokerProbe.active || g_shellImportProbe.active || g_spotlightFlowProbe.active)
+    else if (g_catalogBrokerProbe.active || g_shellImportProbe.active || g_spotlightFlowProbe.active || g_launchpadFlowProbe.active)
     {
         DestroyWindow(g_hwnd);
         CloseHandle(mutex);
