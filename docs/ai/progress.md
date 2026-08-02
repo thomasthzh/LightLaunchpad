@@ -2,15 +2,61 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 07:24:00 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 08:14:26 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `b092424`
+- HEAD: `d7f398f`
 - Remote main: `origin/main@33e91c2`
-- Active task: `LLP-008 - Complete Search Text And IME Controller` (`in_progress`)
-- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`
-- Next task after verification: `LLP-009 - Spotlight State Machine And Keyboard Flow`
-- Goal status: active in Codex; LLP-008 is the only task in progress.
+- Active task: `LLP-009 - Spotlight State Machine And Keyboard Flow` (`in_progress`)
+- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`
+- Next task after verification: `LLP-010 - Launchpad Browse/Edit Separation`
+- Goal status: active in Codex; LLP-009 is the only task in progress.
+
+## LLP-008 Execution Evidence
+
+Status at 2026-08-02 08:14 +08:00: complete.
+
+Changed files in scope:
+
+- `src/LightLaunchpad.NativeUi/TextInput.{h,cpp}` - production UTF-16 text buffer with normalized caret/anchor selection, surrogate-safe character and word movement/deletion, clipboard primitives, bounded undo/redo, and inline IME composition/result/duplicate-suppression state.
+- `src/LightLaunchpad.NativeUi/SearchAccessibility.{h,cpp}` - native server-side UI Automation provider exposing the search edit role/name/ID, Value and Text patterns, focus state, document text, selection, and selectable text ranges.
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - integrates caret-aware rendering and horizontal scrolling, selection and composition visuals, mouse positioning/drag selection, standard keyboard edits, Win32 clipboard commands, IMM composition/candidate placement, composition-time navigation suspension, UIA events, and an isolated real-EXE probe. Only committed text enters formal search filtering; composition text is rendered inline without changing the query.
+- `tools/build-native-ui.ps1` and clean-source fixtures in `tests/LightLaunchpad.NativeUi.Tests/{AppHost,ExecutableIdentity}.Tests.ps1` - compile the input/accessibility modules and link documented IMM, OLE Automation, and UI Automation libraries in normal and isolated builds.
+- `tests/LightLaunchpad.NativeUi.Tests/TextInput.Tests.{cpp,ps1}` - direct production C++ behavior, Unicode-boundary, IME duplicate, undo/redo, and latency coverage.
+- `tests/LightLaunchpad.NativeUi.Tests/TextInputBehavior.Tests.ps1` - isolated real-EXE UIA, Win32 message, input-queue modifier, clipboard-preservation, mouse selection, English/Chinese insertion, candidate-position, visible-render, and repeatable screenshot probe.
+- `tests/LightLaunchpad.App.Tests/{HostedAppModeSourceTests.cs,Program.cs}` - removes retired Tab-completion assertions and retains historical module-boundary regression checks only; it is not used as input/IME behavior authority.
+- `docs/ai/{tasks,progress}.md` - records verified completion and activates LLP-009.
+
+TDD and systematic-debugging evidence:
+
+- RED: the initial production target could not compile because `TextInput.h/.cpp` did not exist. GREEN exercises middle insertion, reverse selection replacement, UTF-16 surrogate boundaries, word/character navigation and deletion, clipboard primitives, select-all, undo/redo, composition replacement, cancellation, and modern-result/legacy-character duplicate suppression.
+- The first real-EXE UIA probe exposed PowerShell's actual `System.Windows.Automation.Text.*` enum namespace. A later global `SendInput` attempt was correctly rejected by Windows foreground-input policy; the test now attaches only to the isolated probe input queue, sets and restores its keyboard state, and drives the production `GetKeyState` shortcut branches without sending keys to another window.
+- RED: visibility was sampled from `WM_DESTROY`, where a correctly rendered window is necessarily no longer visible. GREEN records visibility immediately after the real window is shown and reports it at shutdown.
+- Review caught that `SearchDisplayText()` made uncommitted IME composition affect formal filtering. GREEN follows PRD section 6.2: committed text alone drives `SearchIndex`, while composition text remains visibly inserted at the caret and updates immediately.
+- Clipboard behavior tests snapshot and restore the user's full Windows Forms data object in `finally`; all process/configuration data uses isolated temporary roots, and the behavior probe skips tray, global hotkey, and startup writes.
+
+Fresh post-commit verification against `d7f398f9da37`:
+
+- `tests\LightLaunchpad.NativeUi.Tests\TextInput.Tests.ps1` - 7/7 passed; 2,000 production edit+undo samples measured 400 ns P95.
+- `tests\LightLaunchpad.NativeUi.Tests\TextInputBehavior.Tests.ps1` - real EXE passed UIA Value/Text discovery and operation, UIA selection replacement, mouse caret positioning and drag selection, Home/Delete, Ctrl+C/X/V/A/Z/Y, English and Chinese insertion at start/middle/end, visible render state, and IMM candidate placement; final value `中a文b末`, caret 5, candidate point `(153,76)`.
+- `tests\LightLaunchpad.NativeUi.Tests\SearchIndex.Tests.ps1` - 7/7 passed; 300-item rebuild 394 microseconds and cached pinyin-query P95 88 microseconds.
+- `tests\LightLaunchpad.NativeUi.Tests\CatalogShellBroker.Tests.ps1` - 3/3 passed; `inputResponseMs=0` during a 1,875 ms refresh, UI thread `20608`, STA broker thread `5884`, generation 2, import counts 1 then 0, skipped reparse points 1, and future search history unchanged.
+- `tests\LightLaunchpad.NativeUi.Tests\Persistence.Tests.ps1` - 7/7 passed.
+- `tests\LightLaunchpad.NativeUi.Tests\SettingsTransactions.Tests.ps1` - 3/3 passed.
+- `tests\LightLaunchpad.NativeUi.Tests\AppHost.Tests.ps1` - 4/4 passed; `shellReadyMs=31`, `probeExitMs=367`, `settingsWindowMs=199`, `logBytes=1279`.
+- `tests\LightLaunchpad.NativeUi.Tests\ExecutableIdentity.Tests.ps1` - 5/5 passed.
+- `dotnet run --project tests\LightLaunchpad.Core.Tests\LightLaunchpad.Core.Tests.csproj` - 33/33 passed.
+- `dotnet run --project tests\LightLaunchpad.App.Tests\LightLaunchpad.App.Tests.csproj` - 74/74 passed; historical regression baseline only.
+- Post-commit build/diagnostics - `artifacts\native-ui-llp008-postcommit\LightLaunchpad.NativeUi.exe`, build 23,198 ms, 1,624,064 bytes, SHA256 `E7D92E1F4BEBA532CBD6432F31D2D65E0CBDCB3C48DC5CF0C21D22B3359A09F1`, diagnostics exit 0 in 291 ms, version `1.11.0-dev+d7f398f9da371153892e5e6fadfb20042c2dfaa4.dirty`, executable path and commit identities matched.
+
+Visual, safety, and evidence limits:
+
+- `product-design:audit` inspection of `artifacts\native-ui-llp008-postcommit\visual-evidence\{llp008-caret-ime,llp008-selection}.png` confirmed vertically centered unclipped Chinese/Latin text, a distinct insertion caret, a visible blue selection state, stable search-bar bounds, and no duplicate glyph rendering in the matched real-EXE state. The behavior probe and candidate-coordinate assertion, not the screenshots alone, establish input correctness.
+- This task does not claim the 12-background adaptive-material, three-DPI, high-contrast, or full animation release gates; those remain assigned to LLP-012 through LLP-016. It does establish the production input/IME/accessibility foundation those gates consume.
+- Protected PID 22560 still runs `artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe` with unchanged SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run remains its exact quoted path, the stable install remains absent, and the `C:\TOOL` EXE remains SHA256 `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`.
+- `LLP_reconstruction/` remains untracked/unstaged and ignored `LightLaunchpad.NativeUi.o` was not adopted. No stable-install, startup, `C:\TOOL`, push, tag, or release mutation occurred.
+- Scoped implementation commit: `d7f398f` (`feat(native-ui): complete search text and IME controller`).
+- Task transition: LLP-008 marked `done`; LLP-009 marked as the sole `in_progress` task.
 
 ## LLP-007 Execution Evidence
 

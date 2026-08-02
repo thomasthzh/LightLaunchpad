@@ -131,7 +131,7 @@
 
 ### LLP-008 - Complete Search Text And IME Controller
 
-- Status: `in_progress`
+- Status: `done`
 - Depends on: LLP-007
 - Purpose: make search behave like a real text field while retaining custom visual rendering.
 - Likely files: new `InputController`, `TextBuffer`, IME bridge, clipboard commands, UI Automation provider, Native window message handling.
@@ -144,11 +144,11 @@
   - English and Chinese IME input works at start, middle, and end of text with no duplicate commits.
   - Clipboard, selection, caret navigation, and undoable text edits behave consistently.
   - A UI Automation inspector can discover and operate the search field.
-- Completion notes: Started immediately after LLP-007 post-commit verification. First RED target: compile a production C++ text-buffer/controller test target that exposes the current append/backspace-only input model before integrating caret, selection, clipboard, IME ownership, and UI Automation.
+- Completion notes: Completed in implementation commit `d7f398f`. NativeUi now uses a production C++ UTF-16 `TextBuffer` with caret/anchor selection, surrogate-safe character and word movement/deletion, mouse positioning and drag selection, clipboard shortcuts, bounded undo/redo, inline IME composition/replacement, modern-result/legacy-character duplicate suppression, candidate placement at the drawn caret, and launcher-navigation suspension during composition. A native UI Automation provider exposes an editable search role/name/ID, Value and Text patterns, focus, document text, selection, and range selection. A real isolated EXE probe verified UIA discovery/operation, mouse selection, Ctrl+C/X/V/A/Z/Y, English and Chinese insertion at start/middle/end, visible rendering, and candidate position `(153,76)`; production C++ tests passed 7/7 with 2,000 edit+undo samples at 400 ns P95. Full post-commit gates passed. Verified EXE: 1,624,064 bytes, SHA256 `E7D92E1F4BEBA532CBD6432F31D2D65E0CBDCB3C48DC5CF0C21D22B3359A09F1`.
 
 ### LLP-009 - Spotlight State Machine And Keyboard Flow
 
-- Status: `pending`
+- Status: `in_progress`
 - Depends on: LLP-008
 - Purpose: make the lazy-user launch path deterministic and fast.
 - Likely files: `InputController`, `InteractionState`, Spotlight controller, search result scene builder.
@@ -161,7 +161,7 @@
 - Verify:
   - Automate both canonical keyboard paths from Alt+D through successful Shell launch.
   - Result refresh preserves focus by stable ID and never launches an unintended item.
-- Completion notes: Not started.
+- Completion notes: Started immediately after LLP-008 post-commit verification. First RED target: a production C++ interaction-state test and real-EXE keyboard-flow probe showing that the current single `g_selectedFilteredIndex` model preselects a result and does not distinguish search focus from result focus.
 
 ### LLP-010 - Launchpad Browse/Edit Separation
 
