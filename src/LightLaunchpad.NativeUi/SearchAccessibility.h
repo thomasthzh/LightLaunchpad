@@ -3,6 +3,7 @@
 #include "TextInput.h"
 
 #include <windows.h>
+#include <string>
 
 namespace llp::accessibility
 {
@@ -31,6 +32,7 @@ public:
     void NotifyTextChanged() const;
     void NotifySelectionChanged() const;
     void NotifyFocusChanged() const;
+    void NotifyStatus(const std::wstring& text, bool warning) const;
 
 private:
     HWND hwnd_ = nullptr;

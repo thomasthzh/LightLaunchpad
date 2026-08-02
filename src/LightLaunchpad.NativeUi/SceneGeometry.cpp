@@ -17,6 +17,177 @@ bool Contains(const Rect& rect, int x, int y)
 }
 }
 
+int ScaleDip(int dip, int dpi)
+{
+    const int safeDpi = std::clamp(dpi, 48, 768);
+    const long long scaled = static_cast<long long>(dip) * safeDpi;
+    return static_cast<int>((scaled + (scaled >= 0 ? 48 : -48)) / 96);
+}
+
+int ScaleTextDip(int dip, int dpi, int textScalePercent)
+{
+    const int safeTextScale = std::clamp(textScalePercent, 100, 225);
+    const long long scaled = static_cast<long long>(dip) * std::clamp(dpi, 48, 768) * safeTextScale;
+    return static_cast<int>((scaled + 4800) / 9600);
+}
+
+SceneMetrics BuildSceneMetrics(const MetricsRequest& request)
+{
+    SceneMetrics metrics;
+    metrics.dpi = std::clamp(request.dpi, 48, 768);
+    metrics.textScalePercent = std::clamp(request.textScalePercent, 100, 225);
+    const int clientWidth = std::max(1, request.clientWidthPx);
+    const int clientHeight = std::max(1, request.clientHeightPx);
+    const auto dip = [&](int value) { return ScaleDip(value, metrics.dpi); };
+    const auto textDip = [&](int value) { return ScaleTextDip(value, metrics.dpi, metrics.textScalePercent); };
+
+    const int baseTileDip = std::max(1, request.tileSizeDip);
+    const int inferredIconDip = std::max(1, baseTileDip - 72);
+    const int twoLineLabelDip = (38 * metrics.textScalePercent + 99) / 100;
+    const int accessibleTileDip = inferredIconDip + 24 + twoLineLabelDip + 8;
+    metrics.tileSizePx = std::max(1, dip(std::max(baseTileDip, accessibleTileDip)));
+    metrics.gapPx = std::max(0, dip(std::max(0, request.gapDip)));
+    metrics.contentLeftPx = dip(request.spotlight ? 68 : 44);
+    metrics.regionHeaderHeightPx = std::max(dip(38), textDip(30));
+    metrics.cornerRadiusPx = dip(34);
+    metrics.searchFontPx = textDip(26);
+    metrics.tileFontPx = textDip(15);
+    metrics.headerFontPx = textDip(18);
+    metrics.iconFontPx = textDip(17);
+
+    const int searchTop = dip(34);
+    const int searchHeight = std::max(dip(50), textDip(32) + dip(18));
+    const int searchSideInset = dip(request.spotlight ? 68 : 48);
+    const int searchRightInset = dip(request.spotlight ? 68 : 148);
+    metrics.search = {
+        searchSideInset,
+        searchTop,
+        std::max(searchSideInset, clientWidth - searchRightInset),
+        std::min(clientHeight, searchTop + searchHeight)
+    };
+    const int searchTextInset = dip(22);
+    metrics.searchText = {
+        std::min(metrics.search.right, metrics.search.left + searchTextInset),
+        metrics.search.top,
+        std::max(metrics.search.left, metrics.search.right - searchTextInset),
+        metrics.search.bottom
+    };
+
+    const int contentTop = std::min(clientHeight, metrics.search.bottom + dip(16));
+    const int contentSideInset = request.spotlight ? dip(68) : 0;
+    const int contentBottomInset = request.spotlight ? dip(72) : 0;
+    metrics.contentClip = {
+        contentSideInset,
+        contentTop,
+        std::max(contentSideInset, clientWidth - contentSideInset),
+        std::max(contentTop, clientHeight - contentBottomInset)
+    };
+    metrics.initialContentTopPx = contentTop + dip(14);
+
+    const int auxiliaryWidth = std::max(dip(48), textDip(32));
+    const int auxiliaryHeight = std::max(dip(40), textDip(32));
+    metrics.auxiliary = {
+        std::max(0, clientWidth - dip(28) - auxiliaryWidth),
+        std::max(0, clientHeight - dip(20) - auxiliaryHeight),
+        std::max(0, clientWidth - dip(28)),
+        std::max(0, clientHeight - dip(20))
+    };
+
+    const int editWidth = std::max(dip(84), textDip(68));
+    metrics.editControl = {
+        std::max(0, clientWidth - dip(48) - editWidth),
+        searchTop,
+        std::max(0, clientWidth - dip(48)),
+        std::min(clientHeight, searchTop + std::max(searchHeight, dip(44)))
+    };
+
+    const int feedbackWidth = std::min(dip(560), std::max(dip(280), clientWidth - dip(80)));
+    const int feedbackHeight = std::max(dip(54), textDip(34) + dip(20));
+    const int feedbackLeft = std::max(0, (clientWidth - feedbackWidth) / 2);
+    const int feedbackBottom = std::max(feedbackHeight, clientHeight - dip(24));
+    metrics.feedback = {
+        feedbackLeft,
+        std::max(0, feedbackBottom - feedbackHeight),
+        std::min(clientWidth, feedbackLeft + feedbackWidth),
+        std::min(clientHeight, feedbackBottom)
+    };
+    const int undoWidth = std::min(feedbackWidth, std::max(dip(92), textDip(72)));
+    metrics.undo = metrics.feedback;
+    metrics.undo.left = metrics.undo.right - undoWidth;
+    return metrics;
+}
+
+SettingsMetrics BuildSettingsMetrics(const SettingsMetricsRequest& request)
+{
+    SettingsMetrics metrics;
+    const int dpi = std::clamp(request.dpi, 48, 768);
+    const int textScale = std::clamp(request.textScalePercent, 100, 225);
+    const auto dip = [&](int value) { return ScaleDip(value, dpi); };
+    const int clientWidth = std::max(1, request.clientWidthPx);
+    const int labelWidthDip = std::max(150, (132 * textScale + 99) / 100);
+    const int controlHeightDip = std::max(26, (16 * textScale + 99) / 100 + 8);
+    const int checkboxHeightDip = std::max(24, (16 * textScale + 99) / 100 + 8);
+    const int buttonHeightDip = std::max(30, (16 * textScale + 99) / 100 + 10);
+
+    metrics.sideInsetPx = dip(24);
+    metrics.labelWidthPx = dip(labelWidthDip);
+    metrics.inputLeftPx = metrics.sideInsetPx + metrics.labelWidthPx + dip(10);
+    const int inputRight = std::max(metrics.inputLeftPx, clientWidth - metrics.sideInsetPx);
+    metrics.inputWidthPx = inputRight - metrics.inputLeftPx;
+    metrics.fullWidthControlPx = std::max(0, clientWidth - metrics.sideInsetPx * 2);
+    metrics.rowHeightPx = dip(std::max(38, (26 * textScale + 99) / 100 + 12));
+    metrics.controlHeightPx = dip(controlHeightDip);
+    metrics.checkboxHeightPx = dip(checkboxHeightDip);
+    metrics.buttonHeightPx = dip(buttonHeightDip);
+    return metrics;
+}
+
+TextInputMetrics BuildTextInputMetrics(const TextInputMetricsRequest& request)
+{
+    TextInputMetrics metrics;
+    const int dpi = std::clamp(request.dpi, 48, 768);
+    const int textScale = std::clamp(request.textScalePercent, 100, 225);
+    const auto dip = [&](int value) { return ScaleDip(value, dpi); };
+    const auto textDip = [&](int value) { return ScaleTextDip(value, dpi, textScale); };
+
+    metrics.clientWidthPx = dip(376);
+    metrics.sideInsetPx = dip(18);
+    metrics.fontHeightPx = std::max(1, textDip(16));
+    const int contentRight = metrics.clientWidthPx - metrics.sideInsetPx;
+    const int labelHeight = std::max(dip(24), textDip(22));
+    const int editHeight = std::max(dip(26), textDip(16) + dip(12));
+    const int buttonHeight = std::max(dip(30), textDip(16) + dip(16));
+    const int buttonWidth = std::max(dip(88), textDip(68) + dip(20));
+    const int buttonGap = dip(16);
+
+    metrics.label = {
+        metrics.sideInsetPx,
+        metrics.sideInsetPx,
+        contentRight,
+        metrics.sideInsetPx + labelHeight
+    };
+    metrics.edit = {
+        metrics.sideInsetPx,
+        metrics.label.bottom + dip(6),
+        contentRight,
+        metrics.label.bottom + dip(6) + editHeight
+    };
+    metrics.cancel = {
+        contentRight - buttonWidth,
+        metrics.edit.bottom + dip(16),
+        contentRight,
+        metrics.edit.bottom + dip(16) + buttonHeight
+    };
+    metrics.ok = {
+        metrics.cancel.left - buttonGap - buttonWidth,
+        metrics.cancel.top,
+        metrics.cancel.left - buttonGap,
+        metrics.cancel.bottom
+    };
+    metrics.clientHeightPx = metrics.cancel.bottom + metrics.sideInsetPx;
+    return metrics;
+}
+
 const ItemSlot* Scene::FindItem(int filteredIndex) const
 {
     const auto found = std::find_if(items.begin(), items.end(), [&](const ItemSlot& slot) {

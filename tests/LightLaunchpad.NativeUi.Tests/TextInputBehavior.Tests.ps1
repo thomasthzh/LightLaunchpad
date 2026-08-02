@@ -13,6 +13,7 @@ $llpUserProfile = Join-Path $llpTempRoot 'profile'
 $llpDataDirectory = Join-Path $llpAppData 'LightLaunchpad'
 $llpLaunchpad = Join-Path $llpTempRoot 'Launchpad'
 $llpProbePath = Join-Path $llpTempRoot 'text-input-probe.json'
+$llpGeometryPath = Join-Path $llpTempRoot 'text-input-geometry.json'
 $llpProcess = $null
 $llpOriginalClipboard = $null
 $llpClipboardCaptured = $false
@@ -161,7 +162,10 @@ public static class LightLaunchpadTextProbeNative {
         $env:APPDATA = $llpAppData
         $env:LOCALAPPDATA = $llpLocalAppData
         $env:USERPROFILE = $llpUserProfile
-        $llpProcess = Start-Process -FilePath $llpExecutable -ArgumentList @('--text-input-probe-file', $llpProbePath) -PassThru
+        $llpProcess = Start-Process -FilePath $llpExecutable -ArgumentList @(
+            '--text-input-probe-file', $llpProbePath,
+            '--text-input-ready-file', $llpGeometryPath
+        ) -PassThru
     }
     finally {
         $env:APPDATA = $llpPriorAppData
@@ -177,6 +181,12 @@ public static class LightLaunchpadTextProbeNative {
         $llpWindow = $llpProcess.MainWindowHandle
     }
     Assert-True ($llpWindow -ne [IntPtr]::Zero) 'The text-input probe did not expose a real NativeUi window.'
+    $llpGeometryDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not (Test-Path -LiteralPath $llpGeometryPath) -and [DateTime]::UtcNow -lt $llpGeometryDeadline) {
+        Start-Sleep -Milliseconds 25
+    }
+    Assert-True (Test-Path -LiteralPath $llpGeometryPath) 'NativeUi did not publish its shared scene geometry.'
+    $llpGeometry = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpGeometryPath | ConvertFrom-Json
 
     $llpElement = [System.Windows.Automation.AutomationElement]::FromHandle($llpWindow)
     Assert-True ($null -ne $llpElement) 'UI Automation could not discover the NativeUi search element.'
@@ -209,10 +219,11 @@ public static class LightLaunchpadTextProbeNative {
     Assert-Equal ' beta' $llpValue.Current.Value 'Home/Delete did not edit at the caret.'
 
     $llpValue.SetValue('mouse')
-    $llpClient = [LightLaunchpadTextProbeNative+RECT]::new()
-    Assert-True ([LightLaunchpadTextProbeNative]::GetClientRect($llpWindow, [ref]$llpClient)) 'Could not read the NativeUi probe client geometry.'
-    $llpStartPoint = [IntPtr](71 -bor (50 -shl 16))
-    $llpEndPoint = [IntPtr](($llpClient.Right - 71) -bor (50 -shl 16))
+    $llpTextLeft = [int]$llpGeometry.scene.searchText.left
+    $llpTextRight = [int]$llpGeometry.scene.searchText.right
+    $llpSearchMiddleY = ([int]$llpGeometry.scene.searchText.top + [int]$llpGeometry.scene.searchText.bottom) / 2
+    $llpStartPoint = [IntPtr](($llpTextLeft + 1) -bor ([int]$llpSearchMiddleY -shl 16))
+    $llpEndPoint = [IntPtr](($llpTextRight - 1) -bor ([int]$llpSearchMiddleY -shl 16))
     [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0201, [UIntPtr]::Zero, $llpStartPoint)
     [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0202, [UIntPtr]::Zero, $llpStartPoint)
     [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr][char]'S', [IntPtr]::Zero)

@@ -125,6 +125,7 @@ try {
 
     & $gpp `
         src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp `
+        src\LightLaunchpad.NativeUi\AdaptiveEnvironment.cpp `
         src\LightLaunchpad.NativeUi\Catalog.cpp `
         src\LightLaunchpad.NativeUi\InteractionState.cpp `
         src\LightLaunchpad.NativeUi\OrganizationState.cpp `

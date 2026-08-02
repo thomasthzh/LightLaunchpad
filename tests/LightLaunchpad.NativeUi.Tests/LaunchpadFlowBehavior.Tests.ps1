@@ -204,14 +204,26 @@ public static class LightLaunchpadLaunchpadProbeNative {
 
     [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]0x4C55, [IntPtr]::Zero)
     Assert-True ([LightLaunchpadLaunchpadProbeNative]::IsWindowVisible($llpWindow)) 'First Alt+D path did not show Launchpad.'
-    $llpClient = [LightLaunchpadLaunchpadProbeNative+RECT]::new()
-    Assert-True ([LightLaunchpadLaunchpadProbeNative]::GetClientRect($llpWindow, [ref]$llpClient)) 'Could not read Launchpad client geometry.'
-    $llpFirstX = 108
-    $llpSecondX = 252
-    $llpThirdX = 396
-    $llpTileY = 216
-    $llpEditX = $llpClient.Right - 90
-    $llpEditY = 59
+    Wait-LlpCondition {
+        try {
+            $script:llpReady = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpReadyPath | ConvertFrom-Json
+            return @($script:llpReady.hitBounds).Count -eq 3
+        }
+        catch { return $false }
+    } 5000 'Launchpad did not publish the shared rendered hit geometry.'
+    $llpReady = $script:llpReady
+    $llpFirstX = ([int]$llpReady.hitBounds[0].left + [int]$llpReady.hitBounds[0].right) / 2
+    $llpSecondX = ([int]$llpReady.hitBounds[1].left + [int]$llpReady.hitBounds[1].right) / 2
+    $llpThirdX = ([int]$llpReady.hitBounds[2].left + [int]$llpReady.hitBounds[2].right) / 2
+    $llpTileY = ([int]$llpReady.hitBounds[0].top + [int]$llpReady.hitBounds[0].bottom) / 2
+    $llpEditX = ([int]$llpReady.editBounds.left + [int]$llpReady.editBounds.right) / 2
+    $llpEditY = ([int]$llpReady.editBounds.top + [int]$llpReady.editBounds.bottom) / 2
+    $llpUndoX = ([int]$llpReady.undoBounds.left + [int]$llpReady.undoBounds.right) / 2
+    $llpUndoY = ([int]$llpReady.undoBounds.top + [int]$llpReady.undoBounds.bottom) / 2
+    $llpRegionX = ([int]$llpReady.regionBounds[0].left + [int]$llpReady.regionBounds[0].right) / 2
+    $llpRegionY = ([int]$llpReady.regionBounds[0].top + [int]$llpReady.regionBounds[0].bottom) / 2
+    $llpMarqueeX = [Math]::Max([int]$llpReady.contentClip.left + 1, [int]$llpReady.hitBounds[0].left - 20)
+    $llpMarqueeY = [int]$llpReady.hitBounds[0].top + 4
     Start-Sleep -Milliseconds 250
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
         $llpEvidenceRoot = [System.IO.Path]::GetFullPath($EvidenceDirectory)
@@ -269,8 +281,6 @@ public static class LightLaunchpadLaunchpadProbeNative {
     Start-Sleep -Milliseconds 250
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) { Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '09-edit-recycle-undo.png') }
 
-    $llpUndoX = $llpClient.Right / 2 + 234
-    $llpUndoY = $llpClient.Bottom - 51
     Send-LlpClick $llpWindow $llpUndoX $llpUndoY
     Wait-LlpCondition { (Test-Path -LiteralPath $llpFirstPath) -and (Test-Path -LiteralPath $llpSecondPath) } 8000 'Undo did not restore both recycled files.'
     Wait-LlpCondition {
@@ -287,17 +297,17 @@ public static class LightLaunchpadLaunchpadProbeNative {
     Start-Sleep -Milliseconds 150
     Assert-Equal 1 (@(Get-LlpMarkerNames).Count) 'Enter in Edit mode launched an item.'
 
-    Send-LlpMouse $llpWindow 0x0201 30 150 1
-    Send-LlpMouse $llpWindow 0x0200 320 300 1
-    Send-LlpMouse $llpWindow 0x0202 320 300 0
+    Send-LlpMouse $llpWindow 0x0201 $llpMarqueeX $llpMarqueeY 1
+    Send-LlpMouse $llpWindow 0x0200 $llpThirdX $llpTileY 1
+    Send-LlpMouse $llpWindow 0x0202 $llpThirdX $llpTileY 0
     Send-LlpMouse $llpWindow 0x0201 $llpFirstX $llpTileY 1
     Send-LlpMouse $llpWindow 0x0200 $llpThirdX $llpTileY 1
     Start-Sleep -Milliseconds 250
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) { Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '07-edit-drag-drop-target.png') }
     Send-LlpMouse $llpWindow 0x0202 $llpThirdX $llpTileY 0
-    Send-LlpMouse $llpWindow 0x0201 100 132 1
-    Send-LlpMouse $llpWindow 0x0200 260 180 1
-    Send-LlpMouse $llpWindow 0x0202 260 180 0
+    Send-LlpMouse $llpWindow 0x0201 $llpRegionX $llpRegionY 1
+    Send-LlpMouse $llpWindow 0x0200 $llpRegionX ($llpRegionY + 48) 1
+    Send-LlpMouse $llpWindow 0x0202 $llpRegionX ($llpRegionY + 48) 0
     Assert-Equal 1 (@(Get-LlpMarkerNames).Count) 'Edit organization gestures launched an item.'
 
     Send-LlpClick $llpWindow $llpEditX $llpEditY

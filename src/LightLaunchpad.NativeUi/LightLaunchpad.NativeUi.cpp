@@ -15,6 +15,7 @@
 
 #include "LightLaunchpad.BuildIdentity.generated.h"
 #include "LightLaunchpad.Version.h"
+#include "AdaptiveEnvironment.h"
 #include "Catalog.h"
 #include "InteractionState.h"
 #include "OrganizationState.h"
@@ -100,6 +101,7 @@ constexpr int WorkspaceToggleEditCommand = 2206;
 constexpr UINT WmTray = WM_APP + 72;
 constexpr UINT WmActivateInstance = WM_APP + 73;
 constexpr UINT WmShellBrokerResult = WM_APP + 74;
+constexpr UINT WmAdaptiveSnapshot = WM_APP + 75;
 constexpr wchar_t WindowClassName[] = LLP_WINDOW_CLASS_NAME_WIDE;
 constexpr wchar_t SettingsWindowClassName[] = L"LightLaunchpadNativeSettingsWindow";
 constexpr wchar_t TextInputWindowClassName[] = L"LightLaunchpadNativeTextInputWindow";
@@ -179,6 +181,7 @@ enum class SettingsControlId : int
     AppSpacingLabel = 3026,
     WheelSensitivityLabel = 3027,
     DiagnosticsLabel = 3028
+    ,SpotlightSeparator = 3029
 };
 
 int ControlId(SettingsControlId id)
@@ -337,6 +340,13 @@ llp::interaction::SpotlightState g_spotlightState;
 llp::interaction::LaunchpadState g_launchpadState;
 llp::organization::State g_organizationState;
 OrganizationFeedback g_organizationFeedback;
+llp::adaptive::Environment g_adaptiveEnvironment;
+llp::adaptive::Policy g_adaptivePolicy;
+UINT g_windowDpi = 96;
+UINT g_settingsDpi = 96;
+UINT g_testDpiOverride = 0;
+bool g_adaptiveTestOverridesActive = false;
+llp::adaptive::MonitorSource g_lastMonitorSource = llp::adaptive::MonitorSource::Primary;
 bool g_searchInputActive = false;
 bool g_searchPointerSelecting = false;
 int g_searchTextOffset = 0;
@@ -368,6 +378,8 @@ std::vector<std::wstring> g_contextItemPaths;
 std::wstring g_contextRegionId;
 std::vector<std::wstring> g_contextRegionIds;
 int g_modalDialogDepth = 0;
+int g_settingsScrollOffset = 0;
+int g_settingsContentHeight = 0;
 uint64_t g_iconUseCounter = 0;
 std::vector<int> g_filterScores;
 ID2D1Factory* g_d2dFactory = nullptr;
@@ -390,6 +402,7 @@ bool g_hotkeyRegistered = false;
 int g_activeHotkeyId = HotkeyId;
 bool g_diagnosticsUiMode = false;
 std::wstring g_textInputProbePath;
+std::wstring g_textInputProbeReadyPath;
 bool g_searchAccessibilityReady = false;
 bool g_imeCandidatePositionApplied = false;
 bool g_textInputProbeWindowWasVisible = false;
@@ -575,6 +588,8 @@ void ResetDragState();
 void UpdateImeWindowPosition(HWND hwnd);
 void RequestOrganizationUndo();
 bool ProbeFileExists(const std::wstring& path);
+void RefreshAdaptiveEnvironment();
+void ResetScaleSensitiveResources();
 
 template <typename T>
 void SafeRelease(T*& value)
@@ -638,53 +653,73 @@ std::wstring FormatDouble(double value)
     return text;
 }
 
+int ScaleDip(int value)
+{
+    return llp::geometry::ScaleDip(value, static_cast<int>(g_windowDpi));
+}
+
+int ScaleTextDip(int value)
+{
+    return llp::geometry::ScaleTextDip(value, static_cast<int>(g_windowDpi), g_adaptivePolicy.textScalePercent);
+}
+
 int SearchTop()
 {
-    return 34;
+    return ScaleDip(34);
 }
 
 int SearchBottom()
 {
-    return 84;
+    return SearchTop() + std::max(ScaleDip(50), ScaleTextDip(32) + ScaleDip(18));
 }
 
 int ContentClipTop()
 {
-    return SearchBottom() + 16;
+    return SearchBottom() + ScaleDip(16);
+}
+
+llp::geometry::SceneMetrics CurrentSceneMetrics(const RECT& client)
+{
+    llp::geometry::MetricsRequest request;
+    request.clientWidthPx = static_cast<int>(client.right - client.left);
+    request.clientHeightPx = static_cast<int>(client.bottom - client.top);
+    request.dpi = static_cast<int>(g_windowDpi);
+    request.textScalePercent = g_adaptivePolicy.textScalePercent;
+    request.spotlight = IsSpotlightMode();
+    request.tileSizeDip = std::max(112, g_settings.iconSize + 72);
+    request.gapDip = std::clamp(g_settings.appSpacing * 2, 0, 56);
+    return llp::geometry::BuildSceneMetrics(request);
+}
+
+RECT WinMetricsRect(const llp::geometry::Rect& rect)
+{
+    return { rect.left, rect.top, rect.right, rect.bottom };
 }
 
 RECT ContentClipRect(const RECT& client)
 {
-    const int sideInset = IsSpotlightMode() ? SpotlightContentInset : 0;
-    const int bottomInset = IsSpotlightMode() ? SpotlightContentBottomInset : 0;
-    return {
-        static_cast<LONG>(sideInset),
-        static_cast<LONG>(ContentClipTop()),
-        std::max<LONG>(static_cast<LONG>(sideInset), client.right - static_cast<LONG>(sideInset)),
-        std::max<LONG>(static_cast<LONG>(ContentClipTop()), client.bottom - static_cast<LONG>(bottomInset))
-    };
+    return WinMetricsRect(CurrentSceneMetrics(client).contentClip);
 }
 
 RECT SearchRect(const RECT& client)
 {
-    const int sideInset = IsSpotlightMode() ? SpotlightSearchSideInset : 48;
-    const int right = IsSpotlightMode() ? client.right - sideInset : client.right - 148;
-    return { sideInset, SearchTop(), std::max<LONG>(sideInset, right), SearchBottom() };
+    return WinMetricsRect(CurrentSceneMetrics(client).search);
 }
 
 RECT SearchTextRect(const RECT& searchRect)
 {
-    return { searchRect.left + 22, searchRect.top, searchRect.right - 22, searchRect.bottom };
+    const int inset = ScaleDip(22);
+    return { searchRect.left + inset, searchRect.top, searchRect.right - inset, searchRect.bottom };
 }
 
 RECT SpotlightAuxiliaryRect(const RECT& client)
 {
-    return { client.right - 76, client.bottom - 60, client.right - 28, client.bottom - 20 };
+    return WinMetricsRect(CurrentSceneMetrics(client).auxiliary);
 }
 
 RECT LaunchpadEditRect(const RECT& client)
 {
-    return { client.right - 132, SearchTop(), client.right - 48, SearchBottom() };
+    return WinMetricsRect(CurrentSceneMetrics(client).editControl);
 }
 
 std::wstring SearchCommittedText()
@@ -699,17 +734,22 @@ std::wstring SearchDisplayText()
 
 int TileSize()
 {
-    return std::max(112, g_settings.iconSize + 72);
+    return ScaleDip(std::max(112, g_settings.iconSize + 72));
+}
+
+int IconSizePx()
+{
+    return ScaleDip(g_settings.iconSize);
 }
 
 int TileGap()
 {
-    return std::clamp(g_settings.appSpacing * 2, 0, 56);
+    return ScaleDip(std::clamp(g_settings.appSpacing * 2, 0, 56));
 }
 
 int WheelScrollStep()
 {
-    return static_cast<int>(std::round(96.0 * g_settings.wheelSensitivity));
+    return static_cast<int>(std::round(ScaleDip(96) * g_settings.wheelSensitivity));
 }
 
 bool EndsWithIgnoreCase(const std::wstring& value, const wchar_t* suffix)
@@ -1364,16 +1404,12 @@ uint64_t CurrentUnixMilliseconds()
 
 RECT OrganizationFeedbackRect(const RECT& client)
 {
-    const int width = static_cast<int>(std::min<LONG>(560, std::max<LONG>(280, client.right - client.left - 80)));
-    const int left = client.left + (client.right - client.left - width) / 2;
-    return { left, client.bottom - 78, left + width, client.bottom - 24 };
+    return WinMetricsRect(CurrentSceneMetrics(client).feedback);
 }
 
 RECT OrganizationUndoRect(const RECT& client)
 {
-    RECT result = OrganizationFeedbackRect(client);
-    result.left = result.right - 92;
-    return result;
+    return WinMetricsRect(CurrentSceneMetrics(client).undo);
 }
 
 void SetOrganizationFeedback(const std::wstring& text, bool warning, bool hasUndo, ULONGLONG durationMilliseconds = 8000)
@@ -1384,6 +1420,7 @@ void SetOrganizationFeedback(const std::wstring& text, bool warning, bool hasUnd
     g_organizationFeedback.expiresAt = GetTickCount64() + durationMilliseconds;
     if (g_hwnd)
     {
+        g_searchAccessibility.NotifyStatus(text, warning);
         SetTimer(g_hwnd, OrganizationFeedbackTimerId, 100, nullptr);
         InvalidateRect(g_hwnd, nullptr, FALSE);
     }
@@ -1657,6 +1694,25 @@ void ReleaseAllResidentIcons()
         ReleaseItemIcon(item);
     }
     g_iconBoundsCache.clear();
+}
+
+void ResetScaleSensitiveResources()
+{
+    SafeRelease(g_searchTextFormat);
+    SafeRelease(g_tileTextFormat);
+    SafeRelease(g_headerTextFormat);
+    SafeRelease(g_iconTextFormat);
+    SafeRelease(g_spotlightBackdropD2dBitmap);
+    ReleaseSpotlightLayerBuffer();
+    ReleaseSpotlightBackdrop();
+    ReleaseAllResidentIcons();
+    if (g_uiFont)
+    {
+        DeleteObject(g_uiFont);
+        g_uiFont = nullptr;
+    }
+    g_searchTextOffset = 0;
+    g_spotlightLayerDirty = true;
 }
 
 void TrimResidentIcons(size_t targetCount = MaxResidentIconCount)
@@ -1992,13 +2048,14 @@ RECT WinRect(const llp::geometry::Rect& rect)
 
 llp::geometry::Scene BuildCurrentSceneGeometry(const RECT& client)
 {
+    const auto metrics = CurrentSceneMetrics(client);
     llp::geometry::LayoutRequest request;
     request.clientWidth = static_cast<int>(client.right - client.left);
-    request.tileSize = TileSize();
-    request.gap = TileGap();
-    request.left = IsSpotlightMode() ? SpotlightContentInset : 44;
-    request.initialContentTop = 114;
-    request.regionHeaderHeight = 38;
+    request.tileSize = metrics.tileSizePx;
+    request.gap = metrics.gapPx;
+    request.left = metrics.contentLeftPx;
+    request.initialContentTop = metrics.initialContentTopPx;
+    request.regionHeaderHeight = metrics.regionHeaderHeightPx;
     request.scrollOffset = g_scrollOffset;
     request.groupByRegion = SearchCommittedText().empty();
     request.items.reserve(g_filtered.size());
@@ -2270,7 +2327,7 @@ void QueueItemIcon(LaunchItem& item)
     }
     if (item.iconRequestPending || !g_shellBroker.IsRunning()) return;
     if (item.stableId.empty()) item.stableId = llp::catalog::StableItemId(item.sourcePath);
-    item.iconRequestPending = g_shellBroker.RequestIcon(item.stableId, item.sourcePath, g_settings.iconSize) != 0;
+    item.iconRequestPending = g_shellBroker.RequestIcon(item.stableId, item.sourcePath, IconSizePx()) != 0;
 }
 
 void RebuildSearchIndex()
@@ -2676,6 +2733,34 @@ int CommandLineIntValue(const wchar_t* name, int fallback, int minimum, int maxi
     return std::clamp(static_cast<int>(parsed), minimum, maximum);
 }
 
+void ApplyAdaptiveTestOverrides()
+{
+    if (CompareStringOrdinal(LLP_BUILD_CHANNEL_WIDE, -1, L"development", -1, TRUE) != CSTR_EQUAL) return;
+    const int dpi = CommandLineIntValue(L"--adaptive-test-dpi", 0, 0, 768);
+    const int textScale = CommandLineIntValue(L"--adaptive-test-text-scale", 0, 0, 225);
+    const int highContrast = CommandLineIntValue(L"--adaptive-test-high-contrast", -1, -1, 1);
+    const int transparency = CommandLineIntValue(L"--adaptive-test-transparency", -1, -1, 1);
+    const int animations = CommandLineIntValue(L"--adaptive-test-animations", -1, -1, 1);
+    g_adaptiveTestOverridesActive = dpi > 0 || textScale > 0 || highContrast >= 0 || transparency >= 0 || animations >= 0;
+    if (dpi > 0)
+    {
+        g_testDpiOverride = static_cast<UINT>(dpi);
+        g_windowDpi = g_testDpiOverride;
+    }
+    if (textScale > 0) g_adaptiveEnvironment.textScalePercent = textScale;
+    if (highContrast >= 0) g_adaptiveEnvironment.highContrast = highContrast != 0;
+    if (transparency >= 0) g_adaptiveEnvironment.transparencyEnabled = transparency != 0;
+    if (animations >= 0) g_adaptiveEnvironment.animationsEnabled = animations != 0;
+    if (g_adaptiveEnvironment.highContrast && highContrast >= 0)
+    {
+        g_adaptiveEnvironment.systemWindow = { 0, 0, 0 };
+        g_adaptiveEnvironment.systemWindowText = { 255, 255, 255 };
+        g_adaptiveEnvironment.systemHighlight = { 255, 255, 0 };
+        g_adaptiveEnvironment.systemHighlightText = { 0, 0, 0 };
+    }
+    g_adaptivePolicy = llp::adaptive::ResolvePolicy(g_adaptiveEnvironment);
+}
+
 std::string ReadSmallFileUtf8(const std::wstring& path)
 {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -2812,6 +2897,30 @@ std::string BuildTextInputProbeJson()
     return document.dump(2) + "\n";
 }
 
+std::string BuildTextInputReadyJson()
+{
+    RECT client = {};
+    if (g_hwnd) GetClientRect(g_hwnd, &client);
+    const auto metrics = CurrentSceneMetrics(client);
+    const auto jsonRect = [](const llp::geometry::Rect& rect) {
+        return Json{
+            { "left", rect.left },
+            { "top", rect.top },
+            { "right", rect.right },
+            { "bottom", rect.bottom }
+        };
+    };
+    const Json document = {
+        { "effectiveDpi", g_windowDpi },
+        { "textScalePercent", g_adaptivePolicy.textScalePercent },
+        { "scene", Json{
+            { "search", jsonRect(metrics.search) },
+            { "searchText", jsonRect(metrics.searchText) }
+        } }
+    };
+    return document.dump(2) + "\n";
+}
+
 std::string BuildSpotlightFlowProbeJson()
 {
     Json requestedPaths = Json::array();
@@ -2873,13 +2982,68 @@ bool WriteSpotlightFlowReadyState()
         const int itemIndex = g_filtered[g_selectedFilteredIndex];
         if (itemIndex >= 0 && itemIndex < static_cast<int>(g_items.size())) focusedResultPath = g_items[itemIndex].sourcePath;
     }
+    RECT client = {};
+    RECT window = {};
+    if (g_hwnd)
+    {
+        GetClientRect(g_hwnd, &client);
+        GetWindowRect(g_hwnd, &window);
+    }
+    const auto metrics = CurrentSceneMetrics(client);
+    const auto jsonRect = [](const llp::geometry::Rect& rect) {
+        return Json{
+            { "left", rect.left },
+            { "top", rect.top },
+            { "right", rect.right },
+            { "bottom", rect.bottom }
+        };
+    };
+    const char* monitorSource = g_lastMonitorSource == llp::adaptive::MonitorSource::Foreground
+        ? "foreground"
+        : (g_lastMonitorSource == llp::adaptive::MonitorSource::Cursor ? "cursor" : "primary");
+    Json firstHit = nullptr;
+    if (!g_hits.empty())
+    {
+        firstHit = Json{
+            { "left", g_hits.front().bounds.left },
+            { "top", g_hits.front().bounds.top },
+            { "right", g_hits.front().bounds.right },
+            { "bottom", g_hits.front().bounds.bottom },
+            { "filteredIndex", g_hits.front().itemIndex }
+        };
+    }
     const Json ready = {
         { "itemCount", g_items.size() },
         { "filteredCount", g_filtered.size() },
         { "displayMode", llp::persistence::WideToUtf8(g_settings.displayMode) },
         { "catalogGeneration", g_catalogGeneration },
         { "focus", focus },
-        { "focusedResultPath", llp::persistence::WideToUtf8(focusedResultPath) }
+        { "focusedResultPath", llp::persistence::WideToUtf8(focusedResultPath) },
+        { "effectiveDpi", g_windowDpi },
+        { "textScalePercent", g_adaptivePolicy.textScalePercent },
+        { "monitorSource", monitorSource },
+        { "highContrast", g_adaptivePolicy.highContrast },
+        { "solidSurface", g_adaptivePolicy.solidSurface },
+        { "reducedMotion", g_adaptivePolicy.reducedMotion },
+        { "testOverridesActive", g_adaptiveTestOverridesActive },
+        { "hitCount", g_hits.size() },
+        { "firstHit", firstHit },
+        { "windowRect", Json{
+            { "left", window.left },
+            { "top", window.top },
+            { "right", window.right },
+            { "bottom", window.bottom }
+        } },
+        { "scene", Json{
+            { "search", jsonRect(metrics.search) },
+            { "searchText", jsonRect(metrics.searchText) },
+            { "contentClip", jsonRect(metrics.contentClip) },
+            { "auxiliary", jsonRect(metrics.auxiliary) },
+            { "tileSizePx", metrics.tileSizePx },
+            { "gapPx", metrics.gapPx },
+            { "searchFontPx", metrics.searchFontPx },
+            { "tileFontPx", metrics.tileFontPx }
+        } }
     };
     return WriteFileUtf8(g_spotlightFlowProbe.readyPath, ready.dump(2) + "\n");
 }
@@ -2889,6 +3053,31 @@ bool WriteLaunchpadFlowReadyState()
     if (!g_launchpadFlowProbe.active || g_launchpadFlowProbe.readyPath.empty()) return false;
     Json itemPaths = Json::array();
     for (const auto& item : g_items) itemPaths.push_back(llp::persistence::WideToUtf8(item.sourcePath));
+    Json hitBounds = Json::array();
+    for (const auto& hit : g_hits)
+    {
+        hitBounds.push_back(Json{
+            { "left", hit.bounds.left },
+            { "top", hit.bounds.top },
+            { "right", hit.bounds.right },
+            { "bottom", hit.bounds.bottom },
+            { "filteredIndex", hit.itemIndex }
+        });
+    }
+    Json regionBounds = Json::array();
+    for (const auto& region : g_regionHits)
+    {
+        regionBounds.push_back(Json{
+            { "left", region.headerBounds.left },
+            { "top", region.headerBounds.top },
+            { "right", region.headerBounds.right },
+            { "bottom", region.headerBounds.bottom }
+        });
+    }
+    RECT client = {};
+    if (g_hwnd) GetClientRect(g_hwnd, &client);
+    const RECT edit = LaunchpadEditRect(client);
+    const auto metrics = CurrentSceneMetrics(client);
     const Json ready = {
         { "itemCount", g_items.size() },
         { "filteredCount", g_filtered.size() },
@@ -2901,7 +3090,27 @@ bool WriteLaunchpadFlowReadyState()
         { "browsePresses", g_launchpadFlowProbe.browsePresses },
         { "browseClickLaunches", g_launchpadFlowProbe.browseClickLaunches },
         { "requestedPaths", g_launchpadFlowProbe.requestedPaths.size() },
-        { "itemPaths", itemPaths }
+        { "itemPaths", itemPaths },
+        { "hitBounds", hitBounds },
+        { "regionBounds", regionBounds },
+        { "editBounds", Json{
+            { "left", edit.left },
+            { "top", edit.top },
+            { "right", edit.right },
+            { "bottom", edit.bottom }
+        } },
+        { "undoBounds", Json{
+            { "left", metrics.undo.left },
+            { "top", metrics.undo.top },
+            { "right", metrics.undo.right },
+            { "bottom", metrics.undo.bottom }
+        } },
+        { "contentClip", Json{
+            { "left", metrics.contentClip.left },
+            { "top", metrics.contentClip.top },
+            { "right", metrics.contentClip.right },
+            { "bottom", metrics.contentClip.bottom }
+        } }
     };
     return WriteFileUtf8(g_launchpadFlowProbe.readyPath, ready.dump(2) + "\n");
 }
@@ -2997,6 +3206,73 @@ bool HandleOrganizationProbeResult(const llp::shell::Result& result)
     return true;
 }
 
+bool ReadRegistryDword(HKEY root, const wchar_t* subkey, const wchar_t* name, DWORD& value)
+{
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(root, subkey, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return false;
+    DWORD type = 0;
+    DWORD bytes = sizeof(value);
+    const LONG result = RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(&value), &bytes);
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS && type == REG_DWORD && bytes == sizeof(value);
+}
+
+llp::adaptive::Color AdaptiveColor(COLORREF color)
+{
+    return {
+        static_cast<std::uint8_t>(GetRValue(color)),
+        static_cast<std::uint8_t>(GetGValue(color)),
+        static_cast<std::uint8_t>(GetBValue(color))
+    };
+}
+
+COLORREF WindowsColor(llp::adaptive::Color color)
+{
+    return RGB(color.red, color.green, color.blue);
+}
+
+void RefreshAdaptiveEnvironment()
+{
+    llp::adaptive::Environment next;
+    HIGHCONTRASTW highContrast = {};
+    highContrast.cbSize = sizeof(highContrast);
+    next.highContrast = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(highContrast), &highContrast, 0)
+        && (highContrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
+
+    BOOL animationsEnabled = TRUE;
+    next.animationsEnabled = !SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animationsEnabled, 0)
+        || animationsEnabled != FALSE;
+
+    DWORD value = 0;
+    next.transparencyEnabled = !ReadRegistryDword(
+        HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        L"EnableTransparency",
+        value) || value != 0;
+    next.darkMode = ReadRegistryDword(
+        HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        L"AppsUseLightTheme",
+        value) && value == 0;
+    next.textScalePercent = ReadRegistryDword(
+        HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Accessibility",
+        L"TextScaleFactor",
+        value)
+        ? static_cast<int>(value)
+        : 100;
+    next.systemWindow = AdaptiveColor(GetSysColor(COLOR_WINDOW));
+    next.systemWindowText = AdaptiveColor(GetSysColor(COLOR_WINDOWTEXT));
+    next.systemHighlight = AdaptiveColor(GetSysColor(COLOR_HIGHLIGHT));
+    next.systemHighlightText = AdaptiveColor(GetSysColor(COLOR_HIGHLIGHTTEXT));
+
+    const auto nextPolicy = llp::adaptive::ResolvePolicy(next);
+    const bool scaleChanged = nextPolicy.textScalePercent != g_adaptivePolicy.textScalePercent;
+    g_adaptiveEnvironment = next;
+    g_adaptivePolicy = nextPolicy;
+    if (scaleChanged && g_hwnd) ResetScaleSensitiveResources();
+}
+
 void HandleShellBrokerResult(LPARAM lParam)
 {
     std::unique_ptr<llp::shell::Result> result(reinterpret_cast<llp::shell::Result*>(lParam));
@@ -3056,7 +3332,7 @@ void HandleShellBrokerResult(LPARAM lParam)
         if (found != g_items.end())
         {
             found->iconRequestPending = false;
-            if (result->icon && result->iconSize == g_settings.iconSize)
+            if (result->icon && result->iconSize == IconSizePx())
             {
                 ReleaseItemIcon(*found);
                 found->icon = result->icon;
@@ -3064,7 +3340,7 @@ void HandleShellBrokerResult(LPARAM lParam)
                 result->icon = nullptr;
                 InvalidateRect(g_hwnd, nullptr, FALSE);
             }
-            else if (result->iconSize != g_settings.iconSize)
+            else if (result->iconSize != IconSizePx())
             {
                 QueueItemIcon(*found);
             }
@@ -3683,6 +3959,7 @@ void ApplyGlassBackdrop()
     if (!g_hwnd) return;
 
     const bool spotlight = IsSpotlightMode();
+    const bool allowSystemBackdrop = !spotlight && !g_adaptivePolicy.solidSurface;
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     auto setWindowCompositionAttribute = user32
         ? reinterpret_cast<SetWindowCompositionAttributeFn>(GetProcAddress(user32, "SetWindowCompositionAttribute"))
@@ -3690,9 +3967,9 @@ void ApplyGlassBackdrop()
     if (setWindowCompositionAttribute)
     {
         AccentPolicy policy = {};
-        policy.accentState = spotlight ? ACCENT_DISABLED : ACCENT_ENABLE_ACRYLICBLURBEHIND;
-        policy.accentFlags = spotlight ? 0 : 2;
-        policy.gradientColor = spotlight ? 0 : 0xC4282520;
+        policy.accentState = allowSystemBackdrop ? ACCENT_ENABLE_ACRYLICBLURBEHIND : ACCENT_DISABLED;
+        policy.accentFlags = allowSystemBackdrop ? 2 : 0;
+        policy.gradientColor = allowSystemBackdrop ? 0xC4282520 : 0;
         WindowCompositionAttribData data = {};
         data.attribute = 19;
         data.data = &policy;
@@ -3702,15 +3979,15 @@ void ApplyGlassBackdrop()
 
     DWM_BLURBEHIND blur = {};
     blur.dwFlags = DWM_BB_ENABLE;
-    blur.fEnable = spotlight ? FALSE : TRUE;
+    blur.fEnable = allowSystemBackdrop ? TRUE : FALSE;
     DwmEnableBlurBehindWindow(g_hwnd, &blur);
 
-    const DWORD backdrop = spotlight ? DWMSBT_NONE : DWMSBT_TRANSIENTWINDOW;
+    const DWORD backdrop = allowSystemBackdrop ? DWMSBT_TRANSIENTWINDOW : DWMSBT_NONE;
     DwmSetWindowAttribute(g_hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
     const DWORD borderColor = DWMWA_COLOR_NONE;
     DwmSetWindowAttribute(g_hwnd, DWMWA_BORDER_COLOR, &borderColor, sizeof(borderColor));
     ApplyDwmRoundedCorners();
-    SetSpotlightLayeredOpacity(spotlight ? SpotlightGlassAlpha : 255);
+    SetSpotlightLayeredOpacity(spotlight && !g_adaptivePolicy.solidSurface ? SpotlightGlassAlpha : 255);
 }
 
 void ApplySpotlightWindowRegion(int width, int height)
@@ -3904,17 +4181,71 @@ bool CaptureSpotlightBackdrop(const RECT& windowRect)
     return true;
 }
 
+UINT DpiForMonitor(HMONITOR monitor)
+{
+    if (!monitor) return 96;
+    HMODULE shcore = LoadLibraryW(L"shcore.dll");
+    if (shcore)
+    {
+        using GetDpiForMonitorFn = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+        const auto getDpiForMonitor = reinterpret_cast<GetDpiForMonitorFn>(GetProcAddress(shcore, "GetDpiForMonitor"));
+        UINT x = 96;
+        UINT y = 96;
+        const HRESULT result = getDpiForMonitor ? getDpiForMonitor(monitor, 0, &x, &y) : E_NOTIMPL;
+        FreeLibrary(shcore);
+        if (SUCCEEDED(result) && x > 0) return x;
+    }
+    return g_windowDpi > 0 ? g_windowDpi : 96;
+}
+
+HMONITOR SpotlightTargetMonitor()
+{
+    HWND foreground = GetForegroundWindow();
+    const bool foregroundUsable = foreground
+        && foreground != g_hwnd
+        && foreground != g_settingsHwnd
+        && IsWindow(foreground);
+    HMONITOR foregroundMonitor = foregroundUsable
+        ? MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL)
+        : nullptr;
+
+    POINT cursor = {};
+    const bool cursorAvailable = GetCursorPos(&cursor) != FALSE;
+    HMONITOR cursorMonitor = cursorAvailable
+        ? MonitorFromPoint(cursor, MONITOR_DEFAULTTONULL)
+        : nullptr;
+
+    g_lastMonitorSource = llp::adaptive::ChooseMonitorSource(
+        foregroundMonitor != nullptr,
+        cursorMonitor != nullptr);
+    if (g_lastMonitorSource == llp::adaptive::MonitorSource::Foreground) return foregroundMonitor;
+    if (g_lastMonitorSource == llp::adaptive::MonitorSource::Cursor) return cursorMonitor;
+    return MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+}
+
 void PositionWindow()
 {
-    RECT work = {};
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     const bool spotlight = IsSpotlightMode();
     if (spotlight)
     {
+        const HMONITOR monitor = SpotlightTargetMonitor();
+        MONITORINFO info = {};
+        info.cbSize = sizeof(info);
+        if (!monitor || !GetMonitorInfoW(monitor, &info))
+        {
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &info.rcWork, 0);
+        }
+        const RECT work = info.rcWork;
+        const UINT targetDpi = g_testDpiOverride > 0 ? g_testDpiOverride : DpiForMonitor(monitor);
+        if (targetDpi != g_windowDpi)
+        {
+            g_windowDpi = targetDpi;
+            ResetScaleSensitiveResources();
+        }
         const int workWidth = static_cast<int>(work.right - work.left);
         const int workHeight = static_cast<int>(work.bottom - work.top);
-        const int width = std::clamp(g_settings.spotlightWidth, 520, workWidth);
-        const int height = std::clamp(g_settings.spotlightHeight, 420, workHeight);
+        const int width = std::clamp(ScaleDip(g_settings.spotlightWidth), std::min(ScaleDip(520), workWidth), workWidth);
+        const int height = std::clamp(ScaleDip(g_settings.spotlightHeight), std::min(ScaleDip(420), workHeight), workHeight);
         ApplySpotlightWindowRegion(width, height);
         SetWindowPos(
             g_hwnd,
@@ -3928,6 +4259,17 @@ void PositionWindow()
     }
     else
     {
+        using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+        const auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
+            GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+        const UINT nextDpi = g_testDpiOverride > 0
+            ? g_testDpiOverride
+            : (getDpiForWindow && g_hwnd ? getDpiForWindow(g_hwnd) : 96);
+        if (g_testDpiOverride == 0 && nextDpi > 0 && nextDpi != g_windowDpi)
+        {
+            g_windowDpi = nextDpi;
+            ResetScaleSensitiveResources();
+        }
         const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
         const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
         ApplySpotlightWindowRegion(width, height);
@@ -3969,7 +4311,7 @@ void ShowSpotlightImmediately()
     if (!g_hwnd) return;
     // LLP-017 will restore motion with a compositor-driven timeline. Keep this
     // path immediate until then so opening Spotlight never blocks the UI thread.
-    SetSpotlightLayeredOpacity(SpotlightGlassAlpha);
+    SetSpotlightLayeredOpacity(g_adaptivePolicy.solidSurface ? 255 : SpotlightGlassAlpha);
     ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     InvalidateRect(g_hwnd, nullptr, TRUE);
 }
@@ -3982,7 +4324,7 @@ void HideSpotlightImmediately()
     }
 
     ShowWindow(g_hwnd, SW_HIDE);
-    SetSpotlightLayeredOpacity(SpotlightGlassAlpha);
+    SetSpotlightLayeredOpacity(g_adaptivePolicy.solidSurface ? 255 : SpotlightGlassAlpha);
 }
 
 void ShowNativeUi()
@@ -4004,7 +4346,7 @@ void ShowNativeUi()
     ResetSearchForOpen();
     RebuildFiltered();
     PositionWindow();
-    if (IsSpotlightMode())
+    if (IsSpotlightMode() && !g_adaptivePolicy.solidSurface)
     {
         RECT windowRect = {};
         GetWindowRect(g_hwnd, &windowRect);
@@ -4028,6 +4370,7 @@ void ShowNativeUi()
     SetForegroundWindow(g_hwnd);
     ActivateSearchInput();
     InvalidateRect(g_hwnd, nullptr, TRUE);
+    if (g_spotlightFlowProbe.active) WriteSpotlightFlowReadyState();
     if (g_catalogBrokerProbe.active
         && g_catalogBrokerProbe.stage == 1
         && g_catalogBrokerProbe.inputPostedTick == 0)
@@ -4521,6 +4864,13 @@ void ApplyDragAvoidanceOffset(RECT& visualTileRect, const LaunchItem& item, int 
     }
 
     auto& offset = VisualOffsetForItem(item.sourcePath);
+    if (g_adaptivePolicy.reducedMotion)
+    {
+        offset.dx = targetDx;
+        offset.dy = targetDy;
+        OffsetRect(&visualTileRect, targetDx, targetDy);
+        return;
+    }
     offset.dx += (targetDx - offset.dx) * DragReflowSmoothing;
     offset.dy += (targetDy - offset.dy) * DragReflowSmoothing;
     if (std::abs(targetDx - offset.dx) < 0.45) offset.dx = targetDx;
@@ -4567,19 +4917,19 @@ bool InitializeDirectRenderer()
 
     if (!g_searchTextFormat)
     {
-        g_dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 26.0f, L"", &g_searchTextFormat);
+        g_dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(ScaleTextDip(26)), L"", &g_searchTextFormat);
     }
     if (!g_tileTextFormat)
     {
-        g_dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 15.0f, L"", &g_tileTextFormat);
+        g_dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(ScaleTextDip(15)), L"", &g_tileTextFormat);
     }
     if (!g_headerTextFormat)
     {
-        g_dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 18.0f, L"", &g_headerTextFormat);
+        g_dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(ScaleTextDip(18)), L"", &g_headerTextFormat);
     }
     if (!g_iconTextFormat)
     {
-        g_dwriteFactory->CreateTextFormat(L"Segoe Fluent Icons", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 17.0f, L"", &g_iconTextFormat);
+        g_dwriteFactory->CreateTextFormat(L"Segoe Fluent Icons", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(ScaleTextDip(17)), L"", &g_iconTextFormat);
     }
 
     return g_searchTextFormat && g_tileTextFormat && g_headerTextFormat && g_iconTextFormat;
@@ -4614,7 +4964,7 @@ D2D1_RECT_F D2DRect(const RECT& rect)
 
 D2D1_ROUNDED_RECT SpotlightRoundedRect(const RECT& client, float inset)
 {
-    const float radius = std::max(0.0f, static_cast<float>(SpotlightCornerRadius) - inset);
+    const float radius = std::max(0.0f, static_cast<float>(ScaleDip(SpotlightCornerRadius)) - inset);
     return D2D1::RoundedRect(
         D2D1::RectF(
             static_cast<float>(client.left) + inset,
@@ -4700,7 +5050,7 @@ bool IsPointInsideSpotlightGlass(POINT point)
     if (!g_hwnd || !IsSpotlightMode()) return true;
     RECT client = {};
     GetClientRect(g_hwnd, &client);
-    return IsPointInsideRoundedRect(point, client, SpotlightCornerRadius);
+    return IsPointInsideRoundedRect(point, client, ScaleDip(SpotlightCornerRadius));
 }
 
 void DrawLiquidGlassSpecularSheen(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& panel, const RECT& client)
@@ -4902,6 +5252,23 @@ void RenderLaunchpadBackdropDirect2D(ID2D1DCRenderTarget* target, const RECT& cl
 
 void DrawGlassBackground(ID2D1DCRenderTarget* target, const RECT& client)
 {
+    if (g_adaptivePolicy.solidSurface)
+    {
+        if (IsSpotlightMode()) target->Clear(D2DColor(SpotlightTransparentKey));
+        ID2D1SolidColorBrush* surface = nullptr;
+        ID2D1SolidColorBrush* boundary = nullptr;
+        target->CreateSolidColorBrush(D2DColor(WindowsColor(g_adaptivePolicy.surface)), &surface);
+        target->CreateSolidColorBrush(D2DColor(WindowsColor(g_adaptivePolicy.boundary)), &boundary);
+        if (surface)
+        {
+            if (IsSpotlightMode()) target->FillRoundedRectangle(SpotlightRoundedRect(client, 0.0f), surface);
+            else target->FillRectangle(D2DRect(client), surface);
+        }
+        if (boundary && IsSpotlightMode()) target->DrawRoundedRectangle(SpotlightRoundedRect(client, 0.5f), boundary, std::max(1.0f, static_cast<float>(ScaleDip(1))));
+        SafeRelease(boundary);
+        SafeRelease(surface);
+        return;
+    }
     if (IsSpotlightMode())
     {
         RenderSpotlightGlassDirect2D(target, client);
@@ -4941,8 +5308,8 @@ void RenderSpotlightGlassGdiSpecular(HDC dc, const RECT& client)
 
     HPEN topGlint = CreatePen(PS_SOLID, 1, RGB(218, 238, 250));
     HGDIOBJ oldPen = SelectObject(dc, topGlint);
-    MoveToEx(dc, client.left + SpotlightCornerRadius, client.top + 1, nullptr);
-    LineTo(dc, client.right - SpotlightCornerRadius, client.top + 1);
+    MoveToEx(dc, client.left + ScaleDip(SpotlightCornerRadius), client.top + ScaleDip(1), nullptr);
+    LineTo(dc, client.right - ScaleDip(SpotlightCornerRadius), client.top + ScaleDip(1));
     SelectObject(dc, oldPen);
     DeleteObject(topGlint);
 }
@@ -4954,7 +5321,7 @@ void RenderSpotlightGlassGdi(HDC dc, const RECT& client)
     FillRect(dc, &client, transparent);
     DeleteObject(transparent);
 
-    const int radius = std::max(1, SpotlightCornerRadius * 2);
+    const int radius = std::max(1, ScaleDip(SpotlightCornerRadius) * 2);
     HRGN clip = CreateRoundRectRgn(client.left, client.top, client.right + 1, client.bottom + 1, radius, radius);
     if (clip)
     {
@@ -4999,6 +5366,36 @@ void RenderSpotlightGlassGdi(HDC dc, const RECT& client)
 void DrawGlassBackground(HDC dc, const RECT& client)
 {
     const bool spotlight = IsSpotlightMode();
+    if (g_adaptivePolicy.solidSurface)
+    {
+        const int saved = SaveDC(dc);
+        HBRUSH transparent = CreateSolidBrush(SpotlightTransparentKey);
+        if (spotlight) FillRect(dc, &client, transparent);
+        DeleteObject(transparent);
+        HRGN clip = nullptr;
+        if (spotlight)
+        {
+            const int radius = ScaleDip(SpotlightCornerRadius) * 2;
+            clip = CreateRoundRectRgn(client.left, client.top, client.right + 1, client.bottom + 1, radius, radius);
+            if (clip) SelectClipRgn(dc, clip);
+        }
+        HBRUSH background = CreateSolidBrush(WindowsColor(g_adaptivePolicy.surface));
+        FillRect(dc, &client, background);
+        DeleteObject(background);
+        if (spotlight)
+        {
+            HPEN pen = CreatePen(PS_SOLID, std::max(1, ScaleDip(1)), WindowsColor(g_adaptivePolicy.boundary));
+            HGDIOBJ oldPen = SelectObject(dc, pen);
+            HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+            RoundRect(dc, client.left, client.top, client.right, client.bottom, ScaleDip(SpotlightCornerRadius) * 2, ScaleDip(SpotlightCornerRadius) * 2);
+            SelectObject(dc, oldBrush);
+            SelectObject(dc, oldPen);
+            DeleteObject(pen);
+        }
+        if (clip) DeleteObject(clip);
+        RestoreDC(dc, saved);
+        return;
+    }
     if (spotlight)
     {
         RenderSpotlightGlassGdi(dc, client);
@@ -5073,7 +5470,7 @@ void DrawSoftWindowEdge(HDC dc, const RECT& client)
         HGDIOBJ oldPen = SelectObject(dc, pen);
         HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
         const int edgeInset = spotlight ? SpotlightPanelInset + inset : inset;
-        const int radius = spotlight ? std::max(1, (SpotlightCornerRadius - edgeInset) * 2) : 0;
+        const int radius = spotlight ? std::max(1, (ScaleDip(SpotlightCornerRadius) - edgeInset) * 2) : 0;
         RoundRect(dc, client.left + edgeInset, client.top + edgeInset, client.right - edgeInset, client.bottom - edgeInset, radius, radius);
         SelectObject(dc, oldBrush);
         SelectObject(dc, oldPen);
@@ -5213,7 +5610,7 @@ void DrawAlignedSearchBackdrop(HDC dc, const RECT& rect, bool active)
     }
 
     const int saved = SaveDC(dc);
-    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, SpotlightSearchCornerRadius * 2, SpotlightSearchCornerRadius * 2);
+    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, ScaleDip(SpotlightSearchCornerRadius) * 2, ScaleDip(SpotlightSearchCornerRadius) * 2);
     if (clip)
     {
         SelectClipRgn(dc, clip);
@@ -5318,7 +5715,7 @@ void DrawSearchLiquidMaterialWash(HDC dc, const RECT& rect, bool active)
     DeleteObject(brush);
 
     const int saved = SaveDC(dc);
-    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, SpotlightSearchCornerRadius * 2, SpotlightSearchCornerRadius * 2);
+    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, ScaleDip(SpotlightSearchCornerRadius) * 2, ScaleDip(SpotlightSearchCornerRadius) * 2);
     if (clip)
     {
         SelectClipRgn(dc, clip);
@@ -5383,7 +5780,7 @@ void DrawSearchEdgeRefraction(HDC dc, const RECT& rect, bool active)
     }
 
     const int saved = SaveDC(dc);
-    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, SpotlightSearchCornerRadius * 2, SpotlightSearchCornerRadius * 2);
+    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, ScaleDip(SpotlightSearchCornerRadius) * 2, ScaleDip(SpotlightSearchCornerRadius) * 2);
     if (clip)
     {
         SelectClipRgn(dc, clip);
@@ -5500,7 +5897,7 @@ void DrawSearchHorizontalGlassRim(ID2D1DCRenderTarget* target, const D2D1_ROUNDE
 void DrawSearchHorizontalGlassRim(HDC dc, const RECT& rect, bool active)
 {
     const int saved = SaveDC(dc);
-    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, SpotlightSearchCornerRadius * 2, SpotlightSearchCornerRadius * 2);
+    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, ScaleDip(SpotlightSearchCornerRadius) * 2, ScaleDip(SpotlightSearchCornerRadius) * 2);
     if (clip)
     {
         SelectClipRgn(dc, clip);
@@ -5509,11 +5906,11 @@ void DrawSearchHorizontalGlassRim(HDC dc, const RECT& rect, bool active)
     HPEN topPen = CreatePen(PS_SOLID, active ? 3 : 2, active ? RGB(246, 254, 255) : RGB(220, 242, 252));
     HPEN bottomPen = CreatePen(PS_SOLID, active ? 2 : 1, active ? RGB(166, 226, 255) : RGB(132, 190, 226));
     HGDIOBJ oldPen = SelectObject(dc, topPen);
-    MoveToEx(dc, rect.left + SpotlightSearchCornerRadius, rect.top + 2, nullptr);
-    LineTo(dc, rect.right - SpotlightSearchCornerRadius, rect.top + 2);
+    MoveToEx(dc, rect.left + ScaleDip(SpotlightSearchCornerRadius), rect.top + ScaleDip(2), nullptr);
+    LineTo(dc, rect.right - ScaleDip(SpotlightSearchCornerRadius), rect.top + ScaleDip(2));
     SelectObject(dc, bottomPen);
-    MoveToEx(dc, rect.left + SpotlightSearchCornerRadius, rect.bottom - 2, nullptr);
-    LineTo(dc, rect.right - SpotlightSearchCornerRadius, rect.bottom - 2);
+    MoveToEx(dc, rect.left + ScaleDip(SpotlightSearchCornerRadius), rect.bottom - ScaleDip(2), nullptr);
+    LineTo(dc, rect.right - ScaleDip(SpotlightSearchCornerRadius), rect.bottom - ScaleDip(2));
     SelectObject(dc, oldPen);
     DeleteObject(bottomPen);
     DeleteObject(topPen);
@@ -5536,16 +5933,16 @@ void DrawSearchFocusGlow(ID2D1DCRenderTarget* target, const RECT& rect, bool act
     {
         const auto halo = D2D1::RoundedRect(
             D2D1::RectF(static_cast<float>(rect.left) - 1.5f, static_cast<float>(rect.top) - 1.5f, static_cast<float>(rect.right) + 1.5f, static_cast<float>(rect.bottom) + 1.5f),
-            static_cast<float>(SpotlightSearchCornerRadius + 2),
-            static_cast<float>(SpotlightSearchCornerRadius + 2));
+            static_cast<float>(ScaleDip(SpotlightSearchCornerRadius + 2)),
+            static_cast<float>(ScaleDip(SpotlightSearchCornerRadius + 2)));
         target->DrawRoundedRectangle(halo, haloBrush, active ? 3.0f : 2.0f);
     }
     if (innerBrush)
     {
         const auto inner = D2D1::RoundedRect(
             D2D1::RectF(static_cast<float>(rect.left) + 3.0f, static_cast<float>(rect.top) + 3.0f, static_cast<float>(rect.right) - 3.0f, static_cast<float>(rect.bottom) - 3.0f),
-            static_cast<float>(SpotlightSearchCornerRadius - 3),
-            static_cast<float>(SpotlightSearchCornerRadius - 3));
+            static_cast<float>(ScaleDip(SpotlightSearchCornerRadius - 3)),
+            static_cast<float>(ScaleDip(SpotlightSearchCornerRadius - 3)));
         target->DrawRoundedRectangle(inner, innerBrush, 1.0f);
     }
     SafeRelease(innerBrush);
@@ -5557,7 +5954,7 @@ void DrawSearchFocusGlow(HDC dc, const RECT& rect, bool active)
     HPEN haloPen = CreatePen(PS_SOLID, active ? 3 : 2, active ? RGB(126, 210, 255) : RGB(94, 144, 184));
     HGDIOBJ oldPen = SelectObject(dc, haloPen);
     HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-    RoundRect(dc, rect.left - 1, rect.top - 1, rect.right + 1, rect.bottom + 1, (SpotlightSearchCornerRadius + 2) * 2, (SpotlightSearchCornerRadius + 2) * 2);
+    RoundRect(dc, rect.left - ScaleDip(1), rect.top - ScaleDip(1), rect.right + ScaleDip(1), rect.bottom + ScaleDip(1), ScaleDip(SpotlightSearchCornerRadius + 2) * 2, ScaleDip(SpotlightSearchCornerRadius + 2) * 2);
     SelectObject(dc, oldBrush);
     SelectObject(dc, oldPen);
     DeleteObject(haloPen);
@@ -5699,7 +6096,23 @@ void DrawSearchLiquidSpecular(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RE
 
 void DrawSearchGlassSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool active)
 {
-    const auto rounded = D2D1::RoundedRect(D2DRect(rect), static_cast<float>(SpotlightSearchCornerRadius), static_cast<float>(SpotlightSearchCornerRadius));
+    if (g_adaptivePolicy.solidSurface)
+    {
+        const auto rounded = D2D1::RoundedRect(
+            D2DRect(rect),
+            static_cast<float>(ScaleDip(SpotlightSearchCornerRadius)),
+            static_cast<float>(ScaleDip(SpotlightSearchCornerRadius)));
+        ID2D1SolidColorBrush* fill = nullptr;
+        ID2D1SolidColorBrush* stroke = nullptr;
+        target->CreateSolidColorBrush(D2DColor(WindowsColor(active ? g_adaptivePolicy.focus : g_adaptivePolicy.surface)), &fill);
+        target->CreateSolidColorBrush(D2DColor(WindowsColor(g_adaptivePolicy.boundary)), &stroke);
+        if (fill) target->FillRoundedRectangle(rounded, fill);
+        if (stroke) target->DrawRoundedRectangle(rounded, stroke, std::max(1.0f, static_cast<float>(ScaleDip(1))));
+        SafeRelease(stroke);
+        SafeRelease(fill);
+        return;
+    }
+    const auto rounded = D2D1::RoundedRect(D2DRect(rect), static_cast<float>(ScaleDip(SpotlightSearchCornerRadius)), static_cast<float>(ScaleDip(SpotlightSearchCornerRadius)));
 
     DrawSearchFocusLens(target, rounded, rect, active);
     DrawSearchLiquidMaterialWash(target, rounded, rect, active);
@@ -5761,8 +6174,8 @@ void DrawSearchGlassSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool 
     {
         target->DrawRoundedRectangle(D2D1::RoundedRect(
             D2D1::RectF(static_cast<float>(rect.left) + 2.0f, static_cast<float>(rect.top) + 2.0f, static_cast<float>(rect.right) - 2.0f, static_cast<float>(rect.bottom) - 2.0f),
-            static_cast<float>(SpotlightSearchCornerRadius - 2),
-            static_cast<float>(SpotlightSearchCornerRadius - 2)), innerBrush, 1.0f);
+            static_cast<float>(ScaleDip(SpotlightSearchCornerRadius - 2)),
+            static_cast<float>(ScaleDip(SpotlightSearchCornerRadius - 2))), innerBrush, 1.0f);
     }
     SafeRelease(innerBrush);
     SafeRelease(strokeBrush);
@@ -5774,6 +6187,16 @@ void DrawSearchGlassSurface(ID2D1DCRenderTarget* target, const RECT& rect, bool 
 
 void DrawSearchGlassSurface(HDC dc, const RECT& rect, bool active)
 {
+    if (g_adaptivePolicy.solidSurface)
+    {
+        DrawRoundedRect(
+            dc,
+            rect,
+            WindowsColor(active ? g_adaptivePolicy.focus : g_adaptivePolicy.surface),
+            WindowsColor(g_adaptivePolicy.boundary),
+            ScaleDip(SpotlightSearchCornerRadius));
+        return;
+    }
     DrawSearchFocusLens(dc, rect, active);
     DrawSearchLiquidMaterialWash(dc, rect, active);
     DrawSearchHorizontalGlassRim(dc, rect, active);
@@ -5782,7 +6205,7 @@ void DrawSearchGlassSurface(HDC dc, const RECT& rect, bool active)
     HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(222, 248, 255) : RGB(180, 224, 248));
     HGDIOBJ oldBrush = SelectObject(dc, fill);
     HGDIOBJ oldPen = SelectObject(dc, pen);
-    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, SpotlightSearchCornerRadius * 2, SpotlightSearchCornerRadius * 2);
+    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, ScaleDip(SpotlightSearchCornerRadius) * 2, ScaleDip(SpotlightSearchCornerRadius) * 2);
     SelectObject(dc, oldPen);
     SelectObject(dc, oldBrush);
     DeleteObject(pen);
@@ -5793,6 +6216,20 @@ void DrawSearchGlassSurface(HDC dc, const RECT& rect, bool active)
 void DrawAppTileSurface(ID2D1DCRenderTarget* target, const RECT& rect, TileVisualState state)
 {
     if (state == TileVisualState::Normal) return;
+    if (g_adaptivePolicy.solidSurface)
+    {
+        const bool emphasized = state == TileVisualState::KeyboardFocus
+            || state == TileVisualState::Selected
+            || state == TileVisualState::MultiSelected
+            || state == TileVisualState::Pressed;
+        DrawRoundedRectDirect(
+            target,
+            rect,
+            WindowsColor(emphasized ? g_adaptivePolicy.focus : g_adaptivePolicy.surface),
+            WindowsColor(g_adaptivePolicy.boundary),
+            static_cast<float>(ScaleDip(14)));
+        return;
+    }
     if (state != TileVisualState::KeyboardFocus)
     {
         COLORREF fill = RGB(28, 45, 64);
@@ -5859,7 +6296,7 @@ void DrawIconBackplateDirect(ID2D1DCRenderTarget* target, const RECT& rect, bool
     if (IsSpotlightBaseLayerPass()) return;
 
     const float tileWidth = static_cast<float>(rect.right - rect.left);
-    const float icon = static_cast<float>(g_settings.iconSize);
+    const float icon = static_cast<float>(IconSizePx());
     const D2D1_POINT_2F center = D2D1::Point2F(
         static_cast<float>(rect.left) + tileWidth * 0.5f,
         static_cast<float>(rect.top) + 14.0f + icon * 0.54f);
@@ -5915,6 +6352,20 @@ void DrawIconBackplateDirect(ID2D1DCRenderTarget* target, const RECT& rect, bool
 void DrawAppTileSurface(HDC dc, const RECT& rect, TileVisualState state)
 {
     if (state == TileVisualState::Normal) return;
+    if (g_adaptivePolicy.solidSurface)
+    {
+        const bool emphasized = state == TileVisualState::KeyboardFocus
+            || state == TileVisualState::Selected
+            || state == TileVisualState::MultiSelected
+            || state == TileVisualState::Pressed;
+        DrawRoundedRect(
+            dc,
+            rect,
+            WindowsColor(emphasized ? g_adaptivePolicy.focus : g_adaptivePolicy.surface),
+            WindowsColor(g_adaptivePolicy.boundary),
+            ScaleDip(14));
+        return;
+    }
     if (state == TileVisualState::KeyboardFocus)
     {
         DrawFocusedTileLens(dc, rect);
@@ -6027,7 +6478,10 @@ void DrawSearchCaret(ID2D1DCRenderTarget* target, const RECT& textRect, int pref
 {
     if (!g_searchInputActive) return;
     ID2D1SolidColorBrush* brush = nullptr;
-    target->CreateSolidColorBrush(D2DColor(RGB(34, 54, 72)), &brush);
+    const COLORREF caretColor = g_adaptivePolicy.solidSurface
+        ? WindowsColor(g_searchInputActive ? g_adaptivePolicy.focusText : g_adaptivePolicy.text)
+        : RGB(34, 54, 72);
+    target->CreateSolidColorBrush(D2DColor(caretColor), &brush);
     if (brush)
     {
         target->FillRectangle(D2DRect(SearchCaretRect(textRect, prefixWidth)), brush);
@@ -6039,7 +6493,10 @@ void DrawSearchCaret(HDC dc, const RECT& textRect, int prefixWidth)
 {
     if (!g_searchInputActive) return;
     const RECT caret = SearchCaretRect(textRect, prefixWidth);
-    HBRUSH brush = CreateSolidBrush(RGB(34, 54, 72));
+    const COLORREF caretColor = g_adaptivePolicy.solidSurface
+        ? WindowsColor(g_searchInputActive ? g_adaptivePolicy.focusText : g_adaptivePolicy.text)
+        : RGB(34, 54, 72);
+    HBRUSH brush = CreateSolidBrush(caretColor);
     FillRect(dc, &caret, brush);
     DeleteObject(brush);
 }
@@ -6064,7 +6521,11 @@ void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client)
         const int selectionEnd = static_cast<int>(std::ceil(MeasureTextWidthDirect(g_searchTextFormat, displayText.substr(0, g_searchInput.SelectionEnd()))));
         RECT selectionRect = { drawRect.left + selectionStart, textRect.top + 8, drawRect.left + selectionEnd, textRect.bottom - 8 };
         ID2D1SolidColorBrush* selectionBrush = nullptr;
-        target->CreateSolidColorBrush(D2DColorAlpha(RGB(58, 140, 255), 0.28f), &selectionBrush);
+        target->CreateSolidColorBrush(
+            g_adaptivePolicy.solidSurface
+                ? D2DColor(WindowsColor(g_adaptiveEnvironment.systemHighlight))
+                : D2DColorAlpha(RGB(58, 140, 255), 0.28f),
+            &selectionBrush);
         if (selectionBrush) target->FillRectangle(D2DRect(selectionRect), selectionBrush);
         SafeRelease(selectionBrush);
     }
@@ -6073,7 +6534,9 @@ void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client)
         g_searchTextFormat,
         displayText,
         drawRect,
-        displayText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72),
+        g_adaptivePolicy.solidSurface
+            ? WindowsColor(g_searchInputActive ? g_adaptivePolicy.focusText : g_adaptivePolicy.text)
+            : (displayText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72)),
         DWRITE_TEXT_ALIGNMENT_LEADING,
         DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
         DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -6099,7 +6562,7 @@ void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client)
 
 void DrawSearchSurface(HDC dc, const RECT& client)
 {
-    HFONT searchFont = CreateFontW(26, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HFONT searchFont = CreateFontW(ScaleTextDip(26), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     const RECT searchRect = SearchRect(client);
     const RECT textRect = SearchTextRect(searchRect);
     DrawSearchGlassSurface(dc, searchRect, g_searchInputActive);
@@ -6123,11 +6586,21 @@ void DrawSearchSurface(HDC dc, const RECT& client)
         const int selectionStart = MeasureTextWidthGdi(dc, displayText.substr(0, g_searchInput.SelectionStart()));
         const int selectionEnd = MeasureTextWidthGdi(dc, displayText.substr(0, g_searchInput.SelectionEnd()));
         RECT selectionRect = { drawRect.left + selectionStart, textRect.top + 8, drawRect.left + selectionEnd, textRect.bottom - 8 };
-        HBRUSH selectionBrush = CreateSolidBrush(RGB(188, 218, 250));
+        HBRUSH selectionBrush = CreateSolidBrush(
+            g_adaptivePolicy.solidSurface
+                ? WindowsColor(g_adaptiveEnvironment.systemHighlight)
+                : RGB(188, 218, 250));
         FillRect(dc, &selectionRect, selectionBrush);
         DeleteObject(selectionBrush);
     }
-    DrawTextClipped(dc, displayText, drawRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER, displayText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72));
+    DrawTextClipped(
+        dc,
+        displayText,
+        drawRect,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        g_adaptivePolicy.solidSurface
+            ? WindowsColor(g_searchInputActive ? g_adaptivePolicy.focusText : g_adaptivePolicy.text)
+            : (displayText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72)));
     if (g_searchInput.IsComposing() && g_searchInput.CompositionEnd() > g_searchInput.CompositionStart())
     {
         const int compositionStart = MeasureTextWidthGdi(dc, displayText.substr(0, g_searchInput.CompositionStart()));
@@ -6153,15 +6626,15 @@ void DrawSpotlightAuxiliary(ID2D1DCRenderTarget* target, const RECT& client)
     DrawRoundedRectDirect(
         target,
         rect,
-        focused ? RGB(110, 174, 232) : RGB(70, 91, 116),
-        focused ? RGB(224, 243, 255) : RGB(138, 164, 190),
-        18.0f);
+        g_adaptivePolicy.solidSurface ? WindowsColor(focused ? g_adaptivePolicy.focus : g_adaptivePolicy.surface) : (focused ? RGB(110, 174, 232) : RGB(70, 91, 116)),
+        g_adaptivePolicy.solidSurface ? WindowsColor(g_adaptivePolicy.boundary) : (focused ? RGB(224, 243, 255) : RGB(138, 164, 190)),
+        static_cast<float>(ScaleDip(18)));
     DrawTextDirect(
         target,
         g_tileTextFormat,
         L"...",
         rect,
-        focused ? RGB(18, 48, 74) : RGB(232, 241, 250),
+        g_adaptivePolicy.solidSurface ? WindowsColor(focused ? g_adaptivePolicy.focusText : g_adaptivePolicy.text) : (focused ? RGB(18, 48, 74) : RGB(232, 241, 250)),
         DWRITE_TEXT_ALIGNMENT_CENTER,
         DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
         DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -6175,12 +6648,12 @@ void DrawSpotlightAuxiliary(HDC dc, const RECT& client)
     DrawRoundedRect(
         dc,
         rect,
-        focused ? RGB(110, 174, 232) : RGB(70, 91, 116),
-        focused ? RGB(224, 243, 255) : RGB(138, 164, 190),
-        18);
-    HFONT font = CreateFontW(16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        g_adaptivePolicy.solidSurface ? WindowsColor(focused ? g_adaptivePolicy.focus : g_adaptivePolicy.surface) : (focused ? RGB(110, 174, 232) : RGB(70, 91, 116)),
+        g_adaptivePolicy.solidSurface ? WindowsColor(g_adaptivePolicy.boundary) : (focused ? RGB(224, 243, 255) : RGB(138, 164, 190)),
+        ScaleDip(18));
+    HFONT font = CreateFontW(ScaleTextDip(16), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     HGDIOBJ oldFont = SelectObject(dc, font);
-    DrawTextClipped(dc, L"...", rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, focused ? RGB(18, 48, 74) : RGB(232, 241, 250));
+    DrawTextClipped(dc, L"...", rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, g_adaptivePolicy.solidSurface ? WindowsColor(focused ? g_adaptivePolicy.focusText : g_adaptivePolicy.text) : (focused ? RGB(18, 48, 74) : RGB(232, 241, 250)));
     SelectObject(dc, oldFont);
     DeleteObject(font);
 }
@@ -6193,15 +6666,15 @@ void DrawLaunchpadModeControl(ID2D1DCRenderTarget* target, const RECT& client)
     DrawRoundedRectDirect(
         target,
         rect,
-        editing ? RGB(86, 158, 224) : RGB(39, 57, 78),
-        editing ? RGB(220, 241, 255) : RGB(128, 151, 178),
-        18.0f);
+        g_adaptivePolicy.solidSurface ? WindowsColor(editing ? g_adaptivePolicy.focus : g_adaptivePolicy.surface) : (editing ? RGB(86, 158, 224) : RGB(39, 57, 78)),
+        g_adaptivePolicy.solidSurface ? WindowsColor(g_adaptivePolicy.boundary) : (editing ? RGB(220, 241, 255) : RGB(128, 151, 178)),
+        static_cast<float>(ScaleDip(18)));
     DrawTextDirect(
         target,
         g_tileTextFormat,
         editing ? L"Done" : L"Edit",
         rect,
-        editing ? RGB(18, 48, 74) : RGB(232, 241, 250),
+        g_adaptivePolicy.solidSurface ? WindowsColor(editing ? g_adaptivePolicy.focusText : g_adaptivePolicy.text) : (editing ? RGB(18, 48, 74) : RGB(232, 241, 250)),
         DWRITE_TEXT_ALIGNMENT_CENTER,
         DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
         DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -6215,12 +6688,12 @@ void DrawLaunchpadModeControl(HDC dc, const RECT& client)
     DrawRoundedRect(
         dc,
         rect,
-        editing ? RGB(86, 158, 224) : RGB(39, 57, 78),
-        editing ? RGB(220, 241, 255) : RGB(128, 151, 178),
-        18);
-    HFONT font = CreateFontW(15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        g_adaptivePolicy.solidSurface ? WindowsColor(editing ? g_adaptivePolicy.focus : g_adaptivePolicy.surface) : (editing ? RGB(86, 158, 224) : RGB(39, 57, 78)),
+        g_adaptivePolicy.solidSurface ? WindowsColor(g_adaptivePolicy.boundary) : (editing ? RGB(220, 241, 255) : RGB(128, 151, 178)),
+        ScaleDip(18));
+    HFONT font = CreateFontW(ScaleTextDip(15), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     HGDIOBJ oldFont = SelectObject(dc, font);
-    DrawTextClipped(dc, editing ? L"Done" : L"Edit", rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, editing ? RGB(18, 48, 74) : RGB(232, 241, 250));
+    DrawTextClipped(dc, editing ? L"Done" : L"Edit", rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, g_adaptivePolicy.solidSurface ? WindowsColor(editing ? g_adaptivePolicy.focusText : g_adaptivePolicy.text) : (editing ? RGB(18, 48, 74) : RGB(232, 241, 250)));
     SelectObject(dc, oldFont);
     DeleteObject(font);
 }
@@ -6232,24 +6705,28 @@ void DrawOrganizationFeedback(HDC dc, const RECT& client)
     DrawRoundedRect(
         dc,
         rect,
-        g_organizationFeedback.warning ? RGB(74, 52, 42) : RGB(34, 54, 70),
-        g_organizationFeedback.warning ? RGB(224, 170, 116) : RGB(118, 184, 226),
-        16);
-    RECT textRect = { rect.left + 18, rect.top + 5, rect.right - 18, rect.bottom - 5 };
-    if (g_organizationFeedback.hasUndo) textRect.right -= 92;
-    HFONT font = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        g_adaptivePolicy.solidSurface
+            ? WindowsColor(g_organizationFeedback.warning ? g_adaptivePolicy.focus : g_adaptivePolicy.surface)
+            : (g_organizationFeedback.warning ? RGB(74, 52, 42) : RGB(34, 54, 70)),
+        g_adaptivePolicy.solidSurface
+            ? WindowsColor(g_adaptivePolicy.boundary)
+            : (g_organizationFeedback.warning ? RGB(224, 170, 116) : RGB(118, 184, 226)),
+        ScaleDip(16));
+    RECT textRect = { rect.left + ScaleDip(18), rect.top + ScaleDip(5), rect.right - ScaleDip(18), rect.bottom - ScaleDip(5) };
+    if (g_organizationFeedback.hasUndo) textRect.right = OrganizationUndoRect(client).left;
+    HFONT font = CreateFontW(ScaleTextDip(15), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     HGDIOBJ oldFont = SelectObject(dc, font);
-    DrawTextClipped(dc, g_organizationFeedback.text, textRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(242, 247, 252));
+    DrawTextClipped(dc, g_organizationFeedback.text, textRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_adaptivePolicy.solidSurface ? WindowsColor(g_organizationFeedback.warning ? g_adaptivePolicy.focusText : g_adaptivePolicy.text) : RGB(242, 247, 252));
     if (g_organizationFeedback.hasUndo)
     {
         const RECT undoRect = OrganizationUndoRect(client);
-        HPEN divider = CreatePen(PS_SOLID, 1, RGB(104, 142, 174));
+        HPEN divider = CreatePen(PS_SOLID, std::max(1, ScaleDip(1)), g_adaptivePolicy.solidSurface ? WindowsColor(g_adaptivePolicy.boundary) : RGB(104, 142, 174));
         HGDIOBJ oldPen = SelectObject(dc, divider);
-        MoveToEx(dc, undoRect.left, undoRect.top + 10, nullptr);
-        LineTo(dc, undoRect.left, undoRect.bottom - 10);
+        MoveToEx(dc, undoRect.left, undoRect.top + ScaleDip(10), nullptr);
+        LineTo(dc, undoRect.left, undoRect.bottom - ScaleDip(10));
         SelectObject(dc, oldPen);
         DeleteObject(divider);
-        DrawTextClipped(dc, Text(L"Undo", L"撤销"), undoRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, RGB(156, 216, 255));
+        DrawTextClipped(dc, Text(L"Undo", L"撤销"), undoRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, g_adaptivePolicy.solidSurface ? WindowsColor(g_organizationFeedback.warning ? g_adaptivePolicy.focusText : g_adaptivePolicy.text) : RGB(156, 216, 255));
     }
     SelectObject(dc, oldFont);
     DeleteObject(font);
@@ -6535,14 +7012,15 @@ struct RenderLayoutMetrics
 
 RenderLayoutMetrics CreateRenderLayoutMetrics(const RECT& client)
 {
+    const auto sceneMetrics = CurrentSceneMetrics(client);
     RenderLayoutMetrics metrics = {};
-    metrics.tileSize = TileSize();
-    metrics.gap = TileGap();
-    metrics.left = IsSpotlightMode() ? SpotlightContentInset : 44;
+    metrics.tileSize = sceneMetrics.tileSizePx;
+    metrics.gap = sceneMetrics.gapPx;
+    metrics.left = sceneMetrics.contentLeftPx;
     metrics.right = client.right - metrics.left;
     metrics.columns = CalculateColumnCount(client);
-    metrics.initialY = 114 - g_scrollOffset;
-    metrics.contentClip = ContentClipRect(client);
+    metrics.initialY = sceneMetrics.initialContentTopPx - g_scrollOffset;
+    metrics.contentClip = WinMetricsRect(sceneMetrics.contentClip);
     metrics.groupByRegion = SearchCommittedText().empty();
     return metrics;
 }
@@ -6622,26 +7100,31 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
         const RECT bounds = WinRect(region.viewportBounds);
         if (IsRegionSelected(region.regionId))
         {
-            RECT selectedRect = { bounds.left, bounds.top - 4, bounds.right, bounds.top + 32 };
-            DrawRoundedRectDirect(target, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10.0f);
+            RECT selectedRect = { bounds.left, bounds.top - ScaleDip(4), bounds.right, bounds.top + ScaleDip(32) };
+            DrawRoundedRectDirect(
+                target,
+                selectedRect,
+                g_adaptivePolicy.solidSurface ? WindowsColor(g_adaptivePolicy.focus) : RGB(30, 66, 96),
+                g_adaptivePolicy.solidSurface ? WindowsColor(g_adaptivePolicy.boundary) : RGB(118, 178, 238),
+                static_cast<float>(ScaleDip(10)));
         }
         if (!baseLayerOnly)
         {
-            RECT headerRect = { bounds.left + 8, bounds.top, bounds.right, bounds.top + 28 };
-            DrawTextDirect(target, g_headerTextFormat, RegionName(region.regionId), headerRect, RGB(220, 232, 248), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
+            RECT headerRect = { bounds.left + ScaleDip(8), bounds.top, bounds.right, bounds.bottom };
+            DrawTextDirect(target, g_headerTextFormat, RegionName(region.regionId), headerRect, g_adaptivePolicy.solidSurface ? WindowsColor(IsRegionSelected(region.regionId) ? g_adaptivePolicy.focusText : g_adaptivePolicy.text) : RGB(220, 232, 248), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
         }
         g_regionHits.push_back({ bounds, bounds, region.regionId });
     }
     if (scene.items.empty() && scene.regions.empty() && !baseLayerOnly)
     {
-        RECT emptyRect = { metrics.left, metrics.initialY + 60, metrics.right, metrics.initialY + 120 };
+        RECT emptyRect = { metrics.left, metrics.initialY + ScaleDip(60), metrics.right, metrics.initialY + ScaleDip(120) };
         const bool initialSpotlight = IsSpotlightMode() && SearchCommittedText().empty();
         DrawTextDirect(
             target,
             g_headerTextFormat,
             initialSpotlight ? L"Type to search" : L"No matching apps",
             emptyRect,
-            initialSpotlight ? RGB(138, 164, 190) : RGB(210, 220, 235),
+            g_adaptivePolicy.solidSurface ? WindowsColor(g_adaptivePolicy.text) : (initialSpotlight ? RGB(138, 164, 190) : RGB(210, 220, 235)),
             DWRITE_TEXT_ALIGNMENT_CENTER,
             DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
             DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -6668,23 +7151,29 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
                 QueueItemIcon(item);
                 if (item.icon)
                 {
-                    const int icon = g_settings.iconSize;
+                    const int icon = IconSizePx();
                     const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
-                    const int iconY = visualTileRect.top + 14;
+                    const int iconY = visualTileRect.top + ScaleDip(14);
                     pendingIcons.push_back({ item.icon, iconX, iconY, icon, DragIconAlphaForItem(item) });
                 }
-                RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
-                const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
+                RECT labelRect = { visualTileRect.left + ScaleDip(8), visualTileRect.top + IconSizePx() + ScaleDip(24), visualTileRect.right - ScaleDip(8), visualTileRect.bottom - ScaleDip(8) };
+                const bool emphasized = visualState == TileVisualState::KeyboardFocus
+                    || visualState == TileVisualState::Selected
+                    || visualState == TileVisualState::MultiSelected
+                    || visualState == TileVisualState::Pressed;
+                const COLORREF labelColor = g_adaptivePolicy.solidSurface
+                    ? WindowsColor(emphasized ? g_adaptivePolicy.focusText : g_adaptivePolicy.text)
+                    : (IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252));
                 DrawTextDirect(target, g_tileTextFormat, item.displayName, labelRect, labelColor, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP);
                 if (g_searchHistory.Get(item.stableId).favorite)
                 {
-                    RECT favoriteRect = { visualTileRect.right - 30, visualTileRect.top + 6, visualTileRect.right - 8, visualTileRect.top + 28 };
+                    RECT favoriteRect = { visualTileRect.right - ScaleDip(30), visualTileRect.top + ScaleDip(6), visualTileRect.right - ScaleDip(8), visualTileRect.top + ScaleDip(28) };
                     DrawTextDirect(target, g_iconTextFormat, L"\xE735", favoriteRect, RGB(255, 210, 92), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
                 }
             }
             g_hits.push_back({ visualTileRect, slot.filteredIndex });
         }
-        g_contentHeight = std::max(g_contentHeight, static_cast<int>(visualTileRect.bottom) + g_scrollOffset + metrics.gap + 44);
+        g_contentHeight = std::max(g_contentHeight, static_cast<int>(visualTileRect.bottom) + g_scrollOffset + metrics.gap + ScaleDip(44));
     }
 
     target->PopAxisAlignedClip();
@@ -6715,9 +7204,9 @@ void PaintContent(HDC dc, const RECT& client)
     const bool baseLayerOnly = IsSpotlightBaseLayerPass();
     RenderFrameGdi(dc, client);
 
-    HFONT tileFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    HFONT headerFont = CreateFontW(18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    HFONT iconFont = CreateFontW(17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe Fluent Icons");
+    HFONT tileFont = CreateFontW(ScaleTextDip(15), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HFONT headerFont = CreateFontW(ScaleTextDip(18), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HFONT iconFont = CreateFontW(ScaleTextDip(17), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe Fluent Icons");
 
     const int savedDc = SaveDC(dc);
     HRGN contentClip = CreateRectRgn(metrics.contentClip.left, metrics.contentClip.top, metrics.contentClip.right, metrics.contentClip.bottom);
@@ -6731,26 +7220,31 @@ void PaintContent(HDC dc, const RECT& client)
         const RECT bounds = WinRect(region.viewportBounds);
         if (IsRegionSelected(region.regionId))
         {
-            RECT selectedRect = { bounds.left, bounds.top - 4, bounds.right, bounds.top + 32 };
-            DrawRoundedRect(dc, selectedRect, RGB(30, 66, 96), RGB(118, 178, 238), 10);
+            RECT selectedRect = { bounds.left, bounds.top - ScaleDip(4), bounds.right, bounds.top + ScaleDip(32) };
+            DrawRoundedRect(
+                dc,
+                selectedRect,
+                g_adaptivePolicy.solidSurface ? WindowsColor(g_adaptivePolicy.focus) : RGB(30, 66, 96),
+                g_adaptivePolicy.solidSurface ? WindowsColor(g_adaptivePolicy.boundary) : RGB(118, 178, 238),
+                ScaleDip(10));
         }
         if (!baseLayerOnly)
         {
-            RECT headerRect = { bounds.left + 8, bounds.top, bounds.right, bounds.top + 28 };
-            DrawTextClipped(dc, RegionName(region.regionId), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(220, 232, 248));
+            RECT headerRect = { bounds.left + ScaleDip(8), bounds.top, bounds.right, bounds.bottom };
+            DrawTextClipped(dc, RegionName(region.regionId), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_adaptivePolicy.solidSurface ? WindowsColor(IsRegionSelected(region.regionId) ? g_adaptivePolicy.focusText : g_adaptivePolicy.text) : RGB(220, 232, 248));
         }
         g_regionHits.push_back({ bounds, bounds, region.regionId });
     }
     if (scene.items.empty() && scene.regions.empty() && !baseLayerOnly)
     {
-        RECT emptyRect = { metrics.left, metrics.initialY + 60, metrics.right, metrics.initialY + 120 };
+        RECT emptyRect = { metrics.left, metrics.initialY + ScaleDip(60), metrics.right, metrics.initialY + ScaleDip(120) };
         const bool initialSpotlight = IsSpotlightMode() && SearchCommittedText().empty();
         DrawTextClipped(
             dc,
             initialSpotlight ? L"Type to search" : L"No matching apps",
             emptyRect,
             DT_CENTER | DT_SINGLELINE | DT_VCENTER,
-            initialSpotlight ? RGB(138, 164, 190) : RGB(210, 220, 235));
+            g_adaptivePolicy.solidSurface ? WindowsColor(g_adaptivePolicy.text) : (initialSpotlight ? RGB(138, 164, 190) : RGB(210, 220, 235)));
     }
     for (const auto& slot : scene.items)
     {
@@ -6772,25 +7266,31 @@ void PaintContent(HDC dc, const RECT& client)
                 QueueItemIcon(item);
                 if (item.icon)
                 {
-                    const int icon = g_settings.iconSize;
+                    const int icon = IconSizePx();
                     const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
-                    const int iconY = visualTileRect.top + 14;
+                    const int iconY = visualTileRect.top + ScaleDip(14);
                     DrawFittedIcon(dc, iconX, iconY, item.icon, icon, DragIconAlphaForItem(item));
                 }
                 SelectObject(dc, tileFont);
-                RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
-                const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
+                RECT labelRect = { visualTileRect.left + ScaleDip(8), visualTileRect.top + IconSizePx() + ScaleDip(24), visualTileRect.right - ScaleDip(8), visualTileRect.bottom - ScaleDip(8) };
+                const bool emphasized = visualState == TileVisualState::KeyboardFocus
+                    || visualState == TileVisualState::Selected
+                    || visualState == TileVisualState::MultiSelected
+                    || visualState == TileVisualState::Pressed;
+                const COLORREF labelColor = g_adaptivePolicy.solidSurface
+                    ? WindowsColor(emphasized ? g_adaptivePolicy.focusText : g_adaptivePolicy.text)
+                    : (IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252));
                 DrawTextClipped(dc, item.displayName, labelRect, DT_CENTER | DT_WORDBREAK | DT_END_ELLIPSIS, labelColor);
                 if (g_searchHistory.Get(item.stableId).favorite)
                 {
-                    RECT favoriteRect = { visualTileRect.right - 30, visualTileRect.top + 6, visualTileRect.right - 8, visualTileRect.top + 28 };
+                    RECT favoriteRect = { visualTileRect.right - ScaleDip(30), visualTileRect.top + ScaleDip(6), visualTileRect.right - ScaleDip(8), visualTileRect.top + ScaleDip(28) };
                     SelectObject(dc, iconFont);
                     DrawTextClipped(dc, L"\xE735", favoriteRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, RGB(255, 210, 92));
                 }
             }
             g_hits.push_back({ visualTileRect, slot.filteredIndex });
         }
-        g_contentHeight = std::max(g_contentHeight, static_cast<int>(visualTileRect.bottom) + g_scrollOffset + metrics.gap + 44);
+        g_contentHeight = std::max(g_contentHeight, static_cast<int>(visualTileRect.bottom) + g_scrollOffset + metrics.gap + ScaleDip(44));
     }
 
     if (!baseLayerOnly)
@@ -6933,7 +7433,7 @@ void ApplySpotlightPerPixelAlpha(DWORD* basePixels, DWORD* fullPixels, int width
         for (int x = 0; x < width; ++x)
         {
             const size_t index = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
-            const double coverage = RoundedRectCoverage(x, y, client, SpotlightCornerRadius);
+            const double coverage = RoundedRectCoverage(x, y, client, ScaleDip(SpotlightCornerRadius));
             if (coverage <= 0.0)
             {
                 fullPixels[index] = 0;
@@ -7192,7 +7692,7 @@ HFONT UiFont()
 {
     if (!g_uiFont)
     {
-        g_uiFont = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        g_uiFont = CreateFontW(-llp::geometry::ScaleTextDip(16, static_cast<int>(g_settingsDpi), g_adaptivePolicy.textScalePercent), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     }
     return g_uiFont;
 }
@@ -7371,6 +7871,100 @@ Settings ReadSettingsWindowCandidate(HWND hwnd)
     candidate.startWithWindows = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::StartWithWindows), BM_GETCHECK, 0, 0) == BST_CHECKED;
     candidate.resetSearchOnOpen = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ResetSearchOnOpen), BM_GETCHECK, 0, 0) == BST_CHECKED;
     return candidate;
+}
+
+void LayoutSettingsWindow(HWND hwnd)
+{
+    RECT client = {};
+    GetClientRect(hwnd, &client);
+    llp::geometry::SettingsMetricsRequest request;
+    request.clientWidthPx = static_cast<int>(client.right - client.left);
+    request.dpi = static_cast<int>(g_settingsDpi);
+    request.textScalePercent = g_adaptivePolicy.textScalePercent;
+    const auto metrics = llp::geometry::BuildSettingsMetrics(request);
+    const int dpi = static_cast<int>(g_settingsDpi);
+    const auto dip = [&](int value) { return llp::geometry::ScaleDip(value, dpi); };
+    const auto textDip = [&](int value) { return llp::geometry::ScaleTextDip(value, dpi, g_adaptivePolicy.textScalePercent); };
+    const auto move = [&](SettingsControlId id, int x, int y, int width, int height) {
+        HWND control = GetDlgItem(hwnd, ControlId(id));
+        if (!control) return;
+        MoveWindow(control, x, y - g_settingsScrollOffset, std::max(1, width), std::max(1, height), TRUE);
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(UiFont()), TRUE);
+    };
+    const int labelHeight = std::max(metrics.controlHeightPx, textDip(20) + dip(4));
+    const int comboHeight = std::max(dip(140), metrics.controlHeightPx * 5);
+    int y = dip(24);
+
+    move(SettingsControlId::FolderLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
+    move(SettingsControlId::LaunchpadFolder, metrics.inputLeftPx, y, metrics.inputWidthPx, metrics.controlHeightPx);
+    y += metrics.rowHeightPx;
+    move(SettingsControlId::HotkeyLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
+    move(SettingsControlId::Hotkey, metrics.inputLeftPx, y, metrics.inputWidthPx, metrics.controlHeightPx);
+    y += metrics.rowHeightPx;
+    move(SettingsControlId::IconSizeLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
+    move(SettingsControlId::IconSize, metrics.inputLeftPx, y, metrics.inputWidthPx, comboHeight);
+    y += metrics.rowHeightPx;
+    move(SettingsControlId::DisplayModeLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
+    move(SettingsControlId::DisplayMode, metrics.inputLeftPx, y, metrics.inputWidthPx, comboHeight);
+    y += metrics.rowHeightPx;
+    move(SettingsControlId::LanguageLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
+    move(SettingsControlId::Language, metrics.inputLeftPx, y, metrics.inputWidthPx, comboHeight);
+    y += metrics.rowHeightPx;
+
+    move(SettingsControlId::SpotlightSizeLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
+    const int numericGap = dip(8);
+    const int separatorWidth = dip(24);
+    const int numericWidth = std::max(dip(52), (metrics.inputWidthPx - separatorWidth - numericGap * 2) / 2);
+    move(SettingsControlId::SpotlightWidth, metrics.inputLeftPx, y, numericWidth, metrics.controlHeightPx);
+    move(SettingsControlId::SpotlightSeparator, metrics.inputLeftPx + numericWidth + numericGap, y, separatorWidth, labelHeight);
+    move(SettingsControlId::SpotlightHeight, metrics.inputLeftPx + numericWidth + numericGap * 2 + separatorWidth, y, numericWidth, metrics.controlHeightPx);
+    y += metrics.rowHeightPx;
+    move(SettingsControlId::AppSpacingLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
+    move(SettingsControlId::AppSpacing, metrics.inputLeftPx, y, std::min(dip(96), metrics.inputWidthPx), metrics.controlHeightPx);
+    y += metrics.rowHeightPx;
+    move(SettingsControlId::WheelSensitivityLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
+    move(SettingsControlId::WheelSensitivity, metrics.inputLeftPx, y, std::min(dip(96), metrics.inputWidthPx), metrics.controlHeightPx);
+    y += metrics.rowHeightPx;
+
+    move(SettingsControlId::StartWithWindows, metrics.sideInsetPx, y, metrics.fullWidthControlPx, metrics.checkboxHeightPx);
+    y += metrics.checkboxHeightPx + dip(8);
+    move(SettingsControlId::ResetSearchOnOpen, metrics.sideInsetPx, y, metrics.fullWidthControlPx, metrics.checkboxHeightPx);
+    y += metrics.checkboxHeightPx + dip(10);
+    move(SettingsControlId::DiagnosticsLabel, metrics.sideInsetPx, y, metrics.fullWidthControlPx, labelHeight);
+    y += labelHeight;
+    const int diagnosticsHeight = std::max(dip(168), textDip(120));
+    move(SettingsControlId::DiagnosticsSummary, metrics.sideInsetPx, y, metrics.fullWidthControlPx, diagnosticsHeight);
+    y += diagnosticsHeight + dip(16);
+    const int buttonGap = dip(10);
+    const int buttonWidth = std::max(dip(72), (metrics.fullWidthControlPx - buttonGap * 2) / 3);
+    move(SettingsControlId::Save, metrics.sideInsetPx, y, buttonWidth, metrics.buttonHeightPx);
+    move(SettingsControlId::Apply, metrics.sideInsetPx + buttonWidth + buttonGap, y, buttonWidth, metrics.buttonHeightPx);
+    move(SettingsControlId::Cancel, metrics.sideInsetPx + (buttonWidth + buttonGap) * 2, y, buttonWidth, metrics.buttonHeightPx);
+    y += metrics.buttonHeightPx + dip(24);
+    g_settingsContentHeight = y;
+
+    const int page = std::max(1L, client.bottom - client.top);
+    const int maximumOffset = std::max(0, g_settingsContentHeight - page);
+    g_settingsScrollOffset = std::clamp(g_settingsScrollOffset, 0, maximumOffset);
+    SCROLLINFO info = {};
+    info.cbSize = sizeof(info);
+    info.fMask = SIF_PAGE | SIF_POS | SIF_RANGE;
+    info.nMin = 0;
+    info.nMax = std::max(0, g_settingsContentHeight - 1);
+    info.nPage = static_cast<UINT>(page);
+    info.nPos = g_settingsScrollOffset;
+    SetScrollInfo(hwnd, SB_VERT, &info, TRUE);
+}
+
+void ScrollSettingsWindow(HWND hwnd, int requestedOffset)
+{
+    RECT client = {};
+    GetClientRect(hwnd, &client);
+    const int maximumOffset = std::max(0, g_settingsContentHeight - static_cast<int>(client.bottom - client.top));
+    const int next = std::clamp(requestedOffset, 0, maximumOffset);
+    if (next == g_settingsScrollOffset) return;
+    g_settingsScrollOffset = next;
+    LayoutSettingsWindow(hwnd);
 }
 
 struct StartupRegistrationSnapshot
@@ -7655,7 +8249,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         y += 38;
         CreateSettingsLabel(hwnd, SettingsControlId::SpotlightSizeLabel, labelX, y);
         CreateSettingsEdit(hwnd, SettingsControlId::SpotlightWidth, inputX, y, 96);
-        ApplyControlFont(CreateWindowW(L"STATIC", L"x", WS_CHILD | WS_VISIBLE | SS_CENTER, inputX + 106, y + 5, 24, 24, hwnd, nullptr, g_instance, nullptr));
+        ApplyControlFont(CreateWindowW(L"STATIC", L"x", WS_CHILD | WS_VISIBLE | SS_CENTER, inputX + 106, y + 5, 24, 24, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::SpotlightSeparator)), g_instance, nullptr));
         CreateSettingsEdit(hwnd, SettingsControlId::SpotlightHeight, inputX + 140, y, 96);
         y += 38;
         CreateSettingsLabel(hwnd, SettingsControlId::AppSpacingLabel, labelX, y);
@@ -7688,8 +8282,75 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, inputX + 146, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Apply)), g_instance, nullptr));
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, inputX + 244, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Cancel)), g_instance, nullptr));
         PopulateSettingsWindow(hwnd);
+        LayoutSettingsWindow(hwnd);
         return 0;
     }
+    case WM_DPICHANGED:
+    {
+        const UINT nextDpi = LOWORD(wParam);
+        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+        if (nextDpi > 0 && nextDpi != g_settingsDpi)
+        {
+            g_settingsDpi = nextDpi;
+            if (g_uiFont)
+            {
+                DeleteObject(g_uiFont);
+                g_uiFont = nullptr;
+            }
+        }
+        if (suggested)
+        {
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, suggested->right - suggested->left, suggested->bottom - suggested->top, SWP_NOACTIVATE | SWP_NOZORDER);
+        }
+        LayoutSettingsWindow(hwnd);
+        return 0;
+    }
+    case WM_SIZE:
+        LayoutSettingsWindow(hwnd);
+        return 0;
+    case WM_VSCROLL:
+    {
+        int next = g_settingsScrollOffset;
+        const int line = std::max(
+            llp::geometry::ScaleDip(24, static_cast<int>(g_settingsDpi)),
+            llp::geometry::ScaleTextDip(20, static_cast<int>(g_settingsDpi), g_adaptivePolicy.textScalePercent));
+        RECT client = {};
+        GetClientRect(hwnd, &client);
+        switch (LOWORD(wParam))
+        {
+        case SB_LINEUP: next -= line; break;
+        case SB_LINEDOWN: next += line; break;
+        case SB_PAGEUP: next -= client.bottom - client.top; break;
+        case SB_PAGEDOWN: next += client.bottom - client.top; break;
+        case SB_THUMBPOSITION:
+        case SB_THUMBTRACK:
+        {
+            SCROLLINFO info = {};
+            info.cbSize = sizeof(info);
+            info.fMask = SIF_TRACKPOS;
+            GetScrollInfo(hwnd, SB_VERT, &info);
+            next = info.nTrackPos;
+            break;
+        }
+        case SB_TOP: next = 0; break;
+        case SB_BOTTOM: next = g_settingsContentHeight; break;
+        default: return 0;
+        }
+        ScrollSettingsWindow(hwnd, next);
+        return 0;
+    }
+    case WM_MOUSEWHEEL:
+        ScrollSettingsWindow(hwnd, g_settingsScrollOffset - GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA * std::max(
+            llp::geometry::ScaleDip(48, static_cast<int>(g_settingsDpi)),
+            llp::geometry::ScaleTextDip(36, static_cast<int>(g_settingsDpi), g_adaptivePolicy.textScalePercent)));
+        return 0;
+    case WM_THEMECHANGED:
+    case WM_SYSCOLORCHANGE:
+    case WM_SETTINGCHANGE:
+        RefreshAdaptiveEnvironment();
+        LayoutSettingsWindow(hwnd);
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
     case WM_COMMAND:
         if (LOWORD(wParam) == ControlId(SettingsControlId::Language) && HIWORD(wParam) == CBN_SELCHANGE)
         {
@@ -7745,15 +8406,29 @@ void ShowSettingsWindow()
         registered = true;
     }
 
+    g_settingsDpi = g_windowDpi;
+    g_settingsScrollOffset = 0;
+    RECT settingsWork = {};
+    MONITORINFO settingsMonitorInfo = {};
+    settingsMonitorInfo.cbSize = sizeof(settingsMonitorInfo);
+    const HMONITOR settingsMonitor = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+    if (settingsMonitor && GetMonitorInfoW(settingsMonitor, &settingsMonitorInfo)) settingsWork = settingsMonitorInfo.rcWork;
+    else SystemParametersInfoW(SPI_GETWORKAREA, 0, &settingsWork, 0);
+    const int settingsWidth = std::min(
+        llp::geometry::ScaleDip(560, static_cast<int>(g_settingsDpi)),
+        static_cast<int>(settingsWork.right - settingsWork.left));
+    const int settingsHeight = std::min(
+        llp::geometry::ScaleDip(730, static_cast<int>(g_settingsDpi)),
+        static_cast<int>(settingsWork.bottom - settingsWork.top));
     g_settingsHwnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME | (g_diagnosticsUiMode ? 0 : WS_EX_TOOLWINDOW),
         SettingsWindowClassName,
         Text(L"LightLaunchpad Settings", L"LightLaunchpad 设置"),
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VSCROLL | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        560,
-        730,
+        settingsWidth,
+        settingsHeight,
         g_diagnosticsUiMode ? nullptr : g_hwnd,
         nullptr,
         g_instance,
@@ -7772,7 +8447,92 @@ struct TextInputState
     std::wstring value;
     bool accepted = false;
     HWND edit = nullptr;
+    UINT dpi = 96;
+    int textScalePercent = 100;
+    HFONT font = nullptr;
+    llp::geometry::TextInputMetrics metrics;
 };
+
+SIZE TextInputWindowSize(const llp::geometry::TextInputMetrics& metrics, UINT dpi)
+{
+    constexpr DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+    constexpr DWORD extendedStyle = WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW;
+    RECT bounds = { 0, 0, metrics.clientWidthPx, metrics.clientHeightPx };
+    using AdjustWindowRectExForDpiFn = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    const auto adjustForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi"));
+    if (adjustForDpi) adjustForDpi(&bounds, style, FALSE, extendedStyle, dpi);
+    else AdjustWindowRectEx(&bounds, style, FALSE, extendedStyle);
+    return { bounds.right - bounds.left, bounds.bottom - bounds.top };
+}
+
+void ApplyTextInputLayout(HWND hwnd, TextInputState& state)
+{
+    const auto& metrics = state.metrics;
+    const auto move = [&](int id, const llp::geometry::Rect& bounds) {
+        if (HWND control = GetDlgItem(hwnd, id))
+        {
+            MoveWindow(
+                control,
+                bounds.left,
+                bounds.top,
+                std::max(1, bounds.right - bounds.left),
+                std::max(1, bounds.bottom - bounds.top),
+                TRUE);
+        }
+    };
+    move(2, metrics.label);
+    move(1, metrics.edit);
+    move(IDOK, metrics.ok);
+    move(IDCANCEL, metrics.cancel);
+
+    HFONT nextFont = CreateFontW(
+        -metrics.fontHeightPx,
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH,
+        L"Segoe UI");
+    if (nextFont)
+    {
+        for (const int id : { 2, 1, IDOK, IDCANCEL })
+        {
+            if (HWND control = GetDlgItem(hwnd, id))
+            {
+                SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(nextFont), TRUE);
+                SetWindowTheme(control, L"Explorer", nullptr);
+            }
+        }
+        if (state.font) DeleteObject(state.font);
+        state.font = nextFont;
+    }
+}
+
+void ResizeTextInputWindow(HWND hwnd, TextInputState& state, const RECT* suggested)
+{
+    const SIZE windowSize = TextInputWindowSize(state.metrics, state.dpi);
+    RECT current = {};
+    GetWindowRect(hwnd, &current);
+    const int x = suggested ? suggested->left : current.left;
+    const int y = suggested ? suggested->top : current.top;
+    SetWindowPos(
+        hwnd,
+        nullptr,
+        x,
+        y,
+        windowSize.cx,
+        windowSize.cy,
+        SWP_NOACTIVATE | SWP_NOZORDER);
+    ApplyTextInputLayout(hwnd, state);
+}
 
 LRESULT CALLBACK TextInputWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -7784,14 +8544,41 @@ LRESULT CALLBACK TextInputWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         state = reinterpret_cast<TextInputState*>(reinterpret_cast<LPCREATESTRUCTW>(lParam)->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
         SetWindowTextW(hwnd, state->title.c_str());
-        ApplyControlFont(CreateWindowW(L"STATIC", state->label.c_str(), WS_CHILD | WS_VISIBLE, 18, 18, 340, 24, hwnd, nullptr, g_instance, nullptr));
-        state->edit = ApplyControlFont(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->value.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 18, 48, 340, 26, hwnd, reinterpret_cast<HMENU>(1), g_instance, nullptr));
-        ApplyControlFont(CreateWindowW(L"BUTTON", Text(L"OK", L"确定"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 166, 90, 88, 30, hwnd, reinterpret_cast<HMENU>(IDOK), g_instance, nullptr));
-        ApplyControlFont(CreateWindowW(L"BUTTON", Text(L"Cancel", L"取消"), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 270, 90, 88, 30, hwnd, reinterpret_cast<HMENU>(IDCANCEL), g_instance, nullptr));
+        CreateWindowW(L"STATIC", state->label.c_str(), WS_CHILD | WS_VISIBLE, 0, 0, 1, 1, hwnd, reinterpret_cast<HMENU>(2), g_instance, nullptr);
+        state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->value.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 1, 1, hwnd, reinterpret_cast<HMENU>(1), g_instance, nullptr);
+        CreateWindowW(L"BUTTON", Text(L"OK", L"确定"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 0, 0, 1, 1, hwnd, reinterpret_cast<HMENU>(IDOK), g_instance, nullptr);
+        CreateWindowW(L"BUTTON", Text(L"Cancel", L"取消"), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 1, 1, hwnd, reinterpret_cast<HMENU>(IDCANCEL), g_instance, nullptr);
+        ApplyTextInputLayout(hwnd, *state);
         SendMessageW(state->edit, EM_SETSEL, 0, -1);
         SetFocus(state->edit);
         return 0;
     }
+    case WM_DPICHANGED:
+        if (state)
+        {
+            const UINT nextDpi = LOWORD(wParam);
+            if (nextDpi > 0) state->dpi = nextDpi;
+            state->metrics = llp::geometry::BuildTextInputMetrics({
+                static_cast<int>(state->dpi),
+                state->textScalePercent
+            });
+            ResizeTextInputWindow(hwnd, *state, reinterpret_cast<const RECT*>(lParam));
+            return 0;
+        }
+        break;
+    case WM_SETTINGCHANGE:
+        if (state)
+        {
+            RefreshAdaptiveEnvironment();
+            state->textScalePercent = g_adaptivePolicy.textScalePercent;
+            state->metrics = llp::geometry::BuildTextInputMetrics({
+                static_cast<int>(state->dpi),
+                state->textScalePercent
+            });
+            ResizeTextInputWindow(hwnd, *state, nullptr);
+            return 0;
+        }
+        break;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK && state)
         {
@@ -7808,6 +8595,13 @@ LRESULT CALLBACK TextInputWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         break;
     case WM_CLOSE:
         DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (state && state->font)
+        {
+            DeleteObject(state->font);
+            state->font = nullptr;
+        }
         return 0;
     }
     return DefWindowProcW(hwnd, message, wParam, lParam);
@@ -7829,7 +8623,17 @@ bool ShowTextInputDialog(const std::wstring& title, const std::wstring& label, c
         registered = true;
     }
 
-    TextInputState state{ title, label, initialValue };
+    TextInputState state;
+    state.title = title;
+    state.label = label;
+    state.value = initialValue;
+    state.dpi = g_windowDpi;
+    state.textScalePercent = g_adaptivePolicy.textScalePercent;
+    state.metrics = llp::geometry::BuildTextInputMetrics({
+        static_cast<int>(state.dpi),
+        state.textScalePercent
+    });
+    const SIZE windowSize = TextInputWindowSize(state.metrics, state.dpi);
     ++g_modalDialogDepth;
     HWND dialog = CreateWindowExW(
         WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW,
@@ -7838,8 +8642,8 @@ bool ShowTextInputDialog(const std::wstring& title, const std::wstring& label, c
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        394,
-        176,
+        windowSize.cx,
+        windowSize.cy,
         g_hwnd,
         nullptr,
         g_instance,
@@ -8279,7 +9083,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             const ULONGLONG started = GetTickCount64();
             ToggleNativeUi();
-            if (g_launchpadFlowProbe.active && IsWindowVisible(hwnd)) g_launchpadFlowProbe.hotkeyMessages++;
+            if (g_launchpadFlowProbe.active && IsWindowVisible(hwnd))
+            {
+                g_launchpadFlowProbe.hotkeyMessages++;
+                RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+                WriteLaunchpadFlowReadyState();
+            }
             if (g_spotlightFlowProbe.active && IsWindowVisible(hwnd))
             {
                 g_spotlightFlowProbe.hotkeyMessages++;
@@ -8333,8 +9142,75 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WmShellBrokerResult:
         HandleShellBrokerResult(lParam);
         return 0;
+    case WmAdaptiveSnapshot:
+        if (g_spotlightFlowProbe.active)
+        {
+            if (wParam == 1)
+            {
+                SetOrganizationFeedback(L"Adaptive status announced", false, true, 8000);
+            }
+            if (IsSpotlightMode()) PaintSpotlightLayeredWindow(true);
+            else RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            WriteSpotlightFlowReadyState();
+        }
+        return 0;
     case WM_PAINT:
         PaintWindow(hwnd);
+        return 0;
+    case WM_DPICHANGED:
+    {
+        const UINT nextDpi = LOWORD(wParam);
+        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+        if (g_testDpiOverride == 0 && nextDpi > 0 && nextDpi != g_windowDpi)
+        {
+            g_windowDpi = nextDpi;
+            ResetScaleSensitiveResources();
+        }
+        if (suggested)
+        {
+            SetWindowPos(
+                hwnd,
+                nullptr,
+                suggested->left,
+                suggested->top,
+                suggested->right - suggested->left,
+                suggested->bottom - suggested->top,
+                SWP_NOACTIVATE | SWP_NOZORDER);
+        }
+        ApplySpotlightWindowRegion(
+            suggested ? suggested->right - suggested->left : 1,
+            suggested ? suggested->bottom - suggested->top : 1);
+        ApplyGlassBackdrop();
+        if (IsSpotlightMode() && !g_adaptivePolicy.solidSurface && IsWindowVisible(hwnd))
+        {
+            RECT windowRect = {};
+            GetWindowRect(hwnd, &windowRect);
+            CaptureSpotlightBackdrop(windowRect);
+        }
+        ClampScroll();
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
+    }
+    case WM_DISPLAYCHANGE:
+        if (IsWindowVisible(hwnd))
+        {
+            PositionWindow();
+            if (IsSpotlightMode() && !g_adaptivePolicy.solidSurface)
+            {
+                RECT windowRect = {};
+                GetWindowRect(hwnd, &windowRect);
+                CaptureSpotlightBackdrop(windowRect);
+            }
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+    case WM_THEMECHANGED:
+    case WM_SYSCOLORCHANGE:
+    case WM_SETTINGCHANGE:
+        RefreshAdaptiveEnvironment();
+        ApplyGlassBackdrop();
+        if (IsWindowVisible(hwnd)) PositionWindow();
+        InvalidateRect(hwnd, nullptr, TRUE);
         return 0;
     case WM_TIMER:
         if (wParam == OrganizationFeedbackTimerId)
@@ -9005,6 +9881,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
 {
+    using SetProcessDpiAwarenessContextFn = BOOL(WINAPI*)(HANDLE);
+    const auto setProcessDpiAwarenessContext = reinterpret_cast<SetProcessDpiAwarenessContextFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"));
+    if (setProcessDpiAwarenessContext)
+    {
+        setProcessDpiAwarenessContext(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4)));
+    }
     g_processStartTick = GetTickCount64();
     g_instance = instance;
     g_startupLogPath = CommandLineValue(L"--diagnostics-log-file");
@@ -9029,6 +9912,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     g_shellImportProbe.destination = CommandLineValue(L"--shell-import-destination");
     g_shellImportProbe.repeat = CommandLineIntValue(L"--shell-import-repeat", 2, 2, 2);
     g_textInputProbePath = CommandLineValue(L"--text-input-probe-file");
+    g_textInputProbeReadyPath = CommandLineValue(L"--text-input-ready-file");
     const bool textInputProbeActive = !g_textInputProbePath.empty();
     g_spotlightFlowProbe.outputPath = CommandLineValue(L"--spotlight-flow-probe-file");
     g_spotlightFlowProbe.readyPath = CommandLineValue(L"--spotlight-flow-ready-file");
@@ -9107,6 +9991,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     AppendStartupLog(L"singleton-primary", true, LLP_SINGLETON_NAME_WIDE);
 
     LoadSettings();
+    RefreshAdaptiveEnvironment();
+    ApplyAdaptiveTestOverrides();
     g_settingsLoadedTick = GetTickCount64();
     AppendStartupLog(L"settings-loaded", true, g_settings.launchpadFolder);
 
@@ -9147,6 +10033,14 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         CloseHandle(mutex);
         if (comInitialized) CoUninitialize();
         return 1;
+    }
+    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+    const auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    if (getDpiForWindow && g_testDpiOverride == 0)
+    {
+        const UINT initialDpi = getDpiForWindow(g_hwnd);
+        if (initialDpi > 0) g_windowDpi = initialDpi;
     }
     AppendStartupLog(L"window-created", true, LLP_WINDOW_CLASS_NAME_WIDE);
     llp::accessibility::Callbacks accessibilityCallbacks;
@@ -9228,6 +10122,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     {
         ShowNativeUi();
         g_textInputProbeWindowWasVisible = g_hwnd && IsWindowVisible(g_hwnd) != FALSE;
+        if (!g_textInputProbeReadyPath.empty())
+        {
+            WriteFileUtf8(g_textInputProbeReadyPath, BuildTextInputReadyJson());
+        }
     }
 
     MSG msg = {};

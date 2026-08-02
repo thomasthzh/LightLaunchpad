@@ -491,4 +491,26 @@ void SearchAccessibility::NotifyFocusChanged() const
 {
     if (provider_) UiaRaiseAutomationEvent(static_cast<IRawElementProviderSimple*>(provider_), UIA_AutomationFocusChangedEventId);
 }
+
+void SearchAccessibility::NotifyStatus(const std::wstring& text, bool warning) const
+{
+    if (!provider_ || text.empty()) return;
+    BSTR displayText = SysAllocStringLen(text.data(), static_cast<UINT>(text.size()));
+    BSTR activityId = SysAllocString(L"LightLaunchpad.Organization");
+    if (!displayText || !activityId)
+    {
+        SysFreeString(activityId);
+        SysFreeString(displayText);
+        return;
+    }
+    UiaRaiseNotificationEvent(
+        static_cast<IRawElementProviderSimple*>(provider_),
+        warning ? NotificationKind_ActionAborted : NotificationKind_ActionCompleted,
+        NotificationProcessing_ImportantMostRecent,
+        displayText,
+        activityId);
+    SysFreeString(activityId);
+    SysFreeString(displayText);
+    if (hwnd_) NotifyWinEvent(EVENT_SYSTEM_ALERT, hwnd_, OBJID_CLIENT, CHILDID_SELF);
+}
 }

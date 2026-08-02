@@ -443,11 +443,12 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("ApplyGlassBackdrop", source);
         TestAssert.Contains("SetWindowCompositionAttribute", source);
         TestAssert.Contains("ACCENT_ENABLE_ACRYLICBLURBEHIND", source);
-        TestAssert.Contains("policy.accentState = spotlight ? ACCENT_DISABLED : ACCENT_ENABLE_ACRYLICBLURBEHIND;", source);
+        TestAssert.Contains("const bool allowSystemBackdrop = !spotlight && !g_adaptivePolicy.solidSurface;", source);
+        TestAssert.Contains("policy.accentState = allowSystemBackdrop ? ACCENT_ENABLE_ACRYLICBLURBEHIND : ACCENT_DISABLED;", source);
         TestAssert.Contains("DwmSetWindowAttribute", source);
         TestAssert.Contains("DwmEnableBlurBehindWindow", source);
-        TestAssert.Contains("blur.fEnable = spotlight ? FALSE : TRUE;", source);
-        TestAssert.Contains("const DWORD backdrop = spotlight ? DWMSBT_NONE : DWMSBT_TRANSIENTWINDOW;", source);
+        TestAssert.Contains("blur.fEnable = allowSystemBackdrop ? TRUE : FALSE;", source);
+        TestAssert.Contains("const DWORD backdrop = allowSystemBackdrop ? DWMSBT_TRANSIENTWINDOW : DWMSBT_NONE;", source);
         TestAssert.Contains("DWMWA_WINDOW_CORNER_PREFERENCE", source);
         TestAssert.Contains("DWMWA_BORDER_COLOR", source);
         TestAssert.Contains("DWMWA_COLOR_NONE", source);
