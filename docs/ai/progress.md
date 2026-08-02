@@ -2,15 +2,65 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 08:14:26 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 09:05:16 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `d7f398f`
+- HEAD: `7bb1d0a`
 - Remote main: `origin/main@33e91c2`
-- Active task: `LLP-009 - Spotlight State Machine And Keyboard Flow` (`in_progress`)
-- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`
-- Next task after verification: `LLP-010 - Launchpad Browse/Edit Separation`
-- Goal status: active in Codex; LLP-009 is the only task in progress.
+- Active task: `LLP-010 - Launchpad Browse/Edit Separation` (`in_progress`)
+- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`
+- Next task after verification: `LLP-011 - Favorites, Safe Delete, And Undo`
+- Goal status: active in Codex; LLP-010 is the only task in progress.
+
+## LLP-009 Execution Evidence
+
+Status at 2026-08-02 09:05 +08:00: complete.
+
+Changed files in scope:
+
+- `src/LightLaunchpad.NativeUi/InteractionState.{h,cpp}` - production Spotlight focus/state model for open, result publication, stable-ID preservation, safe missing-focus behavior, result navigation, focus traversal, printable input, progressive Escape, and Enter intent.
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - integrates the state model with cached SearchIndex results, keyboard/mouse handling, UIA focus, rendering, Shell launch requests, live Catalog publication, restrained empty state, and a real-EXE flow/refresh probe. Spotlight click launches directly and its selection, context, marquee, and drag paths are disabled; Launchpad behavior is otherwise retained for LLP-010.
+- `src/LightLaunchpad.NativeUi/SearchAccessibility.{h,cpp}` - reports custom search ownership rather than equating HWND focus with search focus after Down/Tab navigation.
+- `tools/build-native-ui.ps1` and clean-source fixtures in `tests/LightLaunchpad.NativeUi.Tests/{AppHost,ExecutableIdentity}.Tests.ps1` - compile and package `InteractionState` in normal and isolated builds.
+- `tests/LightLaunchpad.NativeUi.Tests/InteractionState.Tests.{cpp,ps1}` - direct production state tests for open/Enter, arrows, printable/Tab/Shift+Tab, Escape, and stable refresh without launch substitution.
+- `tests/LightLaunchpad.NativeUi.Tests/{LaunchProbeTarget.cpp,SpotlightFlowBehavior.Tests.ps1}` - isolated real NativeUi EXE, async Catalog/Shell STA, actual launch-target marker, UI Automation focus, live insertion/removal refresh, latency, and screenshot evidence.
+- `tests/LightLaunchpad.NativeUi.Tests/SearchIndex.Tests.cpp` - explicitly verifies the empty Spotlight cap of 10 within the PRD's 8-12 range, alongside disabled visibility.
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs` - keeps the historical feather-boundary assertion compatible with the explicit auxiliary-control exception; it is not used as visual or interaction authority.
+- `docs/ai/{tasks,progress}.md` - records verified completion and activates LLP-010.
+
+TDD and systematic-debugging evidence:
+
+- RED: the production test target initially could not compile because `InteractionState.h/.cpp` did not exist. GREEN covers search-only open focus, search Enter, Down/arrows, printable return, forward/reverse Tab, progressive Escape, stable-ID reorder, missing-ID no-op Enter, and explicit Down recovery.
+- The first real-EXE flow probe measured 234 ms P95 because `ShowSpotlightImmediately` synchronously forced `RedrawWindow`. Removing the synchronous redraw restored nonblocking invalidation and produced 47-63 ms P95 across fresh runs without UI-thread Sleep animation.
+- A ranking fixture initially assumed alphabetical order; the real production SearchIndex correctly ranked shorter `Flow Beta` before `Flow Alpha`. The expectation was corrected without weakening production ranking, and Right then launched the exact second result.
+- Product-design audit RED: the keyboard-focused auxiliary control was invisible because bottom content feathering blended it into the glass base. `ApplySpotlightPerPixelAlpha` now explicitly preserves the auxiliary control while retaining search/content feather boundaries; the recaptured focused state is visible and the latency budget remains green.
+- The first live-refresh probe observed an automatic open refresh rather than the intended insertion refresh. The test now waits for the open publication, establishes result focus, then performs controlled insertion and removal generations. The real EXE retained `Flow Beta` through reorder, exposed no replacement after removal, and produced no third launch on Enter.
+- The refresh fixture is a validated regular file inside a GUID-scoped temporary Launchpad; it is moved only to a validated path inside that same test root, and the root is checked for reparse points before cleanup.
+
+Fresh post-commit verification against `7bb1d0a4f8bd`:
+
+- `tests\LightLaunchpad.NativeUi.Tests\InteractionState.Tests.ps1` - 5/5 passed, including stable reorder and missing-ID no-substitution behavior.
+- `tests\LightLaunchpad.NativeUi.Tests\SpotlightFlowBehavior.Tests.ps1 -EvidenceDirectory artifacts\native-ui-llp009-postcommit\visual-evidence` - real EXE passed both canonical Alt+D launch paths, search/result/aux focus traversal, printable return, progressive Escape, settings activation, exact Shell launch targets, live Catalog insertion/removal, and unintended-launch prevention; 7 opens, 2 successful launches, input-ready samples `31,47,47,47,47,47,62` ms, P95 62 ms.
+- `tests\LightLaunchpad.NativeUi.Tests\SearchIndex.Tests.ps1` - 7/7 passed; empty visibility/cap passed, 300-item rebuild 412 microseconds and cached pinyin-query P95 97 microseconds.
+- `tests\LightLaunchpad.NativeUi.Tests\TextInput.Tests.ps1` - 7/7 passed; 2,000 production edit+undo samples measured 200 ns P95.
+- `tests\LightLaunchpad.NativeUi.Tests\TextInputBehavior.Tests.ps1` - real EXE passed UIA/selection/clipboard/IME behavior; final value `中a文b末`, caret 5, candidate point `(153,76)`.
+- `tests\LightLaunchpad.NativeUi.Tests\CatalogShellBroker.Tests.ps1` - 3/3 passed; `inputResponseMs=0` during a 1,891 ms refresh, UI thread `20720`, STA broker thread `28136`, generation 2, import counts 1 then 0, skipped reparse points 1, and future search history unchanged.
+- `tests\LightLaunchpad.NativeUi.Tests\Persistence.Tests.ps1` - 7/7 passed.
+- `tests\LightLaunchpad.NativeUi.Tests\SettingsTransactions.Tests.ps1` - 3/3 passed.
+- `tests\LightLaunchpad.NativeUi.Tests\AppHost.Tests.ps1` - 4/4 passed; `shellReadyMs=16`, `probeExitMs=390`, `settingsWindowMs=162`, `logBytes=1279`.
+- `tests\LightLaunchpad.NativeUi.Tests\ExecutableIdentity.Tests.ps1` - 5/5 passed.
+- `dotnet run --project tests\LightLaunchpad.Core.Tests\LightLaunchpad.Core.Tests.csproj --configuration Release` - 33/33 passed.
+- `dotnet run --project tests\LightLaunchpad.App.Tests\LightLaunchpad.App.Tests.csproj --configuration Release` - 74/74 passed; historical regression baseline only.
+- Post-commit build/diagnostics - `artifacts\native-ui-llp009-postcommit\LightLaunchpad.NativeUi.exe`, build 23,307 ms, 1,637,888 bytes, SHA256 `968DC465474F5B81C87A1F46940C4A6D87CE6D7AA06FDBDBE5C90B4D192C0974`, diagnostics exit 0 in 244 ms, version `1.11.0-dev+7bb1d0a4f8bd.dirty`, executable path, commit, channel, singleton, and startup identities matched. The development dirty label is expected because the protected untracked `LLP_reconstruction/` must not be adopted or deleted.
+
+Visual, safety, and evidence limits:
+
+- `product-design:audit` accepted four current-run screenshots: step 1 `00-empty-search.png` is a restrained disabled-recents prompt with search as sole focus; step 2 `01-search-focus.png` shows results without painted selection; step 3 `02-result-focus.png` shows one distinct keyboard focus frame; step 4 `03-auxiliary-focus.png` shows a visible but subordinate bottom-right auxiliary focus state. All are under `artifacts\native-ui-llp009-postcommit\visual-evidence` and were inspected at original resolution.
+- Keyboard behavior and Shell launch correctness come from the real-EXE probe, not screenshots. Screenshots alone cannot establish UIA semantics, contrast ratios, DPI scaling, high contrast, or assistive-technology reading order; those release gates remain assigned to LLP-012 and LLP-016.
+- Protected PID 22560 still runs `artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe` with unchanged SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run remains its exact quoted path, the stable install remains absent, and the `C:\TOOL` EXE remains SHA256 `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`.
+- `LLP_reconstruction/` remains untracked/unstaged and ignored `LightLaunchpad.NativeUi.o` was not adopted. No stable-install, startup, `C:\TOOL`, push, tag, or release mutation occurred.
+- Scoped implementation commit: `7bb1d0a` (`feat(native-ui): complete Spotlight keyboard state machine`).
+- Task transition: LLP-009 marked `done`; LLP-010 marked as the sole `in_progress` task.
 
 ## LLP-008 Execution Evidence
 

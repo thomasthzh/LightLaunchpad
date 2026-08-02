@@ -148,7 +148,7 @@
 
 ### LLP-009 - Spotlight State Machine And Keyboard Flow
 
-- Status: `in_progress`
+- Status: `done`
 - Depends on: LLP-008
 - Purpose: make the lazy-user launch path deterministic and fast.
 - Likely files: `InputController`, `InteractionState`, Spotlight controller, search result scene builder.
@@ -161,11 +161,11 @@
 - Verify:
   - Automate both canonical keyboard paths from Alt+D through successful Shell launch.
   - Result refresh preserves focus by stable ID and never launches an unintended item.
-- Completion notes: Started immediately after LLP-008 post-commit verification. First RED target: a production C++ interaction-state test and real-EXE keyboard-flow probe showing that the current single `g_selectedFilteredIndex` model preselects a result and does not distinguish search focus from result focus.
+- Completion notes: Completed in implementation commit `7bb1d0a`. NativeUi now uses a production `SpotlightState` that separates search, result, and auxiliary focus; opens without result preselection; implements Enter/Down/arrows/printable/Tab/Shift+Tab/progressive Esc semantics; preserves focused stable IDs across live Catalog reorder; and leaves no launch target when that ID disappears. Empty Spotlight is capped at 10 local recent/favorite items or shows a restrained disabled-state prompt. A real isolated NativeUi EXE drove both canonical Alt+D paths through successful Shell STA launches, verified 7 search-focused opens, inserted and removed live Catalog entries without focus substitution or unintended launch, and measured hotkey-to-input-ready at 62 ms P95. Product-design audit screenshots verified distinct empty, search, result, and auxiliary focus states. Full post-commit gates passed. Verified EXE: 1,637,888 bytes, SHA256 `968DC465474F5B81C87A1F46940C4A6D87CE6D7AA06FDBDBE5C90B4D192C0974`.
 
 ### LLP-010 - Launchpad Browse/Edit Separation
 
-- Status: `pending`
+- Status: `in_progress`
 - Depends on: LLP-009
 - Purpose: remove the launch-versus-selection conflict.
 - Likely files: `InteractionState`, Launchpad controller, context menus, region/drag layout code.
@@ -178,7 +178,7 @@
   - Browse mode cannot accidentally select or rearrange.
   - Edit mode cannot accidentally launch from a selection click.
   - Hit targets match drawn tiles at 100%, 150%, and 200% DPI.
-- Completion notes: Not started.
+- Completion notes: Started immediately after LLP-009 post-commit verification. First RED target: production interaction tests showing that current Launchpad browse clicks still enter selection/drag paths instead of launching immediately and that edit-only selection/region/marquee/drag state is not guarded by an explicit mode.
 
 ### LLP-011 - Favorites, Safe Delete, And Undo
 
