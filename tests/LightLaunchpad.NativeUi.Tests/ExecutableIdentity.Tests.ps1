@@ -275,6 +275,8 @@ try {
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\ShellBroker.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\ShellBroker.h')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\SearchIndex.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\SearchIndex.cpp')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\SearchIndex.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\SearchIndex.h')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\InteractionState.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\InteractionState.cpp')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\InteractionState.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\InteractionState.h')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\SearchAccessibility.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\SearchAccessibility.cpp')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\SearchAccessibility.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\SearchAccessibility.h')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\TextInput.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\TextInput.cpp')

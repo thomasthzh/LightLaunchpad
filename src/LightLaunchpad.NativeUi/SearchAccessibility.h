@@ -10,6 +10,7 @@ struct Callbacks
 {
     void* context = nullptr;
     void (*focus)(void* context) = nullptr;
+    bool (*hasFocus)(void* context) = nullptr;
     void (*textChanged)(void* context) = nullptr;
     void (*selectionChanged)(void* context) = nullptr;
 };

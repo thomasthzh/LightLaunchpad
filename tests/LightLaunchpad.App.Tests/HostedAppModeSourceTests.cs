@@ -669,7 +669,8 @@ public sealed class HostedAppModeSourceTests
 
         TestAssert.Contains("SpotlightContentCoverageForPixel", source);
         TestAssert.Contains("if (y < contentClip.top)", source);
-        TestAssert.Contains("const double contentCoverage = contentPixel ? SpotlightContentCoverageForPixel(y, contentClip) : 1.0;", source);
+        TestAssert.Contains("const bool persistentControlPixel = PtInRect(&auxiliaryRect, point) != FALSE;", source);
+        TestAssert.Contains("? (persistentControlPixel ? 1.0 : SpotlightContentCoverageForPixel(y, contentClip))", source);
     }
 
     public static void NativeUiSource_EmbedsTrayIconAndPackagesSingleExe()

@@ -126,6 +126,7 @@ try {
     & $gpp `
         src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp `
         src\LightLaunchpad.NativeUi\Catalog.cpp `
+        src\LightLaunchpad.NativeUi\InteractionState.cpp `
         src\LightLaunchpad.NativeUi\Persistence.cpp `
         src\LightLaunchpad.NativeUi\SearchAccessibility.cpp `
         src\LightLaunchpad.NativeUi\SearchIndex.cpp `

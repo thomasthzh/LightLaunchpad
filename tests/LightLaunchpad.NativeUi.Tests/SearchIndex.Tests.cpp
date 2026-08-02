@@ -179,6 +179,18 @@ void TestUsageTieBreakersAndPrivacy()
     visible.emptyLimit = 10;
     Require(index.Query(L"", visible).size() == 3, "Empty Spotlight did not return only local recent/favorite items.");
 
+    History cappedHistory;
+    std::vector<Item> cappedItems;
+    for (int i = 0; i < 15; ++i)
+    {
+        const std::wstring id = L"empty-" + std::to_wstring(i);
+        cappedItems.push_back(MakeItem(id.c_str(), (L"Recent " + std::to_wstring(i)).c_str()));
+        cappedHistory.SetFavorite(id, true);
+    }
+    Index cappedIndex;
+    cappedIndex.Rebuild(cappedItems, cappedHistory);
+    Require(cappedIndex.Query(L"", visible).size() == 10, "Empty Spotlight did not enforce the 8-12 item presentation limit.");
+
     history.SetTrackingEnabled(false);
     history.RecordLaunch(L"private", 999);
     Require(history.Get(L"private").launchCount == 0, "Disabled history tracking still recorded a launch.");

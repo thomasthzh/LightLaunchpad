@@ -16,6 +16,7 @@
 #include "LightLaunchpad.BuildIdentity.generated.h"
 #include "LightLaunchpad.Version.h"
 #include "Catalog.h"
+#include "InteractionState.h"
 #include "Persistence.h"
 #include "SearchAccessibility.h"
 #include "SearchIndex.h"
@@ -103,7 +104,7 @@ constexpr int SpotlightEdgeLayers = 10;
 constexpr int SpotlightGlassRimLayers = 9;
 constexpr int SpotlightPanelInset = 0;
 constexpr int SpotlightContentInset = 68;
-constexpr int SpotlightContentBottomInset = 34;
+constexpr int SpotlightContentBottomInset = 72;
 constexpr int SpotlightContentFeatherSize = 44;
 constexpr int SpotlightSearchSideInset = 68;
 constexpr int SpotlightSearchCornerRadius = 24;
@@ -306,6 +307,7 @@ std::vector<std::wstring> g_selectedSourcePaths;
 std::vector<std::wstring> g_selectedRegionIds;
 llp::input::TextBuffer g_searchInput;
 llp::accessibility::SearchAccessibility g_searchAccessibility;
+llp::interaction::SpotlightState g_spotlightState;
 bool g_searchInputActive = false;
 bool g_searchPointerSelecting = false;
 int g_searchTextOffset = 0;
@@ -424,8 +426,26 @@ struct ShellImportProbeState
     std::wstring apartment;
 };
 
+struct SpotlightFlowProbeState
+{
+    bool active = false;
+    bool readyWritten = false;
+    std::wstring outputPath;
+    std::wstring readyPath;
+    int hotkeyMessages = 0;
+    int searchEnterLaunches = 0;
+    int resultEnterLaunches = 0;
+    int successfulLaunches = 0;
+    int searchFocusedOnOpen = 0;
+    std::vector<int> selectedIndexOnOpen;
+    std::vector<uint64_t> inputReadyMilliseconds;
+    std::vector<std::wstring> requestedPaths;
+    std::vector<std::wstring> focusedResultPaths;
+};
+
 CatalogBrokerProbeState g_catalogBrokerProbe;
 ShellImportProbeState g_shellImportProbe;
+SpotlightFlowProbeState g_spotlightFlowProbe;
 
 bool ShowTextInputDialog(const std::wstring& title, const std::wstring& label, const std::wstring& initialValue, std::wstring& result);
 bool RegisterCurrentHotkey();
@@ -551,6 +571,11 @@ RECT SearchRect(const RECT& client)
 RECT SearchTextRect(const RECT& searchRect)
 {
     return { searchRect.left + 22, searchRect.top, searchRect.right - 22, searchRect.bottom };
+}
+
+RECT SpotlightAuxiliaryRect(const RECT& client)
+{
+    return { client.right - 76, client.bottom - 60, client.right - 28, client.bottom - 20 };
 }
 
 std::wstring SearchCommittedText()
@@ -1753,7 +1778,7 @@ void ApplyCatalogSnapshot(
 {
     if (snapshot.generation < g_requestedCatalogGeneration) return;
     std::wstring focusedStableId;
-    if (g_selectedFilteredIndex >= 0 && g_selectedFilteredIndex < static_cast<int>(g_filtered.size()))
+    if (!IsSpotlightMode() && g_selectedFilteredIndex >= 0 && g_selectedFilteredIndex < static_cast<int>(g_filtered.size()))
     {
         const int focusedItemIndex = g_filtered[g_selectedFilteredIndex];
         if (focusedItemIndex >= 0 && focusedItemIndex < static_cast<int>(g_items.size())) focusedStableId = g_items[focusedItemIndex].stableId;
@@ -1818,7 +1843,7 @@ void ApplyCatalogSnapshot(
 
     RebuildSearchIndex();
     RebuildFiltered();
-    if (!focusedStableId.empty())
+    if (!IsSpotlightMode() && !focusedStableId.empty())
     {
         for (int filteredIndex = 0; filteredIndex < static_cast<int>(g_filtered.size()); ++filteredIndex)
         {
@@ -1913,7 +1938,7 @@ void RebuildSearchIndex()
 void RebuildFiltered()
 {
     std::wstring focusedStableId;
-    if (g_selectedFilteredIndex >= 0 && g_selectedFilteredIndex < static_cast<int>(g_filtered.size()))
+    if (!IsSpotlightMode() && g_selectedFilteredIndex >= 0 && g_selectedFilteredIndex < static_cast<int>(g_filtered.size()))
     {
         const int itemIndex = g_filtered[g_selectedFilteredIndex];
         if (itemIndex >= 0 && itemIndex < static_cast<int>(g_items.size())) focusedStableId = g_items[itemIndex].stableId;
@@ -1943,6 +1968,21 @@ void RebuildFiltered()
             g_filterScores[itemIndex] = result.score;
             g_filtered.push_back(itemIndex);
         }
+    }
+
+    if (IsSpotlightMode())
+    {
+        std::vector<std::wstring> stableIds;
+        stableIds.reserve(g_filtered.size());
+        for (const int itemIndex : g_filtered)
+        {
+            stableIds.push_back(itemIndex >= 0 && itemIndex < static_cast<int>(g_items.size())
+                ? g_items[itemIndex].stableId
+                : std::wstring{});
+        }
+        g_spotlightState.ResultsChanged(stableIds);
+        g_selectedFilteredIndex = g_spotlightState.FocusedResultIndex();
+        return;
     }
 
     g_selectedFilteredIndex = -1;
@@ -2319,6 +2359,54 @@ std::string BuildTextInputProbeJson()
     return document.dump(2) + "\n";
 }
 
+std::string BuildSpotlightFlowProbeJson()
+{
+    Json requestedPaths = Json::array();
+    for (const auto& path : g_spotlightFlowProbe.requestedPaths) requestedPaths.push_back(llp::persistence::WideToUtf8(path));
+    Json focusedResultPaths = Json::array();
+    for (const auto& path : g_spotlightFlowProbe.focusedResultPaths) focusedResultPaths.push_back(llp::persistence::WideToUtf8(path));
+    Json document = {
+        { "configuredHotkey", llp::persistence::WideToUtf8(g_settings.hotkey) },
+        { "hotkeyMessages", g_spotlightFlowProbe.hotkeyMessages },
+        { "searchFocusedOnOpen", g_spotlightFlowProbe.searchFocusedOnOpen },
+        { "selectedIndexOnOpen", g_spotlightFlowProbe.selectedIndexOnOpen },
+        { "inputReadyMs", g_spotlightFlowProbe.inputReadyMilliseconds },
+        { "searchEnterLaunches", g_spotlightFlowProbe.searchEnterLaunches },
+        { "resultEnterLaunches", g_spotlightFlowProbe.resultEnterLaunches },
+        { "successfulLaunches", g_spotlightFlowProbe.successfulLaunches },
+        { "requestedPaths", requestedPaths },
+        { "focusedResultPaths", focusedResultPaths },
+        { "finalFocus", g_spotlightState.Focus() == llp::interaction::FocusArea::Search
+            ? "search"
+            : (g_spotlightState.Focus() == llp::interaction::FocusArea::Results ? "results" : "auxiliary") },
+        { "finalFocusedIndex", g_spotlightState.FocusedResultIndex() }
+    };
+    return document.dump(2) + "\n";
+}
+
+bool WriteSpotlightFlowReadyState()
+{
+    if (!g_spotlightFlowProbe.active || g_spotlightFlowProbe.readyPath.empty()) return false;
+    std::string focus = "search";
+    if (g_spotlightState.Focus() == llp::interaction::FocusArea::Results) focus = "results";
+    else if (g_spotlightState.Focus() == llp::interaction::FocusArea::Auxiliary) focus = "auxiliary";
+    std::wstring focusedResultPath;
+    if (g_selectedFilteredIndex >= 0 && g_selectedFilteredIndex < static_cast<int>(g_filtered.size()))
+    {
+        const int itemIndex = g_filtered[g_selectedFilteredIndex];
+        if (itemIndex >= 0 && itemIndex < static_cast<int>(g_items.size())) focusedResultPath = g_items[itemIndex].sourcePath;
+    }
+    const Json ready = {
+        { "itemCount", g_items.size() },
+        { "filteredCount", g_filtered.size() },
+        { "displayMode", llp::persistence::WideToUtf8(g_settings.displayMode) },
+        { "catalogGeneration", g_catalogGeneration },
+        { "focus", focus },
+        { "focusedResultPath", llp::persistence::WideToUtf8(focusedResultPath) }
+    };
+    return WriteFileUtf8(g_spotlightFlowProbe.readyPath, ready.dump(2) + "\n");
+}
+
 std::string BuildShellImportProbeJson()
 {
     Json document = {
@@ -2368,7 +2456,11 @@ void HandleShellBrokerResult(LPARAM lParam)
         }
         else
         {
-            if (result->snapshot) ApplyCatalogSnapshot(*result->snapshot, result->history.get(), result->historyWritable);
+            if (result->snapshot)
+            {
+                ApplyCatalogSnapshot(*result->snapshot, result->history.get(), result->historyWritable);
+                if (g_spotlightFlowProbe.active) g_spotlightFlowProbe.readyWritten = WriteSpotlightFlowReadyState();
+            }
         }
         break;
     case llp::shell::ResultKind::Icon:
@@ -2446,6 +2538,7 @@ void HandleShellBrokerResult(LPARAM lParam)
         }
         break;
     case llp::shell::ResultKind::Launch:
+        if (g_spotlightFlowProbe.active && result->succeeded) g_spotlightFlowProbe.successfulLaunches++;
         if (result->succeeded && !result->stableId.empty() && g_settings.trackLaunchHistory)
         {
             g_searchHistory.RecordLaunch(result->stableId, CurrentUnixMilliseconds());
@@ -2794,6 +2887,11 @@ bool RegisterCurrentHotkey()
 void ActivateSearchInput()
 {
     const bool gainedFocus = !g_searchInputActive || GetFocus() != g_hwnd;
+    if (IsSpotlightMode())
+    {
+        g_spotlightState.FocusSearch();
+        g_selectedFilteredIndex = -1;
+    }
     g_searchInputActive = true;
     if (g_hwnd)
     {
@@ -3217,8 +3315,7 @@ void ShowSpotlightImmediately()
     // path immediate until then so opening Spotlight never blocks the UI thread.
     SetSpotlightLayeredOpacity(SpotlightGlassAlpha);
     ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
-    RedrawWindow(g_hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
-    InvalidateRect(g_hwnd, nullptr, FALSE);
+    InvalidateRect(g_hwnd, nullptr, TRUE);
 }
 
 void HideSpotlightImmediately()
@@ -3241,6 +3338,7 @@ void ShowNativeUi()
             : 0;
         RequestCatalogRefresh(probeDelay);
     }
+    if (IsSpotlightMode()) g_spotlightState.Open();
     ResetSearchForOpen();
     RebuildFiltered();
     PositionWindow();
@@ -3310,7 +3408,11 @@ void LaunchItemAtFilteredIndex(int filteredIndex)
 {
     if (filteredIndex < 0 || filteredIndex >= static_cast<int>(g_filtered.size())) return;
     auto& item = g_items[g_filtered[filteredIndex]];
-    if (g_shellBroker.RequestLaunch(item.sourcePath) != 0) HideNativeUi();
+    if (g_shellBroker.RequestLaunch(item.sourcePath) != 0)
+    {
+        if (g_spotlightFlowProbe.active) g_spotlightFlowProbe.requestedPaths.push_back(item.sourcePath);
+        HideNativeUi();
+    }
     else MessageBoxW(g_hwnd, L"The Shell broker is unavailable; the item was not launched.", L"LightLaunchpad launch", MB_ICONWARNING | MB_OK);
 }
 
@@ -5300,6 +5402,46 @@ void DrawSearchSurface(HDC dc, const RECT& client)
     DeleteObject(searchFont);
 }
 
+void DrawSpotlightAuxiliary(ID2D1DCRenderTarget* target, const RECT& client)
+{
+    if (!IsSpotlightMode() || IsSpotlightBaseLayerPass()) return;
+    const bool focused = g_spotlightState.Focus() == llp::interaction::FocusArea::Auxiliary;
+    const RECT rect = SpotlightAuxiliaryRect(client);
+    DrawRoundedRectDirect(
+        target,
+        rect,
+        focused ? RGB(110, 174, 232) : RGB(70, 91, 116),
+        focused ? RGB(224, 243, 255) : RGB(138, 164, 190),
+        18.0f);
+    DrawTextDirect(
+        target,
+        g_tileTextFormat,
+        L"...",
+        rect,
+        focused ? RGB(18, 48, 74) : RGB(232, 241, 250),
+        DWRITE_TEXT_ALIGNMENT_CENTER,
+        DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+        DWRITE_WORD_WRAPPING_NO_WRAP);
+}
+
+void DrawSpotlightAuxiliary(HDC dc, const RECT& client)
+{
+    if (!IsSpotlightMode() || IsSpotlightBaseLayerPass()) return;
+    const bool focused = g_spotlightState.Focus() == llp::interaction::FocusArea::Auxiliary;
+    const RECT rect = SpotlightAuxiliaryRect(client);
+    DrawRoundedRect(
+        dc,
+        rect,
+        focused ? RGB(110, 174, 232) : RGB(70, 91, 116),
+        focused ? RGB(224, 243, 255) : RGB(138, 164, 190),
+        18);
+    HFONT font = CreateFontW(16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    DrawTextClipped(dc, L"...", rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, focused ? RGB(18, 48, 74) : RGB(232, 241, 250));
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+}
+
 struct PendingIconDraw
 {
     HICON icon = nullptr;
@@ -5696,7 +5838,16 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
             RECT emptyRect = { metrics.left, y + 60, metrics.right, y + 120 };
             if (!baseLayerOnly)
             {
-                DrawTextDirect(target, g_headerTextFormat, L"No matching apps", emptyRect, RGB(210, 220, 235), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
+                const bool initialSpotlight = IsSpotlightMode() && SearchCommittedText().empty();
+                DrawTextDirect(
+                    target,
+                    g_headerTextFormat,
+                    initialSpotlight ? L"Type to search" : L"No matching apps",
+                    emptyRect,
+                    initialSpotlight ? RGB(138, 164, 190) : RGB(210, 220, 235),
+                    DWRITE_TEXT_ALIGNMENT_CENTER,
+                    DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                    DWRITE_WORD_WRAPPING_NO_WRAP);
             }
         }
         g_contentHeight = contentBottom + 44;
@@ -5749,7 +5900,9 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
             }
             if (!hideTileForDrag && visualTileRect.bottom >= ContentClipTop() && visualTileRect.top <= client.bottom)
             {
-                const bool selected = filteredIndex == g_selectedFilteredIndex || IsSelected(item.sourcePath);
+                const bool keyboardFocused = filteredIndex == g_selectedFilteredIndex
+                    && (!IsSpotlightMode() || g_spotlightState.Focus() == llp::interaction::FocusArea::Results);
+                const bool selected = keyboardFocused || (!IsSpotlightMode() && IsSelected(item.sourcePath));
                 DrawAppTileSurface(target, visualTileRect, selected);
                 if (!baseLayerOnly)
                 {
@@ -5820,6 +5973,7 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
     }
 
     target->PopAxisAlignedClip();
+    DrawSpotlightAuxiliary(target, client);
     DrawSoftWindowEdge(target, client);
 
     const HRESULT drawn = target->EndDraw();
@@ -5891,7 +6045,13 @@ void PaintContent(HDC dc, const RECT& client)
             RECT emptyRect = { metrics.left, y + 60, metrics.right, y + 120 };
             if (!baseLayerOnly)
             {
-                DrawTextClipped(dc, L"No matching apps", emptyRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, RGB(210, 220, 235));
+                const bool initialSpotlight = IsSpotlightMode() && SearchCommittedText().empty();
+                DrawTextClipped(
+                    dc,
+                    initialSpotlight ? L"Type to search" : L"No matching apps",
+                    emptyRect,
+                    DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+                    initialSpotlight ? RGB(138, 164, 190) : RGB(210, 220, 235));
             }
         }
         g_contentHeight = contentBottom + 44;
@@ -5944,7 +6104,9 @@ void PaintContent(HDC dc, const RECT& client)
             }
             if (!hideTileForDrag && visualTileRect.bottom >= ContentClipTop() && visualTileRect.top <= client.bottom)
             {
-                const bool selected = filteredIndex == g_selectedFilteredIndex || IsSelected(item.sourcePath);
+                const bool keyboardFocused = filteredIndex == g_selectedFilteredIndex
+                    && (!IsSpotlightMode() || g_spotlightState.Focus() == llp::interaction::FocusArea::Results);
+                const bool selected = keyboardFocused || (!IsSpotlightMode() && IsSelected(item.sourcePath));
                 DrawAppTileSurface(dc, visualTileRect, selected);
                 if (!baseLayerOnly)
                 {
@@ -6022,6 +6184,7 @@ void PaintContent(HDC dc, const RECT& client)
     SelectClipRgn(dc, nullptr);
     DeleteObject(contentClip);
     RestoreDC(dc, savedDc);
+    DrawSpotlightAuxiliary(dc, client);
     DrawSoftWindowEdge(dc, client);
     TrimResidentIcons();
 
@@ -6145,6 +6308,7 @@ void ApplySpotlightPerPixelAlpha(DWORD* basePixels, DWORD* fullPixels, int width
     if (!basePixels || !fullPixels || width <= 0 || height <= 0) return;
     RECT client = { 0, 0, width, height };
     const RECT contentClip = ContentClipRect(client);
+    const RECT auxiliaryRect = SpotlightAuxiliaryRect(client);
     for (int y = 0; y < height; ++y)
     {
         for (int x = 0; x < width; ++x)
@@ -6158,7 +6322,11 @@ void ApplySpotlightPerPixelAlpha(DWORD* basePixels, DWORD* fullPixels, int width
             }
 
             const bool contentPixel = PixelDiffers(basePixels[index], fullPixels[index]);
-            const double contentCoverage = contentPixel ? SpotlightContentCoverageForPixel(y, contentClip) : 1.0;
+            const POINT point = { x, y };
+            const bool persistentControlPixel = PtInRect(&auxiliaryRect, point) != FALSE;
+            const double contentCoverage = contentPixel
+                ? (persistentControlPixel ? 1.0 : SpotlightContentCoverageForPixel(y, contentClip))
+                : 1.0;
             if (contentPixel && contentCoverage < 1.0)
             {
                 fullPixels[index] = BlendPixel(basePixels[index], fullPixels[index], contentCoverage);
@@ -6354,10 +6522,50 @@ void ScrollSelectedIntoView()
     ClampScroll();
 }
 
+void ApplySpotlightInteractionState(bool scrollFocusedResult)
+{
+    if (!IsSpotlightMode()) return;
+    g_selectedFilteredIndex = g_spotlightState.FocusedResultIndex();
+    if (g_spotlightFlowProbe.active
+        && g_selectedFilteredIndex >= 0
+        && g_selectedFilteredIndex < static_cast<int>(g_filtered.size()))
+    {
+        g_spotlightFlowProbe.focusedResultPaths.push_back(g_items[g_filtered[g_selectedFilteredIndex]].sourcePath);
+    }
+    g_searchInputActive = g_spotlightState.Focus() == llp::interaction::FocusArea::Search;
+    if (scrollFocusedResult && g_selectedFilteredIndex >= 0) ScrollSelectedIntoView();
+    if (g_searchInputActive) UpdateImeWindowPosition(g_hwnd);
+    g_searchAccessibility.NotifyFocusChanged();
+    RequestSearchRepaint(g_hwnd, false);
+}
+
+bool EnterSpotlightResults()
+{
+    if (!IsSpotlightMode() || !g_spotlightState.EnterResults()) return false;
+    ApplySpotlightInteractionState(true);
+    return true;
+}
+
+bool MoveSpotlightResult(llp::interaction::Direction direction)
+{
+    if (!IsSpotlightMode()) return false;
+    RECT client = {};
+    GetClientRect(g_hwnd, &client);
+    if (!g_spotlightState.MoveResult(direction, CalculateColumnCount(client))) return false;
+    ApplySpotlightInteractionState(true);
+    return true;
+}
+
 void SelectFilteredIndex(int index)
 {
     if (g_filtered.empty()) return;
     g_selectedFilteredIndex = std::clamp(index, 0, static_cast<int>(g_filtered.size()) - 1);
+    if (IsSpotlightMode())
+    {
+        g_spotlightState.FocusResult(g_selectedFilteredIndex);
+        ApplySpotlightInteractionState(true);
+        return;
+    }
     const auto& item = g_items[g_filtered[g_selectedFilteredIndex]];
     SetSingleSelection(item.sourcePath);
     ScrollSelectedIntoView();
@@ -7355,6 +7563,11 @@ void AccessibilityFocus(void*)
     ActivateSearchInput();
 }
 
+bool AccessibilitySearchHasFocus(void*)
+{
+    return !IsSpotlightMode() || g_spotlightState.Focus() == llp::interaction::FocusArea::Search;
+}
+
 void AccessibilityTextChanged(void*)
 {
     SearchTextChanged(g_hwnd, true);
@@ -7447,7 +7660,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return DefWindowProcW(hwnd, message, wParam, lParam);
     }
     case WM_HOTKEY:
-        if (wParam == static_cast<WPARAM>(g_activeHotkeyId)) ToggleNativeUi();
+        if (wParam == static_cast<WPARAM>(g_activeHotkeyId))
+        {
+            const ULONGLONG started = GetTickCount64();
+            ToggleNativeUi();
+            if (g_spotlightFlowProbe.active && IsWindowVisible(hwnd))
+            {
+                g_spotlightFlowProbe.hotkeyMessages++;
+                g_spotlightFlowProbe.inputReadyMilliseconds.push_back(GetTickCount64() - started);
+                g_spotlightFlowProbe.selectedIndexOnOpen.push_back(g_selectedFilteredIndex);
+                if (g_spotlightState.Focus() == llp::interaction::FocusArea::Search) g_spotlightFlowProbe.searchFocusedOnOpen++;
+            }
+        }
         return 0;
     case WM_COMMAND:
         if (LOWORD(wParam) == TrayOpenCommand) ShowNativeUi();
@@ -7559,11 +7783,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             SearchCaretChanged(hwnd);
             return 0;
         }
+        if (IsSpotlightMode())
+        {
+            const RECT auxiliaryRect = SpotlightAuxiliaryRect(client);
+            if (PtInRect(&auxiliaryRect, point))
+            {
+                g_spotlightState.FocusAuxiliary();
+                ApplySpotlightInteractionState(false);
+                HideNativeUi();
+                ShowSettingsWindow();
+                return 0;
+            }
+        }
         ResetDragState();
         for (const auto& hit : g_hits)
         {
             if (PtInRect(&hit.bounds, point))
             {
+                if (IsSpotlightMode())
+                {
+                    LaunchItemAtFilteredIndex(hit.itemIndex);
+                    return 0;
+                }
                 g_selectedFilteredIndex = hit.itemIndex;
                 if (hit.itemIndex >= 0 && hit.itemIndex < static_cast<int>(g_filtered.size()))
                 {
@@ -7585,6 +7826,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 return 0;
             }
         }
+        if (IsSpotlightMode()) return 0;
         for (const auto& regionHit : g_regionHits)
         {
             if (PtInRect(&regionHit.headerBounds, point))
@@ -7676,6 +7918,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_RBUTTONUP:
     {
+        if (IsSpotlightMode()) return 0;
         POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         for (const auto& hit : g_hits)
         {
@@ -7740,38 +7983,63 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             if (g_selectionBoxActive) CancelSelectionBox(hwnd);
             else if (g_dragActive) CancelDrag(hwnd);
+            else if (IsSpotlightMode())
+            {
+                const auto action = g_spotlightState.Escape(SearchCommittedText().empty());
+                if (action == llp::interaction::EscapeAction::FocusSearch)
+                {
+                    ApplySpotlightInteractionState(false);
+                }
+                else if (action == llp::interaction::EscapeAction::ClearQuery)
+                {
+                    g_searchInput.Reset(L"");
+                    SearchTextChanged(hwnd, true);
+                }
+                else
+                {
+                    HideNativeUi();
+                }
+            }
             else HideNativeUi();
             return 0;
         }
-        if (control && wParam == L'A')
+        if (IsSpotlightMode() && wParam == VK_TAB)
+        {
+            g_spotlightState.Tab(shift, true);
+            ApplySpotlightInteractionState(true);
+            return 0;
+        }
+        const bool searchFocused = !IsSpotlightMode()
+            || g_spotlightState.Focus() == llp::interaction::FocusArea::Search;
+        if (searchFocused && control && wParam == L'A')
         {
             g_searchInput.SelectAll();
             SearchCaretChanged(hwnd);
             return 0;
         }
-        if (control && wParam == L'C')
+        if (searchFocused && control && wParam == L'C')
         {
             WriteClipboardText(hwnd, g_searchInput.SelectedText());
             return 0;
         }
-        if (control && wParam == L'X')
+        if (searchFocused && control && wParam == L'X')
         {
             const std::wstring selected = g_searchInput.SelectedText();
             if (WriteClipboardText(hwnd, selected) && g_searchInput.CutSelection()) SearchTextChanged(hwnd, true);
             return 0;
         }
-        if (control && wParam == L'V')
+        if (searchFocused && control && wParam == L'V')
         {
             const std::wstring pasted = ReadClipboardText(hwnd);
             if (!pasted.empty() && g_searchInput.InsertText(pasted)) SearchTextChanged(hwnd, true);
             return 0;
         }
-        if (control && wParam == L'Z')
+        if (searchFocused && control && wParam == L'Z')
         {
             if ((shift ? g_searchInput.Redo() : g_searchInput.Undo())) SearchTextChanged(hwnd, true);
             return 0;
         }
-        if (control && wParam == L'Y')
+        if (searchFocused && control && wParam == L'Y')
         {
             if (g_searchInput.Redo()) SearchTextChanged(hwnd, true);
             return 0;
@@ -7780,44 +8048,97 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             return 0;
         }
-        if (wParam == VK_RETURN) { LaunchItemAtFilteredIndex(g_selectedFilteredIndex); return 0; }
+        if (wParam == VK_RETURN)
+        {
+            if (IsSpotlightMode())
+            {
+                const auto action = g_spotlightState.Enter();
+                if (action == llp::interaction::EnterAction::LaunchFirstResult)
+                {
+                    if (g_spotlightFlowProbe.active) g_spotlightFlowProbe.searchEnterLaunches++;
+                    LaunchItemAtFilteredIndex(0);
+                }
+                else if (action == llp::interaction::EnterAction::LaunchFocusedResult)
+                {
+                    if (g_spotlightFlowProbe.active) g_spotlightFlowProbe.resultEnterLaunches++;
+                    LaunchItemAtFilteredIndex(g_spotlightState.FocusedResultIndex());
+                }
+                else if (action == llp::interaction::EnterAction::OpenAuxiliary)
+                {
+                    HideNativeUi();
+                    ShowSettingsWindow();
+                }
+            }
+            else LaunchItemAtFilteredIndex(g_selectedFilteredIndex);
+            return 0;
+        }
         if (wParam == VK_RIGHT)
         {
-            g_searchInput.MoveCaret(control ? llp::input::Move::WordRight : llp::input::Move::Right, shift);
-            SearchCaretChanged(hwnd);
+            if (IsSpotlightMode() && !searchFocused) MoveSpotlightResult(llp::interaction::Direction::Right);
+            else
+            {
+                g_searchInput.MoveCaret(control ? llp::input::Move::WordRight : llp::input::Move::Right, shift);
+                SearchCaretChanged(hwnd);
+            }
             return 0;
         }
         if (wParam == VK_LEFT)
         {
-            g_searchInput.MoveCaret(control ? llp::input::Move::WordLeft : llp::input::Move::Left, shift);
-            SearchCaretChanged(hwnd);
+            if (IsSpotlightMode() && !searchFocused) MoveSpotlightResult(llp::interaction::Direction::Left);
+            else
+            {
+                g_searchInput.MoveCaret(control ? llp::input::Move::WordLeft : llp::input::Move::Left, shift);
+                SearchCaretChanged(hwnd);
+            }
             return 0;
         }
         if (wParam == VK_HOME)
         {
-            g_searchInput.MoveCaret(llp::input::Move::Home, shift);
-            SearchCaretChanged(hwnd);
+            if (IsSpotlightMode() && !searchFocused && !g_filtered.empty())
+            {
+                g_spotlightState.FocusResult(0);
+                ApplySpotlightInteractionState(true);
+            }
+            else
+            {
+                g_searchInput.MoveCaret(llp::input::Move::Home, shift);
+                SearchCaretChanged(hwnd);
+            }
             return 0;
         }
         if (wParam == VK_END)
         {
-            g_searchInput.MoveCaret(llp::input::Move::End, shift);
-            SearchCaretChanged(hwnd);
+            if (IsSpotlightMode() && !searchFocused && !g_filtered.empty())
+            {
+                g_spotlightState.FocusResult(static_cast<int>(g_filtered.size()) - 1);
+                ApplySpotlightInteractionState(true);
+            }
+            else
+            {
+                g_searchInput.MoveCaret(llp::input::Move::End, shift);
+                SearchCaretChanged(hwnd);
+            }
             return 0;
         }
         if (wParam == VK_DELETE)
         {
-            if (g_searchInput.DeleteForward(control)) SearchTextChanged(hwnd, true);
+            if (searchFocused && g_searchInput.DeleteForward(control)) SearchTextChanged(hwnd, true);
             return 0;
         }
         if (wParam == VK_DOWN)
         {
-            MoveSelectionVertical(1);
+            if (IsSpotlightMode())
+            {
+                if (searchFocused || g_spotlightState.FocusedResultIndex() < 0) EnterSpotlightResults();
+                else MoveSpotlightResult(llp::interaction::Direction::Down);
+            }
+            else MoveSelectionVertical(1);
             return 0;
         }
         if (wParam == VK_UP)
         {
-            MoveSelectionVertical(-1);
+            if (IsSpotlightMode()) MoveSpotlightResult(llp::interaction::Direction::Up);
+            else MoveSelectionVertical(-1);
             return 0;
         }
         return 0;
@@ -7848,11 +8169,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_CHAR:
     {
-        ActivateSearchInput();
-        if (wParam == VK_TAB || wParam == VK_RETURN || g_searchInput.IsComposing())
+        if (wParam == VK_TAB || wParam == VK_RETURN)
         {
             return 0;
         }
+        ActivateSearchInput();
+        if (g_searchInput.IsComposing()) return 0;
         bool changed = false;
         if (wParam == VK_BACK)
         {
@@ -7898,6 +8220,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         KillTimer(hwnd, DragAnimationTimerId);
         if (!g_textInputProbePath.empty()) WriteFileUtf8(g_textInputProbePath, BuildTextInputProbeJson());
+        if (g_spotlightFlowProbe.active) WriteFileUtf8(g_spotlightFlowProbe.outputPath, BuildSpotlightFlowProbeJson());
         g_searchAccessibility.Shutdown();
         g_shellBroker.Stop();
         MSG pendingBrokerResult = {};
@@ -7957,9 +8280,16 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     g_shellImportProbe.repeat = CommandLineIntValue(L"--shell-import-repeat", 2, 2, 2);
     g_textInputProbePath = CommandLineValue(L"--text-input-probe-file");
     const bool textInputProbeActive = !g_textInputProbePath.empty();
-    const int activeBehaviorProbes = (g_catalogBrokerProbe.active ? 1 : 0) + (g_shellImportProbe.active ? 1 : 0) + (textInputProbeActive ? 1 : 0);
+    g_spotlightFlowProbe.outputPath = CommandLineValue(L"--spotlight-flow-probe-file");
+    g_spotlightFlowProbe.readyPath = CommandLineValue(L"--spotlight-flow-ready-file");
+    g_spotlightFlowProbe.active = !g_spotlightFlowProbe.outputPath.empty();
+    const int activeBehaviorProbes = (g_catalogBrokerProbe.active ? 1 : 0)
+        + (g_shellImportProbe.active ? 1 : 0)
+        + (textInputProbeActive ? 1 : 0)
+        + (g_spotlightFlowProbe.active ? 1 : 0);
     if (activeBehaviorProbes > 1) return 2;
     if (g_shellImportProbe.active && (g_shellImportProbe.root.empty() || g_shellImportProbe.destination.empty())) return 2;
+    if (g_spotlightFlowProbe.active && g_spotlightFlowProbe.readyPath.empty()) return 2;
     g_diagnosticsUiMode = CommandLineHasArgument(L"--diagnostics-ui");
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
     const HRESULT coInitializeResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -8049,6 +8379,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     AppendStartupLog(L"window-created", true, LLP_WINDOW_CLASS_NAME_WIDE);
     llp::accessibility::Callbacks accessibilityCallbacks;
     accessibilityCallbacks.focus = AccessibilityFocus;
+    accessibilityCallbacks.hasFocus = AccessibilitySearchHasFocus;
     accessibilityCallbacks.textChanged = AccessibilityTextChanged;
     accessibilityCallbacks.selectionChanged = AccessibilitySelectionChanged;
     g_searchAccessibilityReady = g_searchAccessibility.Initialize(g_hwnd, &g_searchInput, accessibilityCallbacks);
@@ -8057,7 +8388,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     const bool shellBrokerStarted = g_shellBroker.Start(g_hwnd, WmShellBrokerResult);
     AppendStartupLog(L"shell-broker", shellBrokerStarted, shellBrokerStarted ? L"dedicated STA queued" : L"thread creation failed");
 
-    if (!g_diagnosticsUiMode && !g_catalogBrokerProbe.active && !g_shellImportProbe.active && !textInputProbeActive)
+    if (!g_diagnosticsUiMode && !g_catalogBrokerProbe.active && !g_shellImportProbe.active && !textInputProbeActive && !g_spotlightFlowProbe.active)
     {
         RegisterCurrentHotkey();
         AppendStartupLog(L"hotkey-registered", g_hotkeyRegistered, g_settings.hotkey);
@@ -8107,7 +8438,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
             RequestCatalogRefresh();
         }
     }
-    else if (g_catalogBrokerProbe.active || g_shellImportProbe.active)
+    else if (g_catalogBrokerProbe.active || g_shellImportProbe.active || g_spotlightFlowProbe.active)
     {
         DestroyWindow(g_hwnd);
         CloseHandle(mutex);

@@ -115,7 +115,9 @@ public:
             break;
         case UIA_HasKeyboardFocusPropertyId:
             result->vt = VT_BOOL;
-            result->boolVal = GetFocus() == hwnd_ ? VARIANT_TRUE : VARIANT_FALSE;
+            result->boolVal = callbacks_.hasFocus
+                ? (callbacks_.hasFocus(callbacks_.context) ? VARIANT_TRUE : VARIANT_FALSE)
+                : (GetFocus() == hwnd_ ? VARIANT_TRUE : VARIANT_FALSE);
             break;
         case UIA_IsPasswordPropertyId:
             result->vt = VT_BOOL;
