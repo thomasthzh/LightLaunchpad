@@ -182,7 +182,7 @@
 
 ### LLP-011 - Favorites, Safe Delete, And Undo
 
-- Status: `in_progress`
+- Status: `done`
 - Depends on: LLP-010
 - Purpose: make organization direct and forgiving.
 - Likely files: `InteractionState`, `Catalog`, `ShellBroker`, persistence, context menus, transient feedback surface.
@@ -193,13 +193,13 @@
   - Ensure region deletion only moves items to Uncategorized and can be reversed during the same action window.
 - Verify:
   - Delete, undo, failed delete, batch partial failure, favorite ranking, and restart persistence all pass production behavior tests.
-- Completion notes: Started immediately after LLP-010 post-commit verification. First RED targets: favorite persistence/ranking across restart, Recycle Bin success-before-layout-commit, failed/partial batch preservation, time-limited undo, and reversible region deletion.
+- Completion notes: Completed in implementation commit `707510a`. Launchpad now manages persisted local favorites with Fluent icon badges, commits layout only for exact Shell-confirmed recycle successes, retains failed items/selections, and exposes an 8-second action-scoped Undo surface. Shell STA deletion captures Recycle Bin PIDLs from `PostDeleteItem` and restores to the exact parent/name without overwriting collisions; partial failure, collision retry, source preservation, and exact item/region order are proven by isolated real NativeUi EXEs. Restart persistence/ranking, visual feedback, full NativeUi gates, Core 33/33, and historical App 74/74 passed. Verified post-commit EXE: 1,694,720 bytes, SHA256 `38B8FFEEF0CABC7FE0A365C98CB82158D359A2AC9D4F026E2AF4E7BDD4DEA8EA`.
 
 ## Milestone D: Adaptive Material And Motion
 
 ### LLP-012 - DPI, Monitor, Accessibility, And Scene Geometry
 
-- Status: `pending`
+- Status: `in_progress`
 - Depends on: LLP-011
 - Purpose: create one correct coordinate and accessibility foundation before lens work.
 - Likely files: manifest/resource, `AppHost`, layout geometry, `Renderer`, settings window, UI Automation providers.
@@ -211,7 +211,7 @@
 - Verify:
   - Multi-monitor and three-DPI matrix screenshots show no clipping, hit-test drift, or wrong-screen placement.
   - High contrast and reduced transparency use readable solid/adaptive surfaces.
-- Completion notes: Not started.
+- Completion notes: Started immediately after LLP-011 verification. First audit targets: production Per-Monitor-V2 transition handling, monitor selection, DIP-derived transient/control geometry, UIA announcement/focus for organization feedback, increased text size, high contrast, reduced transparency, and the 100/150/200% screenshot-hit-test matrix.
 
 ### LLP-013 - Unified Adaptive Material Renderer
 

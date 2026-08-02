@@ -2,15 +2,62 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 09:59:54 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 10:48:57 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `689dc61`
+- HEAD: `707510a`
 - Remote main: `origin/main@33e91c2`
-- Active task: `LLP-011 - Favorites, Safe Delete, And Undo` (`in_progress`)
-- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`
-- Next task after verification: `LLP-012 - DPI, Monitor, Accessibility, And Scene Geometry`
-- Goal status: active in Codex; LLP-011 is the only task in progress.
+- Active task: `LLP-012 - DPI, Monitor, Accessibility, And Scene Geometry` (`in_progress`)
+- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`
+- Next task after verification: `LLP-013 - Unified Adaptive Material Renderer`
+- Goal status: active in Codex; LLP-012 is the only task in progress.
+
+## LLP-011 Execution Evidence
+
+Status at 2026-08-02 10:48 +08:00: complete.
+
+Changed files in scope:
+
+- `src/LightLaunchpad.NativeUi/OrganizationState.{h,cpp}` - production pending-delete correlation, exact layout snapshots, one-action undo ownership, 8,000 ms deadlines, in-flight Shell completion protection, partial restore retry, and region snapshots.
+- `src/LightLaunchpad.NativeUi/ShellBroker.{h,cpp}` - `IFileOperation` recycle/restore requests on the dedicated STA, `FOFX_RECYCLEONDELETE`/`FOFX_ADDUNDORECORD`, `PostDeleteItem` PIDL capture, exact parent/name restore, collision refusal, retryable records, and bounded record cleanup.
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - favorite/unfavorite context actions and local persistence, Fluent favorite badges, Shell-result-before-layout delete commit, failed-selection preservation, concise transient feedback with an 8-second Undo target, exact insertion-order restore, reversible region deletion, and real-EXE organization/region probes.
+- `tools/build-native-ui.ps1` and `tests/LightLaunchpad.NativeUi.Tests/{AppHost,ExecutableIdentity}.Tests.ps1` - compile/copy the new production organization module in normal and clean-source builds.
+- `tests/LightLaunchpad.NativeUi.Tests/OrganizationState.Tests.{cpp,ps1}` - four direct production-state tests for success, expiry, in-flight completion, failed/partial batches, retryable partial restore, and region snapshots.
+- `tests/LightLaunchpad.NativeUi.Tests/OrganizationShellBehavior.Tests.ps1` - isolated real NativeUi EXEs for 2-success/1-failure recycle, exact-content restore, collision refusal/retry, and delete-region-to-Uncategorized/exact undo.
+- `tests/LightLaunchpad.NativeUi.Tests/LaunchpadFlowBehavior.Tests.ps1` - real context command, two-item favorite persistence, batch recycle, clickable Undo, exact order assertion, restart proof, and current-run visual evidence.
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs` - updates one historical source boundary from the retired direct `affectedPaths` spelling to the organization transaction/restore boundary; it remains non-authoritative for Shell and UI behavior.
+- `docs/ai/{tasks,progress}.md` - records verified completion and activates LLP-012.
+
+TDD and systematic-debugging evidence:
+
+- Initial RED could not compile because `OrganizationState` did not exist. GREEN is 4/4 and proves that layout never changes before a matched Shell completion, a full failure preserves every item, a partial batch removes only confirmed paths, and region snapshots expire after exactly 8,000 ms.
+- A delayed-restore test exposed that a user-invoked Undo could expire while Shell STA work was in flight. `BeginRecycleUndo` now freezes the accepted action until completion; partial completion opens a fresh bounded retry window.
+- The first collision probe correctly refused overwrite but then lost its retry record because cleanup equated “original path exists” with “restore succeeded.” Cleanup now uses only explicit restored paths; the real EXE rejects the collision, preserves its content, and restores the original `charlie` payload after the collision is removed.
+- Visual audit found Alpha/Beta/Gamma returning as Alpha/Gamma/Beta. Successful delete had renumbered the retained sibling, causing order collisions on undo. Restore now reinserts each snapshot at its original region index; the real-EXE ready snapshot and recaptured frame both prove Alpha/Beta/Gamma.
+- A new fully failed delete originally left the older UI undo token visible even though ShellBroker had replaced it. A RED regression now requires new delete completion to retire the prior action; GREEN keeps UI and Shell token ownership synchronized.
+- One parallel verification run left two interrupted temporary flow probes and caused the clipboard test to paste an empty value. Their command lines were verified under GUID-scoped `%TEMP%` roots, only those two test PIDs were terminated, and the input probe passed when rerun alone. The protected production PID was never touched.
+
+Fresh verification against implementation commit `707510a8d024`:
+
+- `OrganizationState.Tests.ps1` - 4/4 passed.
+- `OrganizationShellBehavior.Tests.ps1` - real EXE: batch removed 2, failed 1, restored 2; collision failed 1 without overwrite; retry restored 1 with exact content. Region delete moved only to Uncategorized, preserved all source files, and restored exact metadata, placement, and order.
+- `LaunchpadFlowBehavior.Tests.ps1` - 2 Shell launches, 3 edit-selection presses, max selection 2; two favorites persisted, exact delete/undo order restored, and restart catalog republished all 3 items with both favorites.
+- `SearchIndex.Tests.ps1` - 7/7 passed; 300-item rebuild 391 microseconds, cached pinyin-query P95 94 microseconds; favorite tie-break, empty-state inclusion, history reset preservation, and JSON restart round trip passed.
+- `InteractionState.Tests.ps1` 7/7; `SceneGeometry.Tests.ps1` 3/3; `TextInput.Tests.ps1` 7/7 with 200 ns P95; real UIA/clipboard/IME behavior passed with value `中a文b末`, caret 5, candidate `(153,76)`.
+- `SpotlightFlowBehavior.Tests.ps1` - 7 opens, 2 exact launches, 63 ms input-ready P95.
+- `CatalogShellBroker.Tests.ps1` - input response 0 ms during a 1,859 ms refresh, import 1 then 0, one skipped reparse point, and future history preserved.
+- `Persistence.Tests.ps1` 7/7; `SettingsTransactions.Tests.ps1` 3/3; `AppHost.Tests.ps1` 4/4 (`shellReadyMs=16`, `probeExitMs=368`, `settingsWindowMs=169`, `logBytes=1277`); `ExecutableIdentity.Tests.ps1` 5/5.
+- Core Release 33/33 passed. Historical App Release 74/74 passed after updating the one obsolete source-boundary assertion; it was not used to prove recycle, favorite, interaction, or visual correctness.
+- Post-commit build/diagnostics: `artifacts\native-ui-llp011-postcommit\LightLaunchpad.NativeUi.exe`, 1,694,720 bytes, SHA256 `38B8FFEEF0CABC7FE0A365C98CB82158D359A2AC9D4F026E2AF4E7BDD4DEA8EA`, development identity `707510a8d024`, Per-Monitor-V2 manifest, non-stable path, and protected startup path all matched.
+
+Visual, safety, and evidence limits:
+
+- `product-design:audit` preflight found no saved user context and accepted four current-run, original-resolution frames under `artifacts\native-ui-llp011-visual-evidence`: `08-edit-favorites-saved.png`, `09-edit-recycle-undo.png`, `10-edit-undo-restored.png`, and `11-restart-favorites-persisted.png`. They show distinct Fluent favorite badges, concise bottom feedback, a separated Undo action, exact selection/order restoration, and restart persistence.
+- Visible hierarchy and action discoverability are acceptable for LLP-011. Screenshots alone do not prove UIA live announcements, keyboard focus on the transient action, contrast ratios, target size in DIP, high contrast, increased text size, or multi-monitor DPI transitions; these are explicitly activated as LLP-012 work rather than claimed complete.
+- Protected PID 22560 still runs `artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe` with SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run remains its exact quoted path, stable install is absent, and the `C:\TOOL` EXE remains SHA256 `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`.
+- `LLP_reconstruction/` remains untracked/unstaged and ignored `LightLaunchpad.NativeUi.o` remains excluded. No stable-install, startup, `C:\TOOL`, push, tag, or release mutation occurred.
+- Scoped implementation commit: `707510a` (`feat(native-ui): add safe organization undo`).
+- Task transition: LLP-011 marked `done`; LLP-012 marked as the sole `in_progress` task.
 
 ## LLP-010 Execution Evidence
 
