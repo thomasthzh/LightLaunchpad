@@ -2,7 +2,7 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 12:29:16 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 12:36:58 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
 - HEAD: `b222b1b`
@@ -10,7 +10,8 @@
 - Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
 - Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
-- Goal status: active in Codex; LLP-013 is the only task in progress.
+- Goal status: blocked awaiting the user's explicit visual-companion choice required by the `brainstorming` design gate; LLP-013 remains the only task in progress.
+- Resume condition: user replies `启用` or `不启用`; then continue the LLP-013 design validation without changing task order.
 
 ## LLP-012 Execution Evidence
 

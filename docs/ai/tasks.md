@@ -229,7 +229,7 @@
   - Compare reference and current screenshots on at least 12 varied desktop backgrounds at matching states and viewport sizes.
   - Pixel checks show no upward ghost, duplicated text/icon, rectangular leak, or out-of-bounds refraction.
   - Normal text contrast is at least 4.5:1 and focus boundaries target at least 3:1.
-- Completion notes: Started immediately after LLP-012 verification. First audit targets: isolate a renderer/scene-snapshot boundary, remove remaining nested screenshot captures, measure the current material against 12 controlled backgrounds, and establish pixel/contrast RED gates before DirectComposition work.
+- Completion notes: Started immediately after LLP-012 verification. First audit targets: isolate a renderer/scene-snapshot boundary, remove remaining nested screenshot captures, measure the current material against 12 controlled backgrounds, and establish pixel/contrast RED gates before DirectComposition work. Implementation is paused at the required `brainstorming` design gate after three goal turns without an explicit answer to the optional visual-companion choice; resume on `启用` or `不启用`.
 
 ### LLP-014 - Continuous Focus And Nonblocking Motion
 
