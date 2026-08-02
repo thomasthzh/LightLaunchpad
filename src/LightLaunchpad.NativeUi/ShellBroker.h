@@ -20,6 +20,7 @@ enum class ResultKind
     OpenFolder,
     OpenLocation,
     Recycle,
+    Restore,
     ImportTree,
     Persistence
 };
@@ -42,6 +43,7 @@ struct Result
     int failed = 0;
     int skippedReparsePoints = 0;
     std::vector<std::wstring> affectedPaths;
+    uint64_t undoToken = 0;
     uint64_t elapsedMilliseconds = 0;
     std::wstring error;
 };
@@ -68,6 +70,7 @@ public:
     uint64_t RequestOpenFolder(const std::wstring& folderPath);
     uint64_t RequestOpenLocation(const std::wstring& sourcePath);
     uint64_t RequestRecycle(const std::wstring& launchpadFolder, const std::vector<std::wstring>& sourcePaths);
+    uint64_t RequestRestore(uint64_t undoToken);
     uint64_t RequestImportTree(const std::wstring& root, const std::wstring& launchpadFolder);
     uint64_t RequestImportPaths(const std::vector<std::wstring>& sourcePaths, const std::wstring& launchpadFolder);
     uint64_t RequestPersistJson(const std::wstring& path, const std::string& documentUtf8);

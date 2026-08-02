@@ -277,6 +277,8 @@ try {
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\SearchIndex.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\SearchIndex.h')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\InteractionState.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\InteractionState.cpp')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\InteractionState.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\InteractionState.h')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\OrganizationState.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\OrganizationState.cpp')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\OrganizationState.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\OrganizationState.h')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\SceneGeometry.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\SceneGeometry.cpp')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\SceneGeometry.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\SceneGeometry.h')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\SearchAccessibility.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\SearchAccessibility.cpp')

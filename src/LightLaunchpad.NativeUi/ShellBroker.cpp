@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cwctype>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <utility>
 
@@ -41,6 +42,7 @@ enum class RequestKind
     OpenFolder,
     OpenLocation,
     Recycle,
+    Restore,
     ImportTree,
     ImportPaths,
     PersistJson
@@ -57,6 +59,7 @@ struct Request
     std::wstring path;
     std::string documentUtf8;
     std::vector<std::wstring> paths;
+    uint64_t undoToken = 0;
     int iconSize = 0;
     DWORD testDelayMilliseconds = 0;
 };
@@ -409,11 +412,92 @@ bool IsDirectChild(const std::wstring& path, const std::wstring& folder)
             TRUE) == CSTR_EQUAL;
 }
 
+struct RecycleEntry
+{
+    std::wstring originalPath;
+    PIDLIST_ABSOLUTE recycledPidl = nullptr;
+};
+
+void ReleaseRecycleEntries(std::vector<RecycleEntry>& entries)
+{
+    for (auto& entry : entries)
+    {
+        if (entry.recycledPidl) CoTaskMemFree(entry.recycledPidl);
+        entry.recycledPidl = nullptr;
+    }
+    entries.clear();
+}
+
+class RecycleProgressSink final : public IFileOperationProgressSink
+{
+public:
+    RecycleProgressSink(std::wstring originalPath, std::vector<RecycleEntry>& entries)
+        : originalPath_(std::move(originalPath)), entries_(entries) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** object) override
+    {
+        if (!object) return E_POINTER;
+        *object = nullptr;
+        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_IFileOperationProgressSink))
+        {
+            *object = static_cast<IFileOperationProgressSink*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override
+    {
+        return static_cast<ULONG>(InterlockedIncrement(&references_));
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        const auto remaining = static_cast<ULONG>(InterlockedDecrement(&references_));
+        if (remaining == 0) delete this;
+        return remaining;
+    }
+
+    HRESULT STDMETHODCALLTYPE StartOperations() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE FinishOperations(HRESULT) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PreRenameItem(DWORD, IShellItem*, LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PostRenameItem(DWORD, IShellItem*, LPCWSTR, HRESULT, IShellItem*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PreMoveItem(DWORD, IShellItem*, IShellItem*, LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PostMoveItem(DWORD, IShellItem*, IShellItem*, LPCWSTR, HRESULT, IShellItem*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PreCopyItem(DWORD, IShellItem*, IShellItem*, LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PostCopyItem(DWORD, IShellItem*, IShellItem*, LPCWSTR, HRESULT, IShellItem*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PreDeleteItem(DWORD, IShellItem*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PostDeleteItem(DWORD, IShellItem*, HRESULT result, IShellItem* recycledItem) override
+    {
+        if (FAILED(result) || !recycledItem) return S_OK;
+        PIDLIST_ABSOLUTE pidl = nullptr;
+        if (SUCCEEDED(SHGetIDListFromObject(recycledItem, &pidl)) && pidl)
+        {
+            entries_.push_back({ originalPath_, pidl });
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PreNewItem(DWORD, IShellItem*, LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PostNewItem(DWORD, IShellItem*, LPCWSTR, LPCWSTR, DWORD, HRESULT, IShellItem*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE UpdateProgress(UINT, UINT) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE ResetTimer() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PauseTimer() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE ResumeTimer() override { return S_OK; }
+
+private:
+    ~RecycleProgressSink() = default;
+    LONG references_ = 1;
+    std::wstring originalPath_;
+    std::vector<RecycleEntry>& entries_;
+};
+
 void RecyclePaths(
     const std::wstring& folder,
     const std::vector<std::wstring>& paths,
     std::vector<std::wstring>& affectedPaths,
-    int& failed)
+    int& failed,
+    std::vector<RecycleEntry>& recycleEntries)
 {
     IFileOperation* operation = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_INPROC_SERVER, IID_IFileOperation, reinterpret_cast<void**>(&operation));
@@ -422,7 +506,9 @@ void RecyclePaths(
         failed = static_cast<int>(paths.size());
         return;
     }
-    operation->SetOperationFlags(FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT);
+    operation->SetOperationFlags(
+        FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT
+        | FOFX_RECYCLEONDELETE | FOFX_ADDUNDORECORD);
     std::vector<std::wstring> queuedPaths;
     for (const auto& path : paths)
     {
@@ -435,7 +521,9 @@ void RecyclePaths(
         hr = SHCreateItemFromParsingName(path.c_str(), nullptr, IID_IShellItem, reinterpret_cast<void**>(&item));
         if (SUCCEEDED(hr) && item)
         {
-            hr = operation->DeleteItem(item, nullptr);
+            auto* progress = new RecycleProgressSink(path, recycleEntries);
+            hr = operation->DeleteItem(item, progress);
+            progress->Release();
             item->Release();
         }
         if (SUCCEEDED(hr)) queuedPaths.push_back(path);
@@ -454,6 +542,90 @@ void RecyclePaths(
         if (aborted && affectedPaths.empty() && failed == 0) failed = static_cast<int>(queuedPaths.size());
     }
     operation->Release();
+
+    recycleEntries.erase(
+        std::remove_if(recycleEntries.begin(), recycleEntries.end(), [&](RecycleEntry& entry) {
+            if (!FileExists(entry.originalPath)) return false;
+            if (entry.recycledPidl) CoTaskMemFree(entry.recycledPidl);
+            entry.recycledPidl = nullptr;
+            return true;
+        }),
+        recycleEntries.end());
+}
+
+void RestorePaths(
+    std::vector<RecycleEntry>& entries,
+    std::vector<std::wstring>& restoredPaths,
+    int& failed)
+{
+    IFileOperation* operation = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_INPROC_SERVER, IID_IFileOperation, reinterpret_cast<void**>(&operation));
+    if (FAILED(hr) || !operation)
+    {
+        failed = static_cast<int>(entries.size());
+        return;
+    }
+    operation->SetOperationFlags(FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT);
+    std::vector<std::wstring> queuedPaths;
+    for (const auto& entry : entries)
+    {
+        if (!entry.recycledPidl || FileExists(entry.originalPath))
+        {
+            failed++;
+            continue;
+        }
+        const auto parentPath = ParentDirectory(entry.originalPath);
+        if (parentPath.empty())
+        {
+            failed++;
+            continue;
+        }
+        IShellItem* recycledItem = nullptr;
+        IShellItem* destinationFolder = nullptr;
+        hr = SHCreateItemFromIDList(entry.recycledPidl, IID_IShellItem, reinterpret_cast<void**>(&recycledItem));
+        if (SUCCEEDED(hr) && recycledItem)
+        {
+            hr = SHCreateItemFromParsingName(parentPath.c_str(), nullptr, IID_IShellItem, reinterpret_cast<void**>(&destinationFolder));
+        }
+        if (SUCCEEDED(hr) && destinationFolder)
+        {
+            hr = operation->MoveItem(recycledItem, destinationFolder, PathFindFileNameW(entry.originalPath.c_str()), nullptr);
+        }
+        if (recycledItem) recycledItem->Release();
+        if (destinationFolder) destinationFolder->Release();
+        if (SUCCEEDED(hr)) queuedPaths.push_back(entry.originalPath);
+        else failed++;
+    }
+    if (!queuedPaths.empty())
+    {
+        operation->PerformOperations();
+        BOOL aborted = FALSE;
+        operation->GetAnyOperationsAborted(&aborted);
+        for (const auto& path : queuedPaths)
+        {
+            if (FileExists(path)) restoredPaths.push_back(path);
+            else failed++;
+        }
+        if (aborted && restoredPaths.empty() && failed == 0) failed = static_cast<int>(queuedPaths.size());
+    }
+    operation->Release();
+
+    entries.erase(
+        std::remove_if(entries.begin(), entries.end(), [&](RecycleEntry& entry) {
+            const bool restored = std::any_of(restoredPaths.begin(), restoredPaths.end(), [&](const std::wstring& path) {
+                return CompareStringOrdinal(
+                    persistence::NormalizeFolderIdentity(path).c_str(),
+                    -1,
+                    persistence::NormalizeFolderIdentity(entry.originalPath).c_str(),
+                    -1,
+                    TRUE) == CSTR_EQUAL;
+            });
+            if (!restored) return false;
+            if (entry.recycledPidl) CoTaskMemFree(entry.recycledPidl);
+            entry.recycledPidl = nullptr;
+            return true;
+        }),
+        entries.end());
 }
 }
 
@@ -466,11 +638,19 @@ struct ShellBroker::Impl
     std::atomic<bool> stopping{ false };
     std::atomic<bool> cancelRequested{ false };
     std::atomic<uint64_t> nextRequestId{ 1 };
+    uint64_t nextUndoToken = 1;
     std::atomic<DWORD> workerThreadId{ 0 };
     mutable std::mutex mutex;
     mutable std::mutex activeRequestMutex;
     RequestKind activeRequestKind = RequestKind::Stop;
     std::deque<Request> queue;
+    std::map<uint64_t, std::vector<RecycleEntry>> recycleUndo;
+
+    void ClearRecycleUndo()
+    {
+        for (auto& pair : recycleUndo) ReleaseRecycleEntries(pair.second);
+        recycleUndo.clear();
+    }
 
     uint64_t Enqueue(Request request)
     {
@@ -574,11 +754,38 @@ struct ShellBroker::Impl
             if (!result->succeeded) result->error = L"Shell could not open the item location.";
             break;
         case RequestKind::Recycle:
+        {
             result->kind = ResultKind::Recycle;
-            RecyclePaths(request.launchpadFolder, request.paths, result->affectedPaths, result->failed);
+            std::vector<RecycleEntry> recycleEntries;
+            RecyclePaths(request.launchpadFolder, request.paths, result->affectedPaths, result->failed, recycleEntries);
+            ClearRecycleUndo();
+            if (!recycleEntries.empty())
+            {
+                result->undoToken = nextUndoToken++;
+                if (nextUndoToken == 0) nextUndoToken = 1;
+                recycleUndo.emplace(result->undoToken, std::move(recycleEntries));
+            }
             result->succeeded = result->failed == 0;
             if (!result->succeeded) result->error = L"One or more launchpad items could not be moved to the Recycle Bin.";
             break;
+        }
+        case RequestKind::Restore:
+        {
+            result->kind = ResultKind::Restore;
+            result->undoToken = request.undoToken;
+            const auto undo = recycleUndo.find(request.undoToken);
+            if (undo == recycleUndo.end())
+            {
+                result->failed = 1;
+                result->error = L"The Recycle Bin undo record is no longer available.";
+                break;
+            }
+            RestorePaths(undo->second, result->affectedPaths, result->failed);
+            if (undo->second.empty()) recycleUndo.erase(undo);
+            result->succeeded = result->failed == 0;
+            if (!result->succeeded) result->error = L"One or more items could not be restored from the Recycle Bin.";
+            break;
+        }
         case RequestKind::ImportTree:
         {
             result->kind = ResultKind::ImportTree;
@@ -701,6 +908,7 @@ struct ShellBroker::Impl
         }
         if (SUCCEEDED(initialized))
         {
+            self->ClearRecycleUndo();
             CoDisableCallCancellation(nullptr);
             CoUninitialize();
         }
@@ -830,6 +1038,15 @@ uint64_t ShellBroker::RequestRecycle(const std::wstring& launchpadFolder, const 
     request.kind = RequestKind::Recycle;
     request.launchpadFolder = launchpadFolder;
     request.paths = sourcePaths;
+    return impl_->Enqueue(std::move(request));
+}
+
+uint64_t ShellBroker::RequestRestore(uint64_t undoToken)
+{
+    if (undoToken == 0) return 0;
+    Request request;
+    request.kind = RequestKind::Restore;
+    request.undoToken = undoToken;
     return impl_->Enqueue(std::move(request));
 }
 

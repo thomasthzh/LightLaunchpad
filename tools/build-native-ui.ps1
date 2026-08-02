@@ -127,6 +127,7 @@ try {
         src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp `
         src\LightLaunchpad.NativeUi\Catalog.cpp `
         src\LightLaunchpad.NativeUi\InteractionState.cpp `
+        src\LightLaunchpad.NativeUi\OrganizationState.cpp `
         src\LightLaunchpad.NativeUi\Persistence.cpp `
         src\LightLaunchpad.NativeUi\SceneGeometry.cpp `
         src\LightLaunchpad.NativeUi\SearchAccessibility.cpp `

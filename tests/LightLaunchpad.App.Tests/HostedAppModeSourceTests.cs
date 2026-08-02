@@ -418,10 +418,15 @@ public sealed class HostedAppModeSourceTests
         var broker = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "ShellBroker.cpp"));
 
         TestAssert.Contains("RequestRecycle", source);
-        TestAssert.Contains("RemoveItemsFromLayout(result->affectedPaths)", source);
+        TestAssert.Contains("CompleteRecycle(", source);
+        TestAssert.Contains("RemoveItemsFromLayout(removedPaths)", source);
+        TestAssert.Contains("RequestRestore", source);
         TestAssert.Contains("CLSID_FileOperation", broker);
         TestAssert.Contains("IsDirectChild", broker);
         TestAssert.Contains("FOF_ALLOWUNDO", broker);
+        TestAssert.Contains("FOFX_RECYCLEONDELETE", broker);
+        TestAssert.Contains("FOFX_ADDUNDORECORD", broker);
+        TestAssert.Contains("PostDeleteItem", broker);
         TestAssert.DoesNotContain("DeleteFileW(sourcePath.c_str())", source);
         TestAssert.Contains("Text(L\"Delete icon\", L\"删除图标\")", source);
         TestAssert.Contains("Text(L\"Delete selected icons\", L\"删除已选图标\")", source);

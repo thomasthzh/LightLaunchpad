@@ -63,6 +63,15 @@ function Send-LlpKey {
     [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($Window, 0x0100, [UIntPtr]$Key, [IntPtr]::Zero)
 }
 
+function Invoke-LlpContextCommand {
+    param([IntPtr]$Window, [int]$X, [int]$Y, [uint32]$Command)
+    Assert-True ([LightLaunchpadLaunchpadProbeNative]::PostMessage($Window, 0x0205, [UIntPtr]::Zero, (New-LlpMouseLParam $X $Y))) 'Could not open the item context menu.'
+    Start-Sleep -Milliseconds 180
+    Assert-True ([LightLaunchpadLaunchpadProbeNative]::PostMessage($Window, 0x0100, [UIntPtr]0x1B, [IntPtr]::Zero)) 'Could not dismiss the item context menu.'
+    Start-Sleep -Milliseconds 100
+    Assert-True ([LightLaunchpadLaunchpadProbeNative]::PostMessage($Window, 0x0111, [UIntPtr]$Command, [IntPtr]::Zero)) 'Could not invoke the context command.'
+}
+
 function Get-LlpMarkerNames {
     if (-not (Test-Path -LiteralPath $llpMarker)) { return @() }
     return @((Get-Content -Encoding UTF8 -LiteralPath $llpMarker | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) | ForEach-Object { [System.IO.Path]::GetFileName($_) })
@@ -117,6 +126,8 @@ public static class LightLaunchpadLaunchpadProbeNative {
     public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool PostMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
 
     public static IntPtr FindWindowForProcess(uint expectedProcessId) {
         IntPtr found = IntPtr.Zero;
@@ -240,6 +251,38 @@ public static class LightLaunchpadLaunchpadProbeNative {
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) { Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '05-edit-selected.png') }
     Send-LlpClick $llpWindow $llpSecondX $llpTileY $true
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) { Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '06-edit-multiselected.png') }
+
+    Invoke-LlpContextCommand $llpWindow $llpFirstX $llpTileY 2005
+    $llpSearchHistoryPath = Join-Path $llpDataDirectory 'search-history.json'
+    Wait-LlpCondition {
+        if (-not (Test-Path -LiteralPath $llpSearchHistoryPath)) { return $false }
+        try { return @((Get-Content -Raw -Encoding UTF8 -LiteralPath $llpSearchHistoryPath | ConvertFrom-Json).Items | Where-Object { $_.Favorite }).Count -eq 2 }
+        catch { return $false }
+    } 5000 'Favorite command did not persist both selected items.'
+    Start-Sleep -Milliseconds 150
+    if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) { Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '08-edit-favorites-saved.png') }
+
+    Assert-True ([LightLaunchpadLaunchpadProbeNative]::PostMessage($llpWindow, 0x0111, [UIntPtr]2003, [IntPtr]::Zero)) 'Could not invoke batch delete.'
+    $llpFirstPath = Join-Path $llpLaunchpad 'Flow Alpha.exe'
+    $llpSecondPath = Join-Path $llpLaunchpad 'Flow Beta.exe'
+    Wait-LlpCondition { -not (Test-Path -LiteralPath $llpFirstPath) -and -not (Test-Path -LiteralPath $llpSecondPath) } 8000 'Batch delete did not move both selected files to the Recycle Bin.'
+    Start-Sleep -Milliseconds 250
+    if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) { Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '09-edit-recycle-undo.png') }
+
+    $llpUndoX = $llpClient.Right / 2 + 234
+    $llpUndoY = $llpClient.Bottom - 51
+    Send-LlpClick $llpWindow $llpUndoX $llpUndoY
+    Wait-LlpCondition { (Test-Path -LiteralPath $llpFirstPath) -and (Test-Path -LiteralPath $llpSecondPath) } 8000 'Undo did not restore both recycled files.'
+    Wait-LlpCondition {
+        try { return [int](Get-Content -Raw -Encoding UTF8 -LiteralPath $llpReadyPath | ConvertFrom-Json).itemCount -eq 3 }
+        catch { return $false }
+    } 8000 'Catalog did not republish all restored items.'
+    $llpRestoredReady = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpReadyPath | ConvertFrom-Json
+    $llpRestoredNames = @($llpRestoredReady.itemPaths | ForEach-Object { [System.IO.Path]::GetFileName([string]$_) })
+    Assert-Equal 'Flow Alpha.exe,Flow Beta.exe,Flow Gamma.exe' ($llpRestoredNames -join ',') 'Undo did not restore the exact pre-delete layout order.'
+    Start-Sleep -Milliseconds 200
+    if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) { Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '10-edit-undo-restored.png') }
+
     Send-LlpKey $llpWindow 0x0D
     Start-Sleep -Milliseconds 150
     Assert-Equal 1 (@(Get-LlpMarkerNames).Count) 'Enter in Edit mode launched an item.'
@@ -282,7 +325,34 @@ public static class LightLaunchpadLaunchpadProbeNative {
     Assert-Equal 2 @($llpProbe.requestedPaths).Count 'Launchpad did not preserve the exact two clicked source paths.'
     Assert-Equal 'browse' ([string]$llpProbe.finalMode) 'Launchpad did not finish in Browse mode.'
     Assert-Equal 0 ([int]$llpProbe.finalSelectedItems) 'Browse mode retained persistent edit selection.'
+
+    $llpRestartProbePath = Join-Path $llpTempRoot 'launchpad-restart-flow.json'
+    $llpRestartReadyPath = Join-Path $llpTempRoot 'launchpad-restart-ready.json'
+    $llpPriorAppData = $env:APPDATA
+    $llpPriorLocalAppData = $env:LOCALAPPDATA
+    $llpPriorUserProfile = $env:USERPROFILE
+    try {
+        $env:APPDATA = $llpAppData
+        $env:LOCALAPPDATA = $llpLocalAppData
+        $env:USERPROFILE = $llpUserProfile
+        $llpProcess = Start-Process -FilePath $llpExecutable -ArgumentList @('--launchpad-flow-probe-file', $llpRestartProbePath, '--launchpad-flow-ready-file', $llpRestartReadyPath, '--diagnostics-log-file', $llpLogPath) -PassThru
+    }
+    finally {
+        $env:APPDATA = $llpPriorAppData
+        $env:LOCALAPPDATA = $llpPriorLocalAppData
+        $env:USERPROFILE = $llpPriorUserProfile
+    }
+    Wait-LlpCondition { Test-Path -LiteralPath $llpRestartReadyPath } 10000 'Restart catalog did not become ready.'
+    $llpRestartWindow = [LightLaunchpadLaunchpadProbeNative]::FindWindowForProcess([uint32]$llpProcess.Id)
+    Assert-True ($llpRestartWindow -ne [IntPtr]::Zero) 'Could not discover the restarted NativeUi window.'
+    [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($llpRestartWindow, 0x0312, [UIntPtr]0x4C55, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 250
+    if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) { Save-LlpWindowEvidence $llpRestartWindow (Join-Path $llpEvidenceRoot '11-restart-favorites-persisted.png') }
+    [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($llpRestartWindow, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)
+    if (-not $llpProcess.WaitForExit(10000)) { throw 'Restart favorite probe did not exit.' }
+    Assert-Equal 0 $llpProcess.ExitCode 'Restart favorite probe exit code mismatch.'
     Write-Output "METRIC LaunchpadFlow launches=$([int]$llpProbe.successfulLaunches) editSelections=$([int]$llpProbe.editSelectionClicks) maxSelected=$([int]$llpProbe.maxSelectedItems)"
+    Write-Output 'METRIC FavoritePersistence selected=2 persisted=2 restartCatalog=3'
     Write-Output 'PASS LaunchpadFlow_BrowseLaunchesAndEditOrganizesWithoutAccidentalLaunch'
 }
 finally {

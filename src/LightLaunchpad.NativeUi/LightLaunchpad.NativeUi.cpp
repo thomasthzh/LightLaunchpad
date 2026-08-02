@@ -17,6 +17,7 @@
 #include "LightLaunchpad.Version.h"
 #include "Catalog.h"
 #include "InteractionState.h"
+#include "OrganizationState.h"
 #include "Persistence.h"
 #include "SceneGeometry.h"
 #include "SearchAccessibility.h"
@@ -84,6 +85,8 @@ constexpr int ItemLaunchCommand = 2001;
 constexpr int ItemOpenLocationCommand = 2002;
 constexpr int ItemRemoveCommand = 2003;
 constexpr int ItemRenameCommand = 2004;
+constexpr int ItemFavoriteCommand = 2005;
+constexpr int ItemUnfavoriteCommand = 2006;
 constexpr int RegionDeleteCommand = 2101;
 constexpr int RegionRenameCommand = 2102;
 constexpr int RegionRenameSelectedCommand = 2103;
@@ -118,6 +121,7 @@ constexpr int DragTargetSettleMs = 55;
 constexpr double DragReflowSmoothing = 0.24;
 constexpr UINT_PTR HotkeyEditSubclassId = 0x4C5602;
 constexpr UINT_PTR TrayIconRetryTimerId = 0x4C5603;
+constexpr UINT_PTR OrganizationFeedbackTimerId = 0x4C5604;
 constexpr UINT TrayIconRetryMs = 1000;
 constexpr int TrayIconRetryMaxAttempts = 8;
 constexpr DWORD ActivationIpcTimeoutMs = 2000;
@@ -282,6 +286,14 @@ enum class TileVisualState
     DropTarget
 };
 
+struct OrganizationFeedback
+{
+    std::wstring text;
+    bool warning = false;
+    bool hasUndo = false;
+    ULONGLONG expiresAt = 0;
+};
+
 struct SpotlightLayerBuffer
 {
     int width = 0;
@@ -323,6 +335,8 @@ llp::input::TextBuffer g_searchInput;
 llp::accessibility::SearchAccessibility g_searchAccessibility;
 llp::interaction::SpotlightState g_spotlightState;
 llp::interaction::LaunchpadState g_launchpadState;
+llp::organization::State g_organizationState;
+OrganizationFeedback g_organizationFeedback;
 bool g_searchInputActive = false;
 bool g_searchPointerSelecting = false;
 int g_searchTextOffset = 0;
@@ -362,6 +376,7 @@ IDWriteFactory* g_dwriteFactory = nullptr;
 IDWriteTextFormat* g_searchTextFormat = nullptr;
 IDWriteTextFormat* g_tileTextFormat = nullptr;
 IDWriteTextFormat* g_headerTextFormat = nullptr;
+IDWriteTextFormat* g_iconTextFormat = nullptr;
 ID2D1Bitmap* g_spotlightBackdropD2dBitmap = nullptr;
 HFONT g_uiFont = nullptr;
 bool g_spotlightLayerBasePass = false;
@@ -485,10 +500,51 @@ struct LaunchpadFlowProbeState
     std::vector<std::wstring> requestedPaths;
 };
 
+struct OrganizationProbeState
+{
+    bool active = false;
+    int stage = 0;
+    std::wstring outputPath;
+    std::wstring root;
+    std::wstring firstPath;
+    std::wstring secondPath;
+    std::wstring thirdPath;
+    int batchRemoved = 0;
+    int batchFailed = 0;
+    int batchRestored = 0;
+    int batchRestoreFailed = 0;
+    int collisionRestoreFailed = 0;
+    int retryRestored = 0;
+    uint64_t batchUndoToken = 0;
+    uint64_t collisionUndoToken = 0;
+    DWORD brokerThreadId = 0;
+    std::wstring apartment;
+    bool batchAbsentAfterRecycle = false;
+    bool batchContentsRestored = false;
+    bool collisionPreserved = false;
+    bool retryContentRestored = false;
+};
+
+struct RegionUndoProbeState
+{
+    bool active = false;
+    std::wstring outputPath;
+    std::wstring regionId = L"work";
+    bool regionDeleted = false;
+    bool itemsMovedToUncategorized = false;
+    bool sourceFilesPreserved = false;
+    bool undoAvailable = false;
+    bool regionRestored = false;
+    bool placementsRestored = false;
+    bool exactOrderRestored = false;
+};
+
 CatalogBrokerProbeState g_catalogBrokerProbe;
 ShellImportProbeState g_shellImportProbe;
 SpotlightFlowProbeState g_spotlightFlowProbe;
 LaunchpadFlowProbeState g_launchpadFlowProbe;
+OrganizationProbeState g_organizationProbe;
+RegionUndoProbeState g_regionUndoProbe;
 
 bool ShowTextInputDialog(const std::wstring& title, const std::wstring& label, const std::wstring& initialValue, std::wstring& result);
 bool RegisterCurrentHotkey();
@@ -517,6 +573,8 @@ std::wstring NormalizeHotkeyText(const std::wstring& value);
 void RequestSearchRepaint(HWND hwnd, bool erase);
 void ResetDragState();
 void UpdateImeWindowPosition(HWND hwnd);
+void RequestOrganizationUndo();
+bool ProbeFileExists(const std::wstring& path);
 
 template <typename T>
 void SafeRelease(T*& value)
@@ -1304,6 +1362,220 @@ uint64_t CurrentUnixMilliseconds()
     return ticks.QuadPart <= WindowsToUnixEpochTicks ? 0 : (ticks.QuadPart - WindowsToUnixEpochTicks) / 10000ULL;
 }
 
+RECT OrganizationFeedbackRect(const RECT& client)
+{
+    const int width = static_cast<int>(std::min<LONG>(560, std::max<LONG>(280, client.right - client.left - 80)));
+    const int left = client.left + (client.right - client.left - width) / 2;
+    return { left, client.bottom - 78, left + width, client.bottom - 24 };
+}
+
+RECT OrganizationUndoRect(const RECT& client)
+{
+    RECT result = OrganizationFeedbackRect(client);
+    result.left = result.right - 92;
+    return result;
+}
+
+void SetOrganizationFeedback(const std::wstring& text, bool warning, bool hasUndo, ULONGLONG durationMilliseconds = 8000)
+{
+    g_organizationFeedback.text = text;
+    g_organizationFeedback.warning = warning;
+    g_organizationFeedback.hasUndo = hasUndo;
+    g_organizationFeedback.expiresAt = GetTickCount64() + durationMilliseconds;
+    if (g_hwnd)
+    {
+        SetTimer(g_hwnd, OrganizationFeedbackTimerId, 100, nullptr);
+        InvalidateRect(g_hwnd, nullptr, FALSE);
+    }
+}
+
+std::wstring ItemCountText(size_t count)
+{
+    if (g_settings.language == L"Chinese") return std::to_wstring(count) + L" 个项目";
+    return std::to_wstring(count) + (count == 1 ? L" item" : L" items");
+}
+
+void ClearOrganizationFeedback()
+{
+    g_organizationFeedback = {};
+    if (g_hwnd)
+    {
+        KillTimer(g_hwnd, OrganizationFeedbackTimerId);
+        InvalidateRect(g_hwnd, nullptr, FALSE);
+    }
+}
+
+llp::organization::LayoutItem OrganizationItem(const LaunchItem& item)
+{
+    return { item.stableId, item.sourcePath, item.displayName, item.regionId, item.order };
+}
+
+std::vector<llp::organization::LayoutItem> OrganizationItemsForPaths(const std::vector<std::wstring>& sourcePaths)
+{
+    std::vector<llp::organization::LayoutItem> result;
+    for (const auto& item : g_items)
+    {
+        if (ContainsPath(sourcePaths, item.sourcePath)) result.push_back(OrganizationItem(item));
+    }
+    return result;
+}
+
+std::vector<std::wstring> OrganizationPaths(const std::vector<llp::organization::LayoutItem>& items)
+{
+    std::vector<std::wstring> result;
+    result.reserve(items.size());
+    for (const auto& item : items) result.push_back(item.sourcePath);
+    return result;
+}
+
+void RestoreOrganizationItems(const std::vector<llp::organization::LayoutItem>& snapshots, bool selectRestored = true)
+{
+    for (const auto& snapshot : snapshots)
+    {
+        auto found = std::find_if(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
+            return SamePath(item.sourcePath, snapshot.sourcePath);
+        });
+        if (found == g_items.end())
+        {
+            LaunchItem restored = {};
+            restored.sourcePath = snapshot.sourcePath;
+            restored.displayName = snapshot.displayName;
+            restored.regionId = snapshot.regionId;
+            restored.order = snapshot.order;
+            restored.stableId = snapshot.stableId.empty()
+                ? llp::catalog::StableItemId(snapshot.sourcePath)
+                : snapshot.stableId;
+            g_items.push_back(std::move(restored));
+        }
+        else
+        {
+            found->displayName = snapshot.displayName;
+            found->regionId = snapshot.regionId;
+            found->order = snapshot.order;
+        }
+        if (selectRestored && !ContainsPath(g_selectedSourcePaths, snapshot.sourcePath)) g_selectedSourcePaths.push_back(snapshot.sourcePath);
+    }
+
+    std::vector<std::wstring> affectedRegions;
+    for (const auto& snapshot : snapshots)
+    {
+        if (!ContainsRegionId(affectedRegions, snapshot.regionId)) affectedRegions.push_back(snapshot.regionId);
+    }
+    for (const auto& regionId : affectedRegions)
+    {
+        std::vector<LaunchItem*> ordered;
+        for (auto& item : g_items)
+        {
+            if (CompareStringOrdinal(item.regionId.c_str(), -1, regionId.c_str(), -1, TRUE) != CSTR_EQUAL) continue;
+            const bool isRestored = std::any_of(snapshots.begin(), snapshots.end(), [&](const llp::organization::LayoutItem& snapshot) {
+                return CompareStringOrdinal(snapshot.regionId.c_str(), -1, regionId.c_str(), -1, TRUE) == CSTR_EQUAL
+                    && SamePath(snapshot.sourcePath, item.sourcePath);
+            });
+            if (!isRestored) ordered.push_back(&item);
+        }
+        std::stable_sort(ordered.begin(), ordered.end(), [](const LaunchItem* left, const LaunchItem* right) {
+            return left->order < right->order;
+        });
+        std::vector<const llp::organization::LayoutItem*> restored;
+        for (const auto& snapshot : snapshots)
+        {
+            if (CompareStringOrdinal(snapshot.regionId.c_str(), -1, regionId.c_str(), -1, TRUE) == CSTR_EQUAL) restored.push_back(&snapshot);
+        }
+        std::stable_sort(restored.begin(), restored.end(), [](const auto* left, const auto* right) {
+            return left->order < right->order;
+        });
+        for (const auto* snapshot : restored)
+        {
+            auto item = std::find_if(g_items.begin(), g_items.end(), [&](const LaunchItem& candidate) {
+                return SamePath(candidate.sourcePath, snapshot->sourcePath);
+            });
+            if (item == g_items.end()) continue;
+            const int insertAt = std::clamp(snapshot->order, 0, static_cast<int>(ordered.size()));
+            ordered.insert(ordered.begin() + insertAt, &*item);
+        }
+        for (int order = 0; order < static_cast<int>(ordered.size()); ++order) ordered[order]->order = order;
+    }
+    g_missingLayoutItems.erase(
+        std::remove_if(g_missingLayoutItems.begin(), g_missingLayoutItems.end(), [&](const LaunchItem& item) {
+            return std::any_of(snapshots.begin(), snapshots.end(), [&](const llp::organization::LayoutItem& snapshot) {
+                return SamePath(item.sourcePath, snapshot.sourcePath);
+            });
+        }),
+        g_missingLayoutItems.end());
+    SortItems();
+}
+
+void RequestRecycleForPaths(const std::vector<std::wstring>& sourcePaths)
+{
+    const auto snapshots = OrganizationItemsForPaths(sourcePaths);
+    if (snapshots.empty()) return;
+    const auto requestId = g_shellBroker.RequestRecycle(g_settings.launchpadFolder, sourcePaths);
+    if (requestId == 0)
+    {
+        SetOrganizationFeedback(Text(L"No icons were deleted because the Shell broker is unavailable.", L"Shell 后台不可用，未删除任何图标。"), true, false, 5000);
+        return;
+    }
+    g_organizationState.TrackDelete(requestId, snapshots);
+    SetOrganizationFeedback(Text(L"Moving items to the Recycle Bin...", L"正在将项目移到回收站…"), false, false, 60000);
+}
+
+void SetFavoriteForPaths(const std::vector<std::wstring>& sourcePaths, bool favorite)
+{
+    int changed = 0;
+    for (auto& item : g_items)
+    {
+        if (!ContainsPath(sourcePaths, item.sourcePath)) continue;
+        if (item.stableId.empty()) item.stableId = llp::catalog::StableItemId(item.sourcePath);
+        if (g_searchHistory.Get(item.stableId).favorite == favorite) continue;
+        g_searchHistory.SetFavorite(item.stableId, favorite);
+        changed++;
+    }
+    if (changed == 0) return;
+    RebuildSearchIndex();
+    RebuildFiltered();
+    const bool saved = SaveSearchHistory();
+    const std::wstring message = favorite
+        ? Text(L"Added ", L"已将 ") + ItemCountText(changed) + Text(L" to Favorites.", L"加入收藏。")
+        : Text(L"Removed ", L"已将 ") + ItemCountText(changed) + Text(L" from Favorites.", L"取消收藏。");
+    SetOrganizationFeedback(
+        saved ? message : message + Text(L" The change could not be saved for restart.", L" 但无法保存到下次启动。"),
+        !saved,
+        false,
+        5000);
+}
+
+void RequestOrganizationUndo()
+{
+    const uint64_t now = GetTickCount64();
+    const auto kind = g_organizationState.CurrentUndoKind(now);
+    if (kind == llp::organization::UndoKind::Recycle)
+    {
+        uint64_t token = 0;
+        if (!g_organizationState.BeginRecycleUndo(now, token)) return;
+        if (g_shellBroker.RequestRestore(token) == 0)
+        {
+            g_organizationState.Expire(UINT64_MAX);
+            SetOrganizationFeedback(Text(L"Undo could not start because the Shell broker is unavailable.", L"Shell 后台不可用，无法开始撤销。"), true, false, 5000);
+            return;
+        }
+        SetOrganizationFeedback(Text(L"Restoring items from the Recycle Bin...", L"正在从回收站恢复项目…"), false, false, 60000);
+        return;
+    }
+    if (kind == llp::organization::UndoKind::Region)
+    {
+        std::vector<llp::organization::Region> regions;
+        std::vector<llp::organization::LayoutItem> items;
+        if (!g_organizationState.TakeRegionUndo(now, regions, items)) return;
+        g_regions.clear();
+        for (const auto& region : regions) g_regions.push_back({ region.id, region.name, region.order });
+        RestoreOrganizationItems(items, false);
+        SaveLayout();
+        RebuildFiltered();
+        SetOrganizationFeedback(Text(L"Region deletion undone.", L"已撤销区域删除。"), false, false, 4000);
+        InvalidateRect(g_hwnd, nullptr, TRUE);
+    }
+}
+
 void MoveItemsToTarget(const std::vector<std::wstring>& sourcePaths, const DropTarget& target)
 {
     if (!target.valid || !RegionExists(target.regionId)) return;
@@ -1626,6 +1898,19 @@ void RenameSelectedRegions(const std::vector<std::wstring>& regionIds)
 
 void DeleteSelectedRegions(const std::vector<std::wstring>& regionIds)
 {
+    const bool hasDeletableRegion = std::any_of(regionIds.begin(), regionIds.end(), [](const std::wstring& regionId) {
+        return RegionExists(regionId) && !IsUncategorizedRegion(regionId);
+    });
+    if (!hasDeletableRegion) return;
+
+    std::vector<llp::organization::Region> regionSnapshots;
+    regionSnapshots.reserve(g_regions.size());
+    for (const auto& region : g_regions) regionSnapshots.push_back({ region.id, region.name, region.order });
+    std::vector<llp::organization::LayoutItem> itemSnapshots;
+    itemSnapshots.reserve(g_items.size());
+    for (const auto& item : g_items) itemSnapshots.push_back(OrganizationItem(item));
+    g_organizationState.RecordRegionChange(regionSnapshots, itemSnapshots, GetTickCount64());
+
     for (const auto& regionId : regionIds)
     {
         if (!IsUncategorizedRegion(regionId))
@@ -1641,6 +1926,7 @@ void DeleteSelectedRegions(const std::vector<std::wstring>& regionIds)
     SortItems();
     SaveLayout();
     RebuildFiltered();
+    SetOrganizationFeedback(Text(L"Region deleted; its items moved to Uncategorized.", L"区域已删除，其中项目已移到未分类。"), false, true);
     InvalidateRect(g_hwnd, nullptr, TRUE);
 }
 
@@ -2390,6 +2676,103 @@ int CommandLineIntValue(const wchar_t* name, int fallback, int minimum, int maxi
     return std::clamp(static_cast<int>(parsed), minimum, maximum);
 }
 
+std::string ReadSmallFileUtf8(const std::wstring& path)
+{
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return {};
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > 1024 * 1024)
+    {
+        CloseHandle(file);
+        return {};
+    }
+    std::string result(static_cast<size_t>(size.QuadPart), '\0');
+    DWORD read = 0;
+    const bool succeeded = result.empty()
+        || (ReadFile(file, result.data(), static_cast<DWORD>(result.size()), &read, nullptr) && read == result.size());
+    CloseHandle(file);
+    return succeeded ? result : std::string{};
+}
+
+std::string BuildOrganizationProbeJson()
+{
+    Json document = {
+        { "brokerApartment", llp::persistence::WideToUtf8(g_organizationProbe.apartment) },
+        { "uiThreadId", GetCurrentThreadId() },
+        { "brokerThreadId", g_organizationProbe.brokerThreadId },
+        { "batchRemoved", g_organizationProbe.batchRemoved },
+        { "batchFailed", g_organizationProbe.batchFailed },
+        { "batchUndoToken", g_organizationProbe.batchUndoToken },
+        { "batchAbsentAfterRecycle", g_organizationProbe.batchAbsentAfterRecycle },
+        { "batchRestored", g_organizationProbe.batchRestored },
+        { "batchRestoreFailed", g_organizationProbe.batchRestoreFailed },
+        { "batchContentsRestored", g_organizationProbe.batchContentsRestored },
+        { "collisionUndoToken", g_organizationProbe.collisionUndoToken },
+        { "collisionRestoreFailed", g_organizationProbe.collisionRestoreFailed },
+        { "collisionPreserved", g_organizationProbe.collisionPreserved },
+        { "retryRestored", g_organizationProbe.retryRestored },
+        { "retryContentRestored", g_organizationProbe.retryContentRestored },
+        { "completed", g_organizationProbe.stage == 5 }
+    };
+    return document.dump(2) + "\n";
+}
+
+std::string BuildRegionUndoProbeJson()
+{
+    Json document = {
+        { "regionDeleted", g_regionUndoProbe.regionDeleted },
+        { "itemsMovedToUncategorized", g_regionUndoProbe.itemsMovedToUncategorized },
+        { "sourceFilesPreserved", g_regionUndoProbe.sourceFilesPreserved },
+        { "undoAvailable", g_regionUndoProbe.undoAvailable },
+        { "regionRestored", g_regionUndoProbe.regionRestored },
+        { "placementsRestored", g_regionUndoProbe.placementsRestored },
+        { "exactOrderRestored", g_regionUndoProbe.exactOrderRestored }
+    };
+    return document.dump(2) + "\n";
+}
+
+void RunRegionUndoProbe()
+{
+    std::vector<llp::organization::LayoutItem> before;
+    std::vector<std::wstring> beforeOrder;
+    for (const auto& item : g_items)
+    {
+        before.push_back(OrganizationItem(item));
+        beforeOrder.push_back(item.sourcePath);
+    }
+    DeleteSelectedRegions({ g_regionUndoProbe.regionId });
+    g_regionUndoProbe.regionDeleted = !RegionExists(g_regionUndoProbe.regionId);
+    g_regionUndoProbe.itemsMovedToUncategorized = std::all_of(before.begin(), before.end(), [&](const llp::organization::LayoutItem& snapshot) {
+        if (CompareStringOrdinal(snapshot.regionId.c_str(), -1, g_regionUndoProbe.regionId.c_str(), -1, TRUE) != CSTR_EQUAL) return true;
+        const auto found = std::find_if(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
+            return SamePath(item.sourcePath, snapshot.sourcePath);
+        });
+        return found != g_items.end() && IsUncategorizedRegion(found->regionId);
+    });
+    g_regionUndoProbe.sourceFilesPreserved = std::all_of(before.begin(), before.end(), [](const llp::organization::LayoutItem& snapshot) {
+        return ProbeFileExists(snapshot.sourcePath);
+    });
+    g_regionUndoProbe.undoAvailable = g_organizationState.CanUndo(GetTickCount64());
+    RequestOrganizationUndo();
+    g_regionUndoProbe.regionRestored = RegionExists(g_regionUndoProbe.regionId);
+    g_regionUndoProbe.placementsRestored = std::all_of(before.begin(), before.end(), [&](const llp::organization::LayoutItem& snapshot) {
+        const auto found = std::find_if(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
+            return SamePath(item.sourcePath, snapshot.sourcePath);
+        });
+        return found != g_items.end()
+            && CompareStringOrdinal(found->regionId.c_str(), -1, snapshot.regionId.c_str(), -1, TRUE) == CSTR_EQUAL
+            && found->order == snapshot.order;
+    });
+    g_regionUndoProbe.exactOrderRestored = g_items.size() == beforeOrder.size();
+    for (size_t index = 0; g_regionUndoProbe.exactOrderRestored && index < beforeOrder.size(); ++index)
+    {
+        g_regionUndoProbe.exactOrderRestored = SamePath(g_items[index].sourcePath, beforeOrder[index]);
+    }
+    WriteFileUtf8(g_regionUndoProbe.outputPath, BuildRegionUndoProbeJson());
+    g_regionUndoProbe.active = false;
+    DestroyWindow(g_hwnd);
+}
+
 std::string BuildCatalogBrokerProbeJson()
 {
     Json document = {
@@ -2504,6 +2887,8 @@ bool WriteSpotlightFlowReadyState()
 bool WriteLaunchpadFlowReadyState()
 {
     if (!g_launchpadFlowProbe.active || g_launchpadFlowProbe.readyPath.empty()) return false;
+    Json itemPaths = Json::array();
+    for (const auto& item : g_items) itemPaths.push_back(llp::persistence::WideToUtf8(item.sourcePath));
     const Json ready = {
         { "itemCount", g_items.size() },
         { "filteredCount", g_filtered.size() },
@@ -2515,7 +2900,8 @@ bool WriteLaunchpadFlowReadyState()
         { "lastMatchedIndex", g_launchpadFlowProbe.lastMatchedIndex },
         { "browsePresses", g_launchpadFlowProbe.browsePresses },
         { "browseClickLaunches", g_launchpadFlowProbe.browseClickLaunches },
-        { "requestedPaths", g_launchpadFlowProbe.requestedPaths.size() }
+        { "requestedPaths", g_launchpadFlowProbe.requestedPaths.size() },
+        { "itemPaths", itemPaths }
     };
     return WriteFileUtf8(g_launchpadFlowProbe.readyPath, ready.dump(2) + "\n");
 }
@@ -2532,11 +2918,91 @@ std::string BuildShellImportProbeJson()
     return document.dump(2) + "\n";
 }
 
+bool ProbeFileExists(const std::wstring& path)
+{
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+void FinishOrganizationProbe()
+{
+    WriteFileUtf8(g_organizationProbe.outputPath, BuildOrganizationProbeJson());
+    g_organizationProbe.active = false;
+    DestroyWindow(g_hwnd);
+}
+
+bool HandleOrganizationProbeResult(const llp::shell::Result& result)
+{
+    if (!g_organizationProbe.active) return false;
+    g_organizationProbe.brokerThreadId = result.brokerThreadId;
+    g_organizationProbe.apartment = result.apartment;
+
+    if (g_organizationProbe.stage == 0 && result.kind == llp::shell::ResultKind::Recycle)
+    {
+        g_organizationProbe.batchRemoved = static_cast<int>(result.affectedPaths.size());
+        g_organizationProbe.batchFailed = result.failed;
+        g_organizationProbe.batchUndoToken = result.undoToken;
+        g_organizationProbe.batchAbsentAfterRecycle = !ProbeFileExists(g_organizationProbe.firstPath)
+            && !ProbeFileExists(g_organizationProbe.secondPath);
+        g_organizationProbe.stage = 1;
+        if (g_shellBroker.RequestRestore(result.undoToken) == 0) FinishOrganizationProbe();
+        return true;
+    }
+    if (g_organizationProbe.stage == 1 && result.kind == llp::shell::ResultKind::Restore)
+    {
+        g_organizationProbe.batchRestored = static_cast<int>(result.affectedPaths.size());
+        g_organizationProbe.batchRestoreFailed = result.failed;
+        g_organizationProbe.batchContentsRestored = ReadSmallFileUtf8(g_organizationProbe.firstPath) == "alpha"
+            && ReadSmallFileUtf8(g_organizationProbe.secondPath) == "bravo";
+        g_organizationProbe.stage = 2;
+        if (g_shellBroker.RequestRecycle(g_organizationProbe.root, { g_organizationProbe.thirdPath }) == 0) FinishOrganizationProbe();
+        return true;
+    }
+    if (g_organizationProbe.stage == 2 && result.kind == llp::shell::ResultKind::Recycle)
+    {
+        g_organizationProbe.collisionUndoToken = result.undoToken;
+        if (!WriteFileUtf8(g_organizationProbe.thirdPath, "collision"))
+        {
+            FinishOrganizationProbe();
+            return true;
+        }
+        g_organizationProbe.stage = 3;
+        if (g_shellBroker.RequestRestore(result.undoToken) == 0) FinishOrganizationProbe();
+        return true;
+    }
+    if (g_organizationProbe.stage == 3 && result.kind == llp::shell::ResultKind::Restore)
+    {
+        g_organizationProbe.collisionRestoreFailed = result.failed;
+        g_organizationProbe.collisionPreserved = result.affectedPaths.empty()
+            && ReadSmallFileUtf8(g_organizationProbe.thirdPath) == "collision";
+        if (!DeleteFileW(g_organizationProbe.thirdPath.c_str()))
+        {
+            FinishOrganizationProbe();
+            return true;
+        }
+        g_organizationProbe.stage = 4;
+        if (g_shellBroker.RequestRestore(g_organizationProbe.collisionUndoToken) == 0) FinishOrganizationProbe();
+        return true;
+    }
+    if (g_organizationProbe.stage == 4 && result.kind == llp::shell::ResultKind::Restore)
+    {
+        g_organizationProbe.retryRestored = static_cast<int>(result.affectedPaths.size());
+        g_organizationProbe.retryContentRestored = ReadSmallFileUtf8(g_organizationProbe.thirdPath) == "charlie";
+        g_organizationProbe.stage = 5;
+        FinishOrganizationProbe();
+        return true;
+    }
+
+    FinishOrganizationProbe();
+    return true;
+}
+
 void HandleShellBrokerResult(LPARAM lParam)
 {
     std::unique_ptr<llp::shell::Result> result(reinterpret_cast<llp::shell::Result*>(lParam));
     if (!result) return;
     g_catalogBrokerThreadId = result->brokerThreadId;
+    if (HandleOrganizationProbeResult(*result)) return;
     switch (result->kind)
     {
     case llp::shell::ResultKind::Catalog:
@@ -2572,6 +3038,11 @@ void HandleShellBrokerResult(LPARAM lParam)
             if (result->snapshot)
             {
                 ApplyCatalogSnapshot(*result->snapshot, result->history.get(), result->historyWritable);
+                if (g_regionUndoProbe.active)
+                {
+                    RunRegionUndoProbe();
+                    break;
+                }
                 if (g_spotlightFlowProbe.active) g_spotlightFlowProbe.readyWritten = WriteSpotlightFlowReadyState();
                 if (g_launchpadFlowProbe.active) g_launchpadFlowProbe.readyWritten = WriteLaunchpadFlowReadyState();
             }
@@ -2632,12 +3103,20 @@ void HandleShellBrokerResult(LPARAM lParam)
         }
         break;
     case llp::shell::ResultKind::Recycle:
-        if (!result->affectedPaths.empty())
+    {
+        const auto completion = g_organizationState.CompleteRecycle(
+            result->requestId,
+            result->affectedPaths,
+            result->failed,
+            result->undoToken,
+            GetTickCount64());
+        if (completion.foundRequest && !completion.removedItems.empty())
         {
-            RemoveItemsFromLayout(result->affectedPaths);
+            const auto removedPaths = OrganizationPaths(completion.removedItems);
+            RemoveItemsFromLayout(removedPaths);
             g_missingLayoutItems.erase(
                 std::remove_if(g_missingLayoutItems.begin(), g_missingLayoutItems.end(), [&](const LaunchItem& item) {
-                    return ContainsPath(result->affectedPaths, item.sourcePath);
+                    return ContainsPath(removedPaths, item.sourcePath);
                 }),
                 g_missingLayoutItems.end());
             SortItems();
@@ -2646,11 +3125,72 @@ void HandleShellBrokerResult(LPARAM lParam)
             InvalidateRect(g_hwnd, nullptr, TRUE);
         }
         RequestCatalogRefresh();
-        if (!result->succeeded && !result->error.empty())
+        if (!completion.foundRequest)
         {
-            MessageBoxW(g_hwnd, result->error.c_str(), L"LightLaunchpad Shell operation", MB_ICONWARNING | MB_OK);
+            SetOrganizationFeedback(Text(L"The delete result could not be matched; the catalog will refresh without discarding layout data.", L"无法匹配删除结果；目录将刷新，布局数据不会被丢弃。"), true, false, 6000);
+        }
+        else if (completion.removedItems.empty())
+        {
+            SetOrganizationFeedback(Text(L"Nothing was deleted. Check the files and try again.", L"未删除任何项目。请检查文件后重试。"), true, false, 6000);
+        }
+        else if (completion.partialFailure)
+        {
+            SetOrganizationFeedback(
+                Text(L"Moved ", L"已移动 ") + ItemCountText(completion.removedItems.size())
+                    + Text(L"; ", L"；") + ItemCountText(completion.failedCount)
+                    + Text(L" could not be deleted.", L"无法删除。"),
+                true,
+                completion.canUndo);
+        }
+        else
+        {
+            SetOrganizationFeedback(
+                Text(L"Moved ", L"已将 ") + ItemCountText(completion.removedItems.size())
+                    + Text(L" to the Recycle Bin.", L"移到回收站。"),
+                false,
+                completion.canUndo);
         }
         break;
+    }
+    case llp::shell::ResultKind::Restore:
+    {
+        const auto completion = g_organizationState.CompleteRestore(
+            result->undoToken,
+            result->affectedPaths,
+            result->failed,
+            GetTickCount64());
+        if (completion.foundUndo && !completion.restoredItems.empty())
+        {
+            RestoreOrganizationItems(completion.restoredItems);
+            SaveLayout();
+            RebuildSearchIndex();
+            RebuildFiltered();
+            InvalidateRect(g_hwnd, nullptr, TRUE);
+        }
+        RequestCatalogRefresh();
+        if (!completion.foundUndo)
+        {
+            SetOrganizationFeedback(Text(L"The undo record is no longer available; the catalog will refresh safely.", L"撤销记录已不可用；目录将安全刷新。"), true, false, 6000);
+        }
+        else if (completion.stillMissingItems.empty())
+        {
+            SetOrganizationFeedback(
+                Text(L"Restored ", L"已恢复 ") + ItemCountText(completion.restoredItems.size()) + Text(L".", L"。"),
+                false,
+                false,
+                4000);
+        }
+        else
+        {
+            SetOrganizationFeedback(
+                Text(L"Restored ", L"已恢复 ") + ItemCountText(completion.restoredItems.size())
+                    + Text(L"; ", L"；") + ItemCountText(completion.failedCount)
+                    + Text(L" still could not be restored. Resolve path conflicts and choose Undo again.", L"仍无法恢复。请解决路径冲突后再次选择撤销。"),
+                true,
+                g_organizationState.CanUndo(GetTickCount64()));
+        }
+        break;
+    }
     case llp::shell::ResultKind::Launch:
         if (g_spotlightFlowProbe.active && result->succeeded) g_spotlightFlowProbe.successfulLaunches++;
         if (g_launchpadFlowProbe.active && result->succeeded) g_launchpadFlowProbe.successfulLaunches++;
@@ -4010,7 +4550,7 @@ void DrawTextClipped(HDC dc, const std::wstring& text, RECT rect, UINT format, C
 
 bool InitializeDirectRenderer()
 {
-    if (g_d2dFactory && g_dwriteFactory && g_searchTextFormat && g_tileTextFormat && g_headerTextFormat)
+    if (g_d2dFactory && g_dwriteFactory && g_searchTextFormat && g_tileTextFormat && g_headerTextFormat && g_iconTextFormat)
     {
         return true;
     }
@@ -4037,8 +4577,12 @@ bool InitializeDirectRenderer()
     {
         g_dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 18.0f, L"", &g_headerTextFormat);
     }
+    if (!g_iconTextFormat)
+    {
+        g_dwriteFactory->CreateTextFormat(L"Segoe Fluent Icons", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 17.0f, L"", &g_iconTextFormat);
+    }
 
-    return g_searchTextFormat && g_tileTextFormat && g_headerTextFormat;
+    return g_searchTextFormat && g_tileTextFormat && g_headerTextFormat && g_iconTextFormat;
 }
 
 void DestroyDirectRenderer()
@@ -4048,6 +4592,7 @@ void DestroyDirectRenderer()
     SafeRelease(g_searchTextFormat);
     SafeRelease(g_tileTextFormat);
     SafeRelease(g_headerTextFormat);
+    SafeRelease(g_iconTextFormat);
     SafeRelease(g_dwriteFactory);
     SafeRelease(g_d2dFactory);
 }
@@ -5680,6 +6225,36 @@ void DrawLaunchpadModeControl(HDC dc, const RECT& client)
     DeleteObject(font);
 }
 
+void DrawOrganizationFeedback(HDC dc, const RECT& client)
+{
+    if (IsSpotlightMode() || g_organizationFeedback.text.empty()) return;
+    const RECT rect = OrganizationFeedbackRect(client);
+    DrawRoundedRect(
+        dc,
+        rect,
+        g_organizationFeedback.warning ? RGB(74, 52, 42) : RGB(34, 54, 70),
+        g_organizationFeedback.warning ? RGB(224, 170, 116) : RGB(118, 184, 226),
+        16);
+    RECT textRect = { rect.left + 18, rect.top + 5, rect.right - 18, rect.bottom - 5 };
+    if (g_organizationFeedback.hasUndo) textRect.right -= 92;
+    HFONT font = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    DrawTextClipped(dc, g_organizationFeedback.text, textRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(242, 247, 252));
+    if (g_organizationFeedback.hasUndo)
+    {
+        const RECT undoRect = OrganizationUndoRect(client);
+        HPEN divider = CreatePen(PS_SOLID, 1, RGB(104, 142, 174));
+        HGDIOBJ oldPen = SelectObject(dc, divider);
+        MoveToEx(dc, undoRect.left, undoRect.top + 10, nullptr);
+        LineTo(dc, undoRect.left, undoRect.bottom - 10);
+        SelectObject(dc, oldPen);
+        DeleteObject(divider);
+        DrawTextClipped(dc, Text(L"Undo", L"撤销"), undoRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, RGB(156, 216, 255));
+    }
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+}
+
 struct PendingIconDraw
 {
     HICON icon = nullptr;
@@ -6101,6 +6676,11 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
                 RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
                 const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
                 DrawTextDirect(target, g_tileTextFormat, item.displayName, labelRect, labelColor, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP);
+                if (g_searchHistory.Get(item.stableId).favorite)
+                {
+                    RECT favoriteRect = { visualTileRect.right - 30, visualTileRect.top + 6, visualTileRect.right - 8, visualTileRect.top + 28 };
+                    DrawTextDirect(target, g_iconTextFormat, L"\xE735", favoriteRect, RGB(255, 210, 92), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
+                }
             }
             g_hits.push_back({ visualTileRect, slot.filteredIndex });
         }
@@ -6122,6 +6702,7 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
     if (!baseLayerOnly)
     {
         RenderDeferredIconOverlay(dc, client, pendingIcons);
+        DrawOrganizationFeedback(dc, client);
     }
     TrimResidentIcons();
     return true;
@@ -6136,6 +6717,7 @@ void PaintContent(HDC dc, const RECT& client)
 
     HFONT tileFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     HFONT headerFont = CreateFontW(18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HFONT iconFont = CreateFontW(17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe Fluent Icons");
 
     const int savedDc = SaveDC(dc);
     HRGN contentClip = CreateRectRgn(metrics.contentClip.left, metrics.contentClip.top, metrics.contentClip.right, metrics.contentClip.bottom);
@@ -6199,6 +6781,12 @@ void PaintContent(HDC dc, const RECT& client)
                 RECT labelRect = { visualTileRect.left + 8, visualTileRect.top + g_settings.iconSize + 24, visualTileRect.right - 8, visualTileRect.bottom - 8 };
                 const COLORREF labelColor = IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252);
                 DrawTextClipped(dc, item.displayName, labelRect, DT_CENTER | DT_WORDBREAK | DT_END_ELLIPSIS, labelColor);
+                if (g_searchHistory.Get(item.stableId).favorite)
+                {
+                    RECT favoriteRect = { visualTileRect.right - 30, visualTileRect.top + 6, visualTileRect.right - 8, visualTileRect.top + 28 };
+                    SelectObject(dc, iconFont);
+                    DrawTextClipped(dc, L"\xE735", favoriteRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, RGB(255, 210, 92));
+                }
             }
             g_hits.push_back({ visualTileRect, slot.filteredIndex });
         }
@@ -6214,11 +6802,13 @@ void PaintContent(HDC dc, const RECT& client)
     DeleteObject(contentClip);
     RestoreDC(dc, savedDc);
     DrawSpotlightAuxiliary(dc, client);
+    DrawOrganizationFeedback(dc, client);
     DrawSoftWindowEdge(dc, client);
     TrimResidentIcons();
 
     DeleteObject(tileFont);
     DeleteObject(headerFont);
+    DeleteObject(iconFont);
 }
 
 void ReleaseSpotlightLayerBuffer()
@@ -7351,6 +7941,17 @@ void ShowItemContextMenu(POINT point, int filteredIndex)
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, ItemLaunchCommand, Text(L"Launch", L"启动"));
     AppendMenuW(menu, MF_STRING, ItemOpenLocationCommand, Text(L"Open file location", L"打开文件位置"));
+    const bool allFavorite = std::all_of(g_contextItemPaths.begin(), g_contextItemPaths.end(), [](const std::wstring& sourcePath) {
+        const auto found = std::find_if(g_items.begin(), g_items.end(), [&](const LaunchItem& candidate) {
+            return SamePath(candidate.sourcePath, sourcePath);
+        });
+        return found != g_items.end() && g_searchHistory.Get(found->stableId).favorite;
+    });
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        allFavorite ? ItemUnfavoriteCommand : ItemFavoriteCommand,
+        allFavorite ? Text(L"Remove from Favorites", L"取消收藏") : Text(L"Add to Favorites", L"加入收藏"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     if (g_launchpadState.IsEditing())
     {
@@ -7698,12 +8299,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (LOWORD(wParam) == WorkspaceToggleEditCommand && !IsSpotlightMode()) SetLaunchpadEditing(!g_launchpadState.IsEditing());
         if (LOWORD(wParam) == ItemRenameCommand && g_launchpadState.IsEditing() && g_contextItemPaths.size() == 1) RenameItem(g_contextItemPaths.front());
         if (LOWORD(wParam) == ItemOpenLocationCommand && !g_contextItemPaths.empty()) OpenItemLocation(g_contextItemPaths.front());
+        if (LOWORD(wParam) == ItemFavoriteCommand && !g_contextItemPaths.empty()) SetFavoriteForPaths(g_contextItemPaths, true);
+        if (LOWORD(wParam) == ItemUnfavoriteCommand && !g_contextItemPaths.empty()) SetFavoriteForPaths(g_contextItemPaths, false);
         if (LOWORD(wParam) == ItemRemoveCommand && g_launchpadState.IsEditing() && !g_contextItemPaths.empty())
         {
-            if (g_shellBroker.RequestRecycle(g_settings.launchpadFolder, g_contextItemPaths) == 0)
-            {
-                MessageBoxW(hwnd, Text(L"The Shell broker is unavailable; no icons were deleted.", L"Shell 后台不可用，未删除任何图标。"), Text(L"Delete icon", L"删除图标"), MB_ICONWARNING | MB_OK);
-            }
+            RequestRecycleForPaths(g_contextItemPaths);
         }
         if (LOWORD(wParam) == RegionRenameCommand && g_launchpadState.IsEditing() && !g_contextRegionId.empty())
         {
@@ -7711,11 +8311,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         if (LOWORD(wParam) == RegionDeleteCommand && g_launchpadState.IsEditing() && !g_contextRegionId.empty())
         {
-            DeleteRegionAndMoveItems(g_contextRegionId);
-            SortItems();
-            SaveLayout();
-            RebuildFiltered();
-            InvalidateRect(hwnd, nullptr, TRUE);
+            DeleteSelectedRegions({ g_contextRegionId });
         }
         if (LOWORD(wParam) == RegionRenameSelectedCommand && g_launchpadState.IsEditing() && !g_contextRegionIds.empty())
         {
@@ -7741,6 +8337,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         PaintWindow(hwnd);
         return 0;
     case WM_TIMER:
+        if (wParam == OrganizationFeedbackTimerId)
+        {
+            const auto now = GetTickCount64();
+            g_organizationState.Expire(now);
+            if (g_organizationFeedback.expiresAt != 0 && now >= g_organizationFeedback.expiresAt)
+            {
+                ClearOrganizationFeedback();
+            }
+            return 0;
+        }
         if (wParam == TrayIconRetryTimerId)
         {
             AddTrayIcon();
@@ -7785,6 +8391,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         RECT client = {};
         GetClientRect(hwnd, &client);
+        if (!IsSpotlightMode() && g_organizationFeedback.hasUndo)
+        {
+            const RECT undoRect = OrganizationUndoRect(client);
+            if (PtInRect(&undoRect, point))
+            {
+                RequestOrganizationUndo();
+                return 0;
+            }
+        }
         RECT searchRect = SearchRect(client);
         if (PtInRect(&searchRect, point))
         {
@@ -8121,6 +8736,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             SetLaunchpadEditing(!g_launchpadState.IsEditing());
             return 0;
         }
+        if (!IsSpotlightMode() && !g_searchInputActive && control && wParam == L'Z'
+            && g_organizationState.CanUndo(GetTickCount64()))
+        {
+            RequestOrganizationUndo();
+            return 0;
+        }
         if (IsSpotlightMode() && wParam == VK_TAB)
         {
             g_spotlightState.Tab(shift, true);
@@ -8346,6 +8967,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_DESTROY:
     {
         KillTimer(hwnd, DragAnimationTimerId);
+        KillTimer(hwnd, OrganizationFeedbackTimerId);
         if (!g_textInputProbePath.empty()) WriteFileUtf8(g_textInputProbePath, BuildTextInputProbeJson());
         if (g_spotlightFlowProbe.active) WriteFileUtf8(g_spotlightFlowProbe.outputPath, BuildSpotlightFlowProbeJson());
         if (g_launchpadFlowProbe.active) WriteFileUtf8(g_launchpadFlowProbe.outputPath, BuildLaunchpadFlowProbeJson());
@@ -8414,15 +9036,32 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     g_launchpadFlowProbe.outputPath = CommandLineValue(L"--launchpad-flow-probe-file");
     g_launchpadFlowProbe.readyPath = CommandLineValue(L"--launchpad-flow-ready-file");
     g_launchpadFlowProbe.active = !g_launchpadFlowProbe.outputPath.empty();
+    g_organizationProbe.outputPath = CommandLineValue(L"--organization-probe-file");
+    g_organizationProbe.root = CommandLineValue(L"--organization-probe-root");
+    g_organizationProbe.active = !g_organizationProbe.outputPath.empty();
+    g_organizationProbe.firstPath = JoinPath(g_organizationProbe.root, L"A.lnk");
+    g_organizationProbe.secondPath = JoinPath(g_organizationProbe.root, L"B.lnk");
+    g_organizationProbe.thirdPath = JoinPath(g_organizationProbe.root, L"C.lnk");
+    g_regionUndoProbe.outputPath = CommandLineValue(L"--region-undo-probe-file");
+    g_regionUndoProbe.regionId = CommandLineValue(L"--region-undo-probe-region");
+    if (g_regionUndoProbe.regionId.empty()) g_regionUndoProbe.regionId = L"work";
+    g_regionUndoProbe.active = !g_regionUndoProbe.outputPath.empty();
     const int activeBehaviorProbes = (g_catalogBrokerProbe.active ? 1 : 0)
         + (g_shellImportProbe.active ? 1 : 0)
         + (textInputProbeActive ? 1 : 0)
         + (g_spotlightFlowProbe.active ? 1 : 0)
-        + (g_launchpadFlowProbe.active ? 1 : 0);
+        + (g_launchpadFlowProbe.active ? 1 : 0)
+        + (g_organizationProbe.active ? 1 : 0)
+        + (g_regionUndoProbe.active ? 1 : 0);
     if (activeBehaviorProbes > 1) return 2;
     if (g_shellImportProbe.active && (g_shellImportProbe.root.empty() || g_shellImportProbe.destination.empty())) return 2;
     if (g_spotlightFlowProbe.active && g_spotlightFlowProbe.readyPath.empty()) return 2;
     if (g_launchpadFlowProbe.active && g_launchpadFlowProbe.readyPath.empty()) return 2;
+    if (g_organizationProbe.active
+        && (g_organizationProbe.root.empty()
+            || !ProbeFileExists(g_organizationProbe.firstPath)
+            || !ProbeFileExists(g_organizationProbe.secondPath)
+            || !ProbeFileExists(g_organizationProbe.thirdPath))) return 2;
     g_diagnosticsUiMode = CommandLineHasArgument(L"--diagnostics-ui");
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
     const HRESULT coInitializeResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -8521,7 +9160,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     const bool shellBrokerStarted = g_shellBroker.Start(g_hwnd, WmShellBrokerResult);
     AppendStartupLog(L"shell-broker", shellBrokerStarted, shellBrokerStarted ? L"dedicated STA queued" : L"thread creation failed");
 
-    if (!g_diagnosticsUiMode && !g_catalogBrokerProbe.active && !g_shellImportProbe.active && !textInputProbeActive && !g_spotlightFlowProbe.active && !g_launchpadFlowProbe.active)
+    if (!g_diagnosticsUiMode && !g_catalogBrokerProbe.active && !g_shellImportProbe.active && !textInputProbeActive && !g_spotlightFlowProbe.active && !g_launchpadFlowProbe.active && !g_organizationProbe.active && !g_regionUndoProbe.active)
     {
         RegisterCurrentHotkey();
         AppendStartupLog(L"hotkey-registered", g_hotkeyRegistered, g_settings.hotkey);
@@ -8566,12 +9205,18 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         {
             g_shellBroker.RequestImportTree(g_shellImportProbe.root, g_shellImportProbe.destination);
         }
+        else if (g_organizationProbe.active)
+        {
+            g_shellBroker.RequestRecycle(
+                g_organizationProbe.root,
+                { g_organizationProbe.firstPath, g_organizationProbe.secondPath, JoinPath(g_organizationProbe.root, L"Missing.lnk") });
+        }
         else if (!g_diagnosticsUiMode)
         {
             RequestCatalogRefresh();
         }
     }
-    else if (g_catalogBrokerProbe.active || g_shellImportProbe.active || g_spotlightFlowProbe.active || g_launchpadFlowProbe.active)
+    else if (g_catalogBrokerProbe.active || g_shellImportProbe.active || g_spotlightFlowProbe.active || g_launchpadFlowProbe.active || g_organizationProbe.active || g_regionUndoProbe.active)
     {
         DestroyWindow(g_hwnd);
         CloseHandle(mutex);
