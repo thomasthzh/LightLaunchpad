@@ -2,15 +2,61 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 10:48:57 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-02 12:29:16 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `707510a`
+- HEAD: `b222b1b`
 - Remote main: `origin/main@33e91c2`
-- Active task: `LLP-012 - DPI, Monitor, Accessibility, And Scene Geometry` (`in_progress`)
-- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`
-- Next task after verification: `LLP-013 - Unified Adaptive Material Renderer`
-- Goal status: active in Codex; LLP-012 is the only task in progress.
+- Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
+- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
+- Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
+- Goal status: active in Codex; LLP-013 is the only task in progress.
+
+## LLP-012 Execution Evidence
+
+Status at 2026-08-02 12:29 +08:00: complete.
+
+Changed files in scope:
+
+- `src/LightLaunchpad.NativeUi/AdaptiveEnvironment.{h,cpp}` - portable foreground/cursor/primary monitor selection, system-preference policy, adaptive solid palettes, reduced-motion decisions, text-scale clamping, and WCAG contrast calculations.
+- `src/LightLaunchpad.NativeUi/SceneGeometry.{h,cpp}` - DPI/text-aware main scene, settings columns/rows, transient controls, and native text-input modal geometry shared by drawing, hit testing, navigation, scrolling, and tests.
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - explicit Per-Monitor-V2 initialization; foreground-monitor positioning; `WM_DPICHANGED`, display, theme, high-contrast, transparency, motion, and text-scale handling; DPI-aware icon/font/resource lifetime; adaptive solid rendering; settings reflow; modal reflow; and development-only real-window snapshots.
+- `src/LightLaunchpad.NativeUi/SearchAccessibility.{h,cpp}` - non-focus-stealing UIA notification plus `EVENT_SYSTEM_ALERT` fallback for organization status.
+- `tools/build-native-ui.ps1` and `tests/LightLaunchpad.NativeUi.Tests/{AppHost,ExecutableIdentity}.Tests.ps1` - compile/copy the adaptive production module in normal and clean-source builds.
+- `tests/LightLaunchpad.NativeUi.Tests/AdaptiveEnvironment.Tests.{cpp,ps1}` - direct production policy, fallback, reduced-motion, text-scale, and contrast checks.
+- `tests/LightLaunchpad.NativeUi.Tests/AdaptiveWindowBehavior.Tests.ps1` - isolated real EXE matrix with actual and forced DPI/preferences, UIA Value/focus, cross-process WinEvent announcement, production draw-hit launch, settings UIA/reflow, transition snapshots, and screenshot capture.
+- `tests/LightLaunchpad.NativeUi.Tests/{SceneGeometry.Tests.cpp,TextInputBehavior.Tests.ps1,LaunchpadFlowBehavior.Tests.ps1}` - seven shared-geometry checks and real input/Launchpad flows driven by geometry published by the production EXE instead of legacy pixel constants.
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs` - updates one historical string baseline for the required solid-surface backdrop gate; it remains non-authoritative for visual behavior.
+- `docs/ai/{tasks,progress}.md` - records verified completion and activates LLP-013.
+
+TDD, systematic-debugging, and visual-audit evidence:
+
+- RED began with a missing `AdaptiveEnvironment` production boundary. GREEN is 3/3 and proves foreground preference, cursor/primary fallback, opaque high-contrast/reduced-transparency surfaces, contrast ratios, reduced motion, and bounded text scaling.
+- RED geometry checks expanded from 3 to 7 and now cover main chrome at 96/144/192 DPI, increased-text tile/control expansion, 200% settings columns/rows, and every native text-input modal control/target.
+- First real screenshots exposed a second-line dash at 150% and clipped `Adaptive Target` at 200%. Accessible tile geometry now expands from the shared font metrics; recaptured frames show both lines completely.
+- Settings audit exposed clipped labels and diagnostic/button overlap. Shared settings metrics now reflow columns, rows, checkboxes, diagnostics, scrolling, and actions; 200% top/bottom recaptures show complete labels and separated Save/Apply/Cancel controls.
+- A blank Save label in one bottom capture was isolated to immediate post-scroll `PrintWindow` timing. The evidence driver now waits for child repaint after scrolling; the recapture renders all three actions.
+- Full regression found two pre-LLP-012 test drivers still sending historical coordinates. Text input and Launchpad probes now consume exact `searchText`, tile, edit, Undo, content, and region bounds published by the real EXE. Mouse caret, Browse launch, Edit selection, delete/Undo, marquee, item drag, and region drag returned GREEN without weakening production hit testing.
+- The real WinEvent listener received the organization status alert while UIA reported that keyboard focus remained on the search edit. The rendered high-contrast case uses black/white/yellow system-derived surfaces with no transparent glass retained.
+
+Fresh verification against implementation commit `b222b1b483d9`:
+
+- Full NativeUi isolated-process gate: all 16 PowerShell suites passed. Direct production totals include adaptive environment 3/3, scene geometry 7/7, interaction 7/7, organization state 4/4, search 7/7, text input 7/7, persistence 7/7, settings transactions 3/3, AppHost 4/4, and executable identity 5/5; all real behavior suites passed.
+- Real Spotlight: 7 opens, 2 exact Shell launches, input-ready samples `0,0,0,0,0,0,15` ms and P95 15 ms. Real Launchpad: 2 launches, 3 edit-selection presses, maximum selection 3, exact favorite/delete/Undo/restart persistence.
+- Search: 300-item rebuild 400 microseconds and cached pinyin-query P95 86 microseconds. Text edit/undo P95: 200 ns. Catalog input response remained 0 ms during a 1,875 ms STA refresh.
+- Adaptive real-window matrix: actual monitor `dpi=144`, then forced `96/100%`, `144/150%` solid/reduced-motion, and `192/200%` high-contrast all passed 4/4; window sizes were 1470x1080, 980x720, 1470x1080, and 1960x1440 respectively.
+- Core tests: 33/33 passed. Historical App/source suite: 74/74 passed after its obsolete acrylic-only string was updated; it was not used to prove DPI, UIA, hit testing, high contrast, or rendering.
+- Post-commit affected gates passed again: adaptive environment 3/3, scene geometry 7/7, real UIA/IME input, real Launchpad organization flow, and adaptive real-window matrix 4/4.
+- Post-commit build/diagnostics: `artifacts\native-ui-llp012-postcommit\LightLaunchpad.NativeUi.exe`, 1,730,560 bytes, SHA256 `3B18E57FCFA0CA391CC4F51C59E5974E041EA87EA0207C320C074D153F13A1C2`, development identity `b222b1b483d9`, Per-Monitor-V2, non-stable executable path, and protected startup path matched.
+
+Visual, monitor, safety, and evidence limits:
+
+- `product-design:audit` inspected current-run original-resolution main and settings frames under `artifacts\native-ui-llp012-adaptive-evidence`: four main cases plus top/bottom settings captures at actual, 100%, 150%, and 200% conditions. They show no text/control clipping, solid fallback leaks, search/content overlap, tile-label loss, or action overlap after the fixes above.
+- The current host exposes only `DISPLAY1`, so a second physical monitor screenshot cannot truthfully be produced. The real foreground-window monitor path passed on that display; the production chooser directly proves foreground, cursor fallback, and primary fallback, while synthetic `WM_DPICHANGED` and real `WM_DISPLAYCHANGE` paths prove reposition/rebuild behavior. Installing a display driver or changing the user's display topology was outside ordinary-development safety scope.
+- Protected PID 22560 still runs `artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe` with unchanged SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run remains its exact quoted path, stable install is absent, and the `C:\TOOL` EXE remains SHA256 `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`.
+- `LLP_reconstruction/` remains untracked/unstaged and ignored `LightLaunchpad.NativeUi.o` remains excluded. No stable-install, startup, `C:\TOOL`, push, tag, or release mutation occurred.
+- Scoped implementation commit: `b222b1b` (`feat: complete LLP-012 adaptive DPI foundation`).
+- Task transition: LLP-012 marked `done`; LLP-013 marked as the sole `in_progress` task.
 
 ## LLP-011 Execution Evidence
 

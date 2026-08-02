@@ -199,7 +199,7 @@
 
 ### LLP-012 - DPI, Monitor, Accessibility, And Scene Geometry
 
-- Status: `in_progress`
+- Status: `done`
 - Depends on: LLP-011
 - Purpose: create one correct coordinate and accessibility foundation before lens work.
 - Likely files: manifest/resource, `AppHost`, layout geometry, `Renderer`, settings window, UI Automation providers.
@@ -211,11 +211,11 @@
 - Verify:
   - Multi-monitor and three-DPI matrix screenshots show no clipping, hit-test drift, or wrong-screen placement.
   - High contrast and reduced transparency use readable solid/adaptive surfaces.
-- Completion notes: Started immediately after LLP-011 verification. First audit targets: production Per-Monitor-V2 transition handling, monitor selection, DIP-derived transient/control geometry, UIA announcement/focus for organization feedback, increased text size, high contrast, reduced transparency, and the 100/150/200% screenshot-hit-test matrix.
+- Completion notes: Completed in implementation commit `b222b1b`. NativeUi now applies Per-Monitor-V2 at process/window boundaries, follows the foreground monitor with cursor/primary fallback, handles DPI/display/theme/accessibility changes, and derives main, settings, modal, draw, hit-test, navigation, feedback, and Undo geometry from shared DIP snapshots. High contrast/reduced transparency use opaque adaptive palettes, reduced motion removes reflow interpolation, and organization status raises UIA plus WinEvent notifications without stealing search focus. Production C++ tests passed 3/3 adaptive-policy and 7/7 geometry checks; isolated real EXEs passed the actual-monitor plus 96/144/192-DPI and 100/150/200%-text matrix 4/4 with UIA, announcement, launch-hit, settings-reflow, and 12 screenshot artifacts. Full NativeUi gates, Core 33/33, and historical App 74/74 passed. The current host exposes one physical display, so cross-physical-monitor capture could not be fabricated; foreground placement is exercised on the real monitor and foreground/cursor/primary selection is covered directly. Verified post-commit EXE: 1,730,560 bytes, SHA256 `3B18E57FCFA0CA391CC4F51C59E5974E041EA87EA0207C320C074D153F13A1C2`.
 
 ### LLP-013 - Unified Adaptive Material Renderer
 
-- Status: `pending`
+- Status: `in_progress`
 - Depends on: LLP-012
 - Purpose: replace screenshot-offset effects with a continuous Apple-inspired material system.
 - Likely files: new D3D11/D2D/DirectComposition renderer modules, scene snapshot types, fallback renderer, build link settings.
@@ -229,7 +229,7 @@
   - Compare reference and current screenshots on at least 12 varied desktop backgrounds at matching states and viewport sizes.
   - Pixel checks show no upward ghost, duplicated text/icon, rectangular leak, or out-of-bounds refraction.
   - Normal text contrast is at least 4.5:1 and focus boundaries target at least 3:1.
-- Completion notes: Not started.
+- Completion notes: Started immediately after LLP-012 verification. First audit targets: isolate a renderer/scene-snapshot boundary, remove remaining nested screenshot captures, measure the current material against 12 controlled backgrounds, and establish pixel/contrast RED gates before DirectComposition work.
 
 ### LLP-014 - Continuous Focus And Nonblocking Motion
 
