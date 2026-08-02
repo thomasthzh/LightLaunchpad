@@ -161,8 +161,8 @@ internal static class Program
                 nameof(HostedAppModeSourceTests.NativeUiSource_UsesAlignedSearchFocusRefraction),
                 HostedAppModeSourceTests.NativeUiSource_UsesAlignedSearchFocusRefraction),
             (
-                nameof(HostedAppModeSourceTests.NativeUiSource_ImprovesSearchAndTabCompletion),
-                HostedAppModeSourceTests.NativeUiSource_ImprovesSearchAndTabCompletion),
+                nameof(HostedAppModeSourceTests.NativeUiSource_UsesProductionSearchAndTextControllers),
+                HostedAppModeSourceTests.NativeUiSource_UsesProductionSearchAndTextControllers),
             (
                 nameof(HostedAppModeSourceTests.NativeUiSource_ShowsSearchTypingStateAndImeComposition),
                 HostedAppModeSourceTests.NativeUiSource_ShowsSearchTypingStateAndImeComposition),

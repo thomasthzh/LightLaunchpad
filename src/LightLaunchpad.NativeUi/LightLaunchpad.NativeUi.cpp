@@ -17,8 +17,10 @@
 #include "LightLaunchpad.Version.h"
 #include "Catalog.h"
 #include "Persistence.h"
+#include "SearchAccessibility.h"
 #include "SearchIndex.h"
 #include "ShellBroker.h"
+#include "TextInput.h"
 
 #include <algorithm>
 #include <cmath>
@@ -302,11 +304,11 @@ std::vector<IconOpaqueBoundsCacheEntry> g_iconBoundsCache;
 std::vector<RegionHit> g_regionHits;
 std::vector<std::wstring> g_selectedSourcePaths;
 std::vector<std::wstring> g_selectedRegionIds;
-std::wstring g_searchText;
-std::wstring g_searchCompositionText;
-std::wstring g_completionBaseText;
-std::wstring g_completionCandidateText;
+llp::input::TextBuffer g_searchInput;
+llp::accessibility::SearchAccessibility g_searchAccessibility;
 bool g_searchInputActive = false;
+bool g_searchPointerSelecting = false;
+int g_searchTextOffset = 0;
 int g_selectedFilteredIndex = -1;
 int g_scrollOffset = 0;
 int g_contentHeight = 0;
@@ -353,6 +355,11 @@ bool g_trayIconAdded = false;
 bool g_hotkeyRegistered = false;
 int g_activeHotkeyId = HotkeyId;
 bool g_diagnosticsUiMode = false;
+std::wstring g_textInputProbePath;
+bool g_searchAccessibilityReady = false;
+bool g_imeCandidatePositionApplied = false;
+bool g_textInputProbeWindowWasVisible = false;
+POINT g_lastImeCandidatePoint = {};
 ULONGLONG g_processStartTick = 0;
 ULONGLONG g_settingsLoadedTick = 0;
 ULONGLONG g_shellReadyTick = 0;
@@ -444,6 +451,7 @@ void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client);
 int CalculateColumnCount(const RECT& client);
 std::wstring NormalizeHotkeyText(const std::wstring& value);
 void RequestSearchRepaint(HWND hwnd, bool erase);
+void UpdateImeWindowPosition(HWND hwnd);
 
 template <typename T>
 void SafeRelease(T*& value)
@@ -547,43 +555,12 @@ RECT SearchTextRect(const RECT& searchRect)
 
 std::wstring SearchCommittedText()
 {
-    return g_searchText;
+    return g_searchInput.Text();
 }
 
 std::wstring SearchDisplayText()
 {
-    return SearchCommittedText() + g_searchCompositionText;
-}
-
-bool IsSearchCompletionActive()
-{
-    return !g_completionCandidateText.empty() && g_searchCompositionText.empty();
-}
-
-void ClearSearchCompletion()
-{
-    g_completionBaseText.clear();
-    g_completionCandidateText.clear();
-}
-
-std::wstring SearchCompletionTail()
-{
-    if (!IsSearchCompletionActive()) return L"";
-    if (StartsWithIgnoreCase(g_completionCandidateText, g_searchText))
-    {
-        return g_completionCandidateText.substr(g_searchText.size());
-    }
-
-    return g_searchText.empty()
-        ? g_completionCandidateText
-        : L"  " + g_completionCandidateText;
-}
-
-void CommitSearchCompletion()
-{
-    if (!IsSearchCompletionActive()) return;
-    g_searchText = g_completionCandidateText;
-    ClearSearchCompletion();
+    return g_searchInput.DisplayText();
 }
 
 int TileSize()
@@ -1524,7 +1501,6 @@ void RenameItem(const std::wstring& sourcePath)
 
     found->displayName = name;
     RebuildSearchIndex();
-    ClearSearchCompletion();
     SaveLayout();
     RebuildFiltered();
     InvalidateRect(g_hwnd, nullptr, TRUE);
@@ -1657,7 +1633,7 @@ std::vector<HitTile> BuildContentHitTiles()
     int x = left;
     int y = 114;
     std::wstring activeRegion;
-    const bool groupByRegion = g_searchText.empty();
+    const bool groupByRegion = SearchCommittedText().empty();
 
     hits.reserve(g_filtered.size());
     for (int filteredIndex = 0; filteredIndex < static_cast<int>(g_filtered.size()); ++filteredIndex)
@@ -1945,7 +1921,8 @@ void RebuildFiltered()
     g_filtered.clear();
     g_filtered.reserve(g_items.size());
     g_filterScores.assign(g_items.size(), 0);
-    if (g_searchText.empty() && !IsSpotlightMode())
+    const std::wstring query = SearchCommittedText();
+    if (query.empty() && !IsSpotlightMode())
     {
         for (int itemIndex = 0; itemIndex < static_cast<int>(g_items.size()); ++itemIndex) g_filtered.push_back(itemIndex);
     }
@@ -1955,7 +1932,7 @@ void RebuildFiltered()
         options.spotlight = IsSpotlightMode();
         options.showRecentAndFavorites = g_settings.showRecentAndFavorites;
         options.emptyLimit = 10;
-        const auto results = g_searchIndex.Query(g_searchText, options);
+        const auto results = g_searchIndex.Query(query, options);
         for (const auto& result : results)
         {
             auto found = std::find_if(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
@@ -2313,12 +2290,31 @@ std::string BuildCatalogBrokerProbeJson()
         { "cachedItemCountDuringRefresh", g_catalogBrokerProbe.cachedItemCountDuringRefresh },
         { "cachedStableIdBeforeRefresh", llp::persistence::WideToUtf8(g_catalogBrokerProbe.cachedStableIdBeforeRefresh) },
         { "cachedStableIdAfterRefresh", g_items.empty() ? "" : llp::persistence::WideToUtf8(g_items.front().stableId) },
-        { "inputEcho", llp::persistence::WideToUtf8(g_searchText) },
+        { "inputEcho", llp::persistence::WideToUtf8(SearchCommittedText()) },
         { "inputResponseMs", g_catalogBrokerProbe.inputResponseMilliseconds },
         { "refreshMs", g_catalogBrokerProbe.refreshMilliseconds },
         { "catalogGeneration", g_catalogGeneration },
         { "shutdownPersistenceQueued", g_catalogBrokerProbe.shutdownPersistenceQueued },
         { "shutdownHistoryPersistenceQueued", g_catalogBrokerProbe.shutdownHistoryPersistenceQueued }
+    };
+    return document.dump(2) + "\n";
+}
+
+std::string BuildTextInputProbeJson()
+{
+    Json document = {
+        { "text", llp::persistence::WideToUtf8(g_searchInput.Text()) },
+        { "displayText", llp::persistence::WideToUtf8(g_searchInput.DisplayText()) },
+        { "caret", g_searchInput.Caret() },
+        { "anchor", g_searchInput.Anchor() },
+        { "selectionStart", g_searchInput.SelectionStart() },
+        { "selectionEnd", g_searchInput.SelectionEnd() },
+        { "composing", g_searchInput.IsComposing() },
+        { "candidatePositionApplied", g_imeCandidatePositionApplied },
+        { "candidateX", g_lastImeCandidatePoint.x },
+        { "candidateY", g_lastImeCandidatePoint.y },
+        { "accessibilityReady", g_searchAccessibilityReady },
+        { "windowVisible", g_textInputProbeWindowWasVisible }
     };
     return document.dump(2) + "\n";
 }
@@ -2797,11 +2793,14 @@ bool RegisterCurrentHotkey()
 
 void ActivateSearchInput()
 {
+    const bool gainedFocus = !g_searchInputActive || GetFocus() != g_hwnd;
     g_searchInputActive = true;
     if (g_hwnd)
     {
         SetFocus(g_hwnd);
+        UpdateImeWindowPosition(g_hwnd);
     }
+    if (gainedFocus) g_searchAccessibility.NotifyFocusChanged();
 }
 
 void ResetSearchForOpen()
@@ -2811,9 +2810,7 @@ void ResetSearchForOpen()
         return;
     }
 
-    g_searchText.clear();
-    g_searchCompositionText.clear();
-    ClearSearchCompletion();
+    g_searchInput.Reset(L"");
     g_scrollOffset = 0;
     g_selectedFilteredIndex = -1;
 }
@@ -2839,32 +2836,42 @@ std::wstring ReadImeCompositionString(HWND hwnd, DWORD index)
     return text;
 }
 
+LONG ReadImeCompositionCursor(HWND hwnd)
+{
+    HIMC context = ImmGetContext(hwnd);
+    if (!context) return 0;
+    const LONG cursor = ImmGetCompositionStringW(context, GCS_CURSORPOS, nullptr, 0);
+    ImmReleaseContext(hwnd, context);
+    return std::max<LONG>(0, cursor);
+}
+
 void UpdateSearchComposition(HWND hwnd, LPARAM compositionFlags)
 {
     ActivateSearchInput();
 
     if (compositionFlags & GCS_RESULTSTR)
     {
-        CommitSearchCompletion();
         const std::wstring result = ReadImeCompositionString(hwnd, GCS_RESULTSTR);
-        if (!result.empty())
+        if (!g_searchInput.IsComposing()) g_searchInput.BeginComposition();
+        if (g_searchInput.CommitComposition(result))
         {
-            g_searchText += result;
             g_scrollOffset = 0;
             RebuildFiltered();
         }
-
-        g_searchCompositionText.clear();
-        ClearSearchCompletion();
         RequestSearchRepaint(hwnd, true);
+        g_searchAccessibility.NotifyTextChanged();
+        g_searchAccessibility.NotifySelectionChanged();
         return;
     }
 
     if (compositionFlags & GCS_COMPSTR)
     {
-        g_searchCompositionText = ReadImeCompositionString(hwnd, GCS_COMPSTR);
-        ClearSearchCompletion();
+        const auto composition = ReadImeCompositionString(hwnd, GCS_COMPSTR);
+        g_searchInput.UpdateComposition(composition, static_cast<size_t>(ReadImeCompositionCursor(hwnd)));
+        RebuildFiltered();
         RequestSearchRepaint(hwnd, false);
+        g_searchAccessibility.NotifyTextChanged();
+        g_searchAccessibility.NotifySelectionChanged();
     }
 }
 
@@ -3273,6 +3280,9 @@ void ShowNativeUi()
 void HideNativeUi()
 {
     g_searchInputActive = false;
+    g_searchInput.CancelComposition();
+    g_searchPointerSelecting = false;
+    if (GetCapture() == g_hwnd) ReleaseCapture();
     if (IsSpotlightMode())
     {
         HideSpotlightImmediately();
@@ -3394,7 +3404,7 @@ DropTarget FindDropTargetWithinRegion(const std::wstring& regionId, POINT point)
 
 DropTarget FindDropTarget(POINT point)
 {
-    if (!g_searchText.empty()) return {};
+    if (!SearchDisplayText().empty()) return {};
 
     for (const auto& hit : g_hits)
     {
@@ -3612,7 +3622,7 @@ bool ShouldUseDragAvoidancePreview()
     return g_dragActive
         && g_dragMode == DragMode::Items
         && g_dropTarget.valid
-        && g_searchText.empty()
+        && SearchDisplayText().empty()
         && !g_dragSourcePaths.empty();
 }
 
@@ -3620,7 +3630,7 @@ bool ShouldTrackDragAvoidancePreview()
 {
     return g_dragActive
         && g_dragMode == DragMode::Items
-        && g_searchText.empty()
+        && SearchDisplayText().empty()
         && !g_dragSourcePaths.empty();
 }
 
@@ -5147,10 +5157,19 @@ int MeasureTextWidthGdi(HDC dc, const std::wstring& text)
     return size.cx;
 }
 
-RECT SearchCompletionHighlightRect(const RECT& textRect, int prefixWidth)
+void UpdateSearchTextOffset(int caretWidth, int totalWidth, int visibleWidth)
 {
-    const int left = std::clamp(textRect.left + prefixWidth, textRect.left, textRect.right - 8);
-    return { left, textRect.top - 2, textRect.right, textRect.bottom - 5 };
+    if (totalWidth <= visibleWidth)
+    {
+        g_searchTextOffset = 0;
+        return;
+    }
+    const int margin = 6;
+    if (caretWidth - g_searchTextOffset > visibleWidth - margin)
+        g_searchTextOffset = caretWidth - visibleWidth + margin;
+    else if (caretWidth - g_searchTextOffset < margin)
+        g_searchTextOffset = std::max(0, caretWidth - margin);
+    g_searchTextOffset = std::clamp(g_searchTextOffset, 0, std::max(0, totalWidth - visibleWidth + margin));
 }
 
 RECT SearchCaretRect(const RECT& textRect, int prefixWidth)
@@ -5186,34 +5205,51 @@ void DrawSearchSurface(ID2D1DCRenderTarget* target, const RECT& client)
     const RECT textRect = SearchTextRect(searchRect);
     DrawSearchGlassSurface(target, searchRect, g_searchInputActive);
     if (IsSpotlightBaseLayerPass()) return;
+    const std::wstring displayText = SearchDisplayText();
+    const size_t displayCaret = std::min(g_searchInput.DisplayCaret(), displayText.size());
+    const int caretWidth = static_cast<int>(std::ceil(MeasureTextWidthDirect(g_searchTextFormat, displayText.substr(0, displayCaret))));
+    const int totalWidth = static_cast<int>(std::ceil(MeasureTextWidthDirect(g_searchTextFormat, displayText)));
+    const int visibleWidth = std::max(1L, textRect.right - textRect.left - 4);
+    UpdateSearchTextOffset(caretWidth, totalWidth, visibleWidth);
+    RECT drawRect = { textRect.left - g_searchTextOffset, textRect.top, textRect.left - g_searchTextOffset + std::max(visibleWidth, totalWidth + 8), textRect.bottom };
+    target->PushAxisAlignedClip(D2DRect(textRect), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    if (g_searchInput.HasSelection() && !g_searchInput.IsComposing())
+    {
+        const int selectionStart = static_cast<int>(std::ceil(MeasureTextWidthDirect(g_searchTextFormat, displayText.substr(0, g_searchInput.SelectionStart()))));
+        const int selectionEnd = static_cast<int>(std::ceil(MeasureTextWidthDirect(g_searchTextFormat, displayText.substr(0, g_searchInput.SelectionEnd()))));
+        RECT selectionRect = { drawRect.left + selectionStart, textRect.top + 8, drawRect.left + selectionEnd, textRect.bottom - 8 };
+        ID2D1SolidColorBrush* selectionBrush = nullptr;
+        target->CreateSolidColorBrush(D2DColorAlpha(RGB(58, 140, 255), 0.28f), &selectionBrush);
+        if (selectionBrush) target->FillRectangle(D2DRect(selectionRect), selectionBrush);
+        SafeRelease(selectionBrush);
+    }
     DrawTextDirect(
         target,
         g_searchTextFormat,
-        SearchDisplayText(),
-        textRect,
-        g_searchText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72),
+        displayText,
+        drawRect,
+        displayText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72),
         DWRITE_TEXT_ALIGNMENT_LEADING,
         DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
         DWRITE_WORD_WRAPPING_NO_WRAP);
-
-    const std::wstring tail = SearchCompletionTail();
-    if (!tail.empty())
+    if (g_searchInput.IsComposing() && g_searchInput.CompositionEnd() > g_searchInput.CompositionStart())
     {
-        const int prefixWidth = static_cast<int>(std::ceil(MeasureTextWidthDirect(g_searchTextFormat, SearchDisplayText())));
-        RECT highlightRect = SearchCompletionHighlightRect(textRect, prefixWidth);
-        DrawRoundedRectDirect(target, highlightRect, RGB(58, 140, 255), RGB(58, 140, 255), 7.0f);
-        RECT tailText = { highlightRect.left + 8, textRect.top, highlightRect.right - 8, textRect.bottom };
-        DrawTextDirect(
-            target,
-            g_searchTextFormat,
-            tail,
-            tailText,
-            RGB(255, 255, 255),
-            DWRITE_TEXT_ALIGNMENT_LEADING,
-            DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-            DWRITE_WORD_WRAPPING_NO_WRAP);
+        const int compositionStart = static_cast<int>(std::ceil(MeasureTextWidthDirect(g_searchTextFormat, displayText.substr(0, g_searchInput.CompositionStart()))));
+        const int compositionEnd = static_cast<int>(std::ceil(MeasureTextWidthDirect(g_searchTextFormat, displayText.substr(0, g_searchInput.CompositionEnd()))));
+        ID2D1SolidColorBrush* compositionBrush = nullptr;
+        target->CreateSolidColorBrush(D2DColor(RGB(58, 120, 210)), &compositionBrush);
+        if (compositionBrush)
+        {
+            target->DrawLine(
+                D2D1::Point2F(static_cast<float>(drawRect.left + compositionStart), static_cast<float>(textRect.bottom - 10)),
+                D2D1::Point2F(static_cast<float>(drawRect.left + compositionEnd), static_cast<float>(textRect.bottom - 10)),
+                compositionBrush,
+                1.5f);
+        }
+        SafeRelease(compositionBrush);
     }
-    DrawSearchCaret(target, textRect, static_cast<int>(std::ceil(MeasureTextWidthDirect(g_searchTextFormat, SearchDisplayText()))));
+    DrawSearchCaret(target, textRect, caretWidth - g_searchTextOffset);
+    target->PopAxisAlignedClip();
 }
 
 void DrawSearchSurface(HDC dc, const RECT& client)
@@ -5228,17 +5264,38 @@ void DrawSearchSurface(HDC dc, const RECT& client)
         return;
     }
     HGDIOBJ oldFont = SelectObject(dc, searchFont);
-    DrawTextClipped(dc, SearchDisplayText(), textRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_searchText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72));
-    const std::wstring tail = SearchCompletionTail();
-    if (!tail.empty())
+    const std::wstring displayText = SearchDisplayText();
+    const size_t displayCaret = std::min(g_searchInput.DisplayCaret(), displayText.size());
+    const int caretWidth = MeasureTextWidthGdi(dc, displayText.substr(0, displayCaret));
+    const int totalWidth = MeasureTextWidthGdi(dc, displayText);
+    const int visibleWidth = std::max(1L, textRect.right - textRect.left - 4);
+    UpdateSearchTextOffset(caretWidth, totalWidth, visibleWidth);
+    RECT drawRect = { textRect.left - g_searchTextOffset, textRect.top, textRect.left - g_searchTextOffset + std::max(visibleWidth, totalWidth + 8), textRect.bottom };
+    const int savedDc = SaveDC(dc);
+    IntersectClipRect(dc, textRect.left, textRect.top, textRect.right, textRect.bottom);
+    if (g_searchInput.HasSelection() && !g_searchInput.IsComposing())
     {
-        const int prefixWidth = MeasureTextWidthGdi(dc, SearchDisplayText());
-        RECT highlightRect = SearchCompletionHighlightRect(textRect, prefixWidth);
-        DrawRoundedRect(dc, highlightRect, RGB(58, 140, 255), RGB(58, 140, 255), 7);
-        RECT tailText = { highlightRect.left + 8, textRect.top, highlightRect.right - 8, textRect.bottom };
-        DrawTextClipped(dc, tail, tailText, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, RGB(255, 255, 255));
+        const int selectionStart = MeasureTextWidthGdi(dc, displayText.substr(0, g_searchInput.SelectionStart()));
+        const int selectionEnd = MeasureTextWidthGdi(dc, displayText.substr(0, g_searchInput.SelectionEnd()));
+        RECT selectionRect = { drawRect.left + selectionStart, textRect.top + 8, drawRect.left + selectionEnd, textRect.bottom - 8 };
+        HBRUSH selectionBrush = CreateSolidBrush(RGB(188, 218, 250));
+        FillRect(dc, &selectionRect, selectionBrush);
+        DeleteObject(selectionBrush);
     }
-    DrawSearchCaret(dc, textRect, MeasureTextWidthGdi(dc, SearchDisplayText()));
+    DrawTextClipped(dc, displayText, drawRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER, displayText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72));
+    if (g_searchInput.IsComposing() && g_searchInput.CompositionEnd() > g_searchInput.CompositionStart())
+    {
+        const int compositionStart = MeasureTextWidthGdi(dc, displayText.substr(0, g_searchInput.CompositionStart()));
+        const int compositionEnd = MeasureTextWidthGdi(dc, displayText.substr(0, g_searchInput.CompositionEnd()));
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(58, 120, 210));
+        HGDIOBJ oldPen = SelectObject(dc, pen);
+        MoveToEx(dc, drawRect.left + compositionStart, textRect.bottom - 10, nullptr);
+        LineTo(dc, drawRect.left + compositionEnd, textRect.bottom - 10);
+        SelectObject(dc, oldPen);
+        DeleteObject(pen);
+    }
+    DrawSearchCaret(dc, textRect, caretWidth - g_searchTextOffset);
+    RestoreDC(dc, savedDc);
     SelectObject(dc, oldFont);
     DeleteObject(searchFont);
 }
@@ -5531,7 +5588,7 @@ RenderLayoutMetrics CreateRenderLayoutMetrics(const RECT& client)
     metrics.columns = CalculateColumnCount(client);
     metrics.initialY = 114 - g_scrollOffset;
     metrics.contentClip = ContentClipRect(client);
-    metrics.groupByRegion = g_searchText.empty();
+    metrics.groupByRegion = SearchCommittedText().empty();
     return metrics;
 }
 
@@ -6241,7 +6298,7 @@ bool EstimateTileBoundsForFilteredIndex(int targetFilteredIndex, RECT& bounds)
     int x = left;
     int logicalY = 114;
     std::wstring activeRegion;
-    const bool groupByRegion = g_searchText.empty();
+    const bool groupByRegion = SearchCommittedText().empty();
 
     for (int filteredIndex = 0; filteredIndex <= targetFilteredIndex; ++filteredIndex)
     {
@@ -6303,11 +6360,6 @@ void SelectFilteredIndex(int index)
     g_selectedFilteredIndex = std::clamp(index, 0, static_cast<int>(g_filtered.size()) - 1);
     const auto& item = g_items[g_filtered[g_selectedFilteredIndex]];
     SetSingleSelection(item.sourcePath);
-    if (IsSearchCompletionActive())
-    {
-        g_completionCandidateText = item.displayName;
-        g_searchText = g_completionCandidateText;
-    }
     ScrollSelectedIntoView();
     RequestSearchRepaint(g_hwnd, false);
 }
@@ -6324,37 +6376,6 @@ void MoveSelectionVertical(int delta)
     RECT client = {};
     GetClientRect(g_hwnd, &client);
     SelectFilteredIndex(g_selectedFilteredIndex + delta * CalculateColumnCount(client));
-}
-
-void CompleteSearchFromSelection(HWND hwnd, bool reverse)
-{
-    if (g_filtered.empty())
-    {
-        ClearSearchCompletion();
-        return;
-    }
-    if (g_selectedFilteredIndex < 0)
-    {
-        g_selectedFilteredIndex = 0;
-    }
-    if (!IsSearchCompletionActive())
-    {
-        g_completionBaseText = g_searchText;
-    }
-    else
-    {
-        const int count = static_cast<int>(g_filtered.size());
-        const int delta = reverse ? -1 : 1;
-        g_selectedFilteredIndex = (g_selectedFilteredIndex + delta + count) % count;
-    }
-
-    const std::wstring selectedPath = g_items[g_filtered[g_selectedFilteredIndex]].sourcePath;
-    g_completionCandidateText = g_items[g_filtered[g_selectedFilteredIndex]].displayName;
-    g_searchText = g_completionCandidateText;
-    SetSingleSelection(selectedPath);
-    ActivateSearchInput();
-    ScrollSelectedIntoView();
-    RequestSearchRepaint(hwnd, false);
 }
 
 std::wstring GetControlText(HWND hwnd, int controlId, int maxChars = 2048)
@@ -7176,6 +7197,174 @@ void ShowWorkspaceContextMenu(POINT point)
     DestroyMenu(menu);
 }
 
+HFONT CreateSearchInputFont()
+{
+    return CreateFontW(26, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+}
+
+int MeasureSearchPrefixGdi(HWND hwnd, const std::wstring& text, size_t position)
+{
+    HDC dc = GetDC(hwnd);
+    if (!dc) return 0;
+    HFONT font = CreateSearchInputFont();
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    const int width = MeasureTextWidthGdi(dc, text.substr(0, std::min(position, text.size())));
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+    ReleaseDC(hwnd, dc);
+    return width;
+}
+
+size_t SearchTextPositionFromClientX(HWND hwnd, int clientX)
+{
+    RECT client = {};
+    GetClientRect(hwnd, &client);
+    const RECT textRect = SearchTextRect(SearchRect(client));
+    const std::wstring text = SearchCommittedText();
+    const int contentX = clientX - textRect.left + g_searchTextOffset;
+    int previousWidth = 0;
+    for (size_t position = 1; position <= text.size(); ++position)
+    {
+        const unsigned int current = static_cast<unsigned short>(text[position - 1]);
+        if (current >= 0xD800 && current <= 0xDBFF && position < text.size()) continue;
+        const int width = MeasureSearchPrefixGdi(hwnd, text, position);
+        if (contentX < previousWidth + (width - previousWidth) / 2) return position - 1;
+        previousWidth = width;
+    }
+    return text.size();
+}
+
+POINT SearchCaretClientPoint(HWND hwnd)
+{
+    RECT client = {};
+    GetClientRect(hwnd, &client);
+    const RECT textRect = SearchTextRect(SearchRect(client));
+    const std::wstring displayText = SearchDisplayText();
+    const int caretWidth = MeasureSearchPrefixGdi(hwnd, displayText, g_searchInput.DisplayCaret());
+    const int totalWidth = MeasureSearchPrefixGdi(hwnd, displayText, displayText.size());
+    UpdateSearchTextOffset(caretWidth, totalWidth, std::max(1L, textRect.right - textRect.left - 4));
+    return {
+        std::clamp(textRect.left + caretWidth - g_searchTextOffset, textRect.left + 1, textRect.right - 2),
+        textRect.bottom - 8
+    };
+}
+
+void UpdateImeWindowPosition(HWND hwnd)
+{
+    if (!hwnd) return;
+    HIMC context = ImmGetContext(hwnd);
+    if (!context) return;
+    const POINT caret = SearchCaretClientPoint(hwnd);
+    COMPOSITIONFORM composition = {};
+    composition.dwStyle = CFS_POINT;
+    composition.ptCurrentPos = caret;
+    CANDIDATEFORM candidate = {};
+    candidate.dwIndex = 0;
+    candidate.dwStyle = CFS_CANDIDATEPOS;
+    candidate.ptCurrentPos = caret;
+    const bool compositionApplied = ImmSetCompositionWindow(context, &composition) != FALSE;
+    const bool candidateApplied = ImmSetCandidateWindow(context, &candidate) != FALSE;
+    g_lastImeCandidatePoint = caret;
+    g_imeCandidatePositionApplied = compositionApplied && candidateApplied;
+    ImmReleaseContext(hwnd, context);
+}
+
+std::wstring ReadClipboardText(HWND hwnd)
+{
+    if (!OpenClipboard(hwnd)) return {};
+    std::wstring result;
+    HANDLE data = GetClipboardData(CF_UNICODETEXT);
+    if (data)
+    {
+        const wchar_t* text = static_cast<const wchar_t*>(GlobalLock(data));
+        if (text)
+        {
+            result = text;
+            GlobalUnlock(data);
+        }
+    }
+    CloseClipboard();
+    std::wstring sanitized;
+    sanitized.reserve(result.size());
+    bool previousSpace = false;
+    for (wchar_t character : result)
+    {
+        if (character == L'\r' || character == L'\n' || character == L'\t')
+        {
+            if (!previousSpace && !sanitized.empty()) sanitized.push_back(L' ');
+            previousSpace = true;
+        }
+        else if (character >= 32)
+        {
+            sanitized.push_back(character);
+            previousSpace = character == L' ';
+        }
+    }
+    return sanitized;
+}
+
+bool WriteClipboardText(HWND hwnd, const std::wstring& text)
+{
+    if (text.empty() || !OpenClipboard(hwnd)) return false;
+    const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!data)
+    {
+        CloseClipboard();
+        return false;
+    }
+    void* destination = GlobalLock(data);
+    if (!destination)
+    {
+        GlobalFree(data);
+        CloseClipboard();
+        return false;
+    }
+    std::memcpy(destination, text.c_str(), bytes);
+    GlobalUnlock(data);
+    bool succeeded = false;
+    if (EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, data))
+    {
+        succeeded = true;
+        data = nullptr;
+    }
+    if (data) GlobalFree(data);
+    CloseClipboard();
+    return succeeded;
+}
+
+void SearchTextChanged(HWND hwnd, bool erase)
+{
+    g_scrollOffset = 0;
+    RebuildFiltered();
+    UpdateImeWindowPosition(hwnd);
+    RequestSearchRepaint(hwnd, erase);
+    g_searchAccessibility.NotifyTextChanged();
+    g_searchAccessibility.NotifySelectionChanged();
+}
+
+void SearchCaretChanged(HWND hwnd)
+{
+    UpdateImeWindowPosition(hwnd);
+    RequestSearchRepaint(hwnd, false);
+    g_searchAccessibility.NotifySelectionChanged();
+}
+
+void AccessibilityFocus(void*)
+{
+    ActivateSearchInput();
+}
+
+void AccessibilityTextChanged(void*)
+{
+    SearchTextChanged(g_hwnd, true);
+}
+
+void AccessibilitySelectionChanged(void*)
+{
+    SearchCaretChanged(g_hwnd);
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     if (message == g_taskbarCreatedMessage && g_taskbarCreatedMessage != 0)
@@ -7196,6 +7385,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 
     switch (message)
     {
+    case WM_GETOBJECT:
+        return g_searchAccessibility.HandleGetObject(wParam, lParam);
     case WM_COPYDATA:
     {
         const auto* copyData = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
@@ -7351,7 +7542,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (PtInRect(&searchRect, point))
         {
             ActivateSearchInput();
-            InvalidateRect(hwnd, nullptr, FALSE);
+            if (g_searchInput.IsComposing())
+            {
+                HIMC context = ImmGetContext(hwnd);
+                if (context)
+                {
+                    ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+                    ImmReleaseContext(hwnd, context);
+                }
+                g_searchInput.CancelComposition();
+                RebuildFiltered();
+            }
+            g_searchInput.SetCaret(SearchTextPositionFromClientX(hwnd, point.x), (wParam & MK_SHIFT) != 0);
+            g_searchPointerSelecting = true;
+            SetCapture(hwnd);
+            SearchCaretChanged(hwnd);
             return 0;
         }
         ResetDragState();
@@ -7372,7 +7577,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                         SetSingleSelection(item.sourcePath);
                     }
                 }
-                g_mouseDown = g_searchText.empty();
+                g_mouseDown = SearchDisplayText().empty();
                 g_dragFilteredIndex = hit.itemIndex;
                 g_dragStart = point;
                 g_dragCurrent = point;
@@ -7392,7 +7597,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 {
                     SetSingleRegionSelection(regionHit.regionId);
                 }
-                g_mouseDown = g_searchText.empty();
+                g_mouseDown = SearchDisplayText().empty();
                 g_pendingRegionDragId = regionHit.regionId;
                 g_dragStart = point;
                 g_dragCurrent = point;
@@ -7413,6 +7618,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_MOUSEMOVE:
     {
         POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (g_searchPointerSelecting)
+        {
+            g_searchInput.SetCaret(SearchTextPositionFromClientX(hwnd, point.x), true);
+            SearchCaretChanged(hwnd);
+            return 0;
+        }
         if (g_selectionBoxActive)
         {
             UpdateSelectionBox(point);
@@ -7437,6 +7648,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     case WM_LBUTTONUP:
+        if (g_searchPointerSelecting)
+        {
+            g_searchPointerSelecting = false;
+            if (GetCapture() == hwnd) ReleaseCapture();
+            SearchCaretChanged(hwnd);
+            return 0;
+        }
         if (g_selectionBoxActive)
         {
             CompleteSelectionBox(hwnd);
@@ -7494,6 +7712,30 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     case WM_KEYDOWN:
+    {
+        const bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (g_searchInput.IsComposing())
+        {
+            if (wParam == VK_ESCAPE)
+            {
+                HIMC context = ImmGetContext(hwnd);
+                if (context)
+                {
+                    ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+                    ImmReleaseContext(hwnd, context);
+                }
+                g_searchInput.CancelComposition();
+                SearchTextChanged(hwnd, false);
+                return 0;
+            }
+            if (wParam == VK_LEFT || wParam == VK_RIGHT || wParam == VK_UP || wParam == VK_DOWN
+                || wParam == VK_HOME || wParam == VK_END || wParam == VK_DELETE || wParam == VK_BACK
+                || wParam == VK_RETURN || wParam == VK_TAB)
+            {
+                return DefWindowProcW(hwnd, message, wParam, lParam);
+            }
+        }
         if (wParam == VK_ESCAPE)
         {
             if (g_selectionBoxActive) CancelSelectionBox(hwnd);
@@ -7501,25 +7743,71 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             else HideNativeUi();
             return 0;
         }
-        if (wParam == L'A' && (GetKeyState(VK_CONTROL) & 0x8000))
+        if (control && wParam == L'A')
         {
-            SelectAllItems();
+            g_searchInput.SelectAll();
+            SearchCaretChanged(hwnd);
+            return 0;
+        }
+        if (control && wParam == L'C')
+        {
+            WriteClipboardText(hwnd, g_searchInput.SelectedText());
+            return 0;
+        }
+        if (control && wParam == L'X')
+        {
+            const std::wstring selected = g_searchInput.SelectedText();
+            if (WriteClipboardText(hwnd, selected) && g_searchInput.CutSelection()) SearchTextChanged(hwnd, true);
+            return 0;
+        }
+        if (control && wParam == L'V')
+        {
+            const std::wstring pasted = ReadClipboardText(hwnd);
+            if (!pasted.empty() && g_searchInput.InsertText(pasted)) SearchTextChanged(hwnd, true);
+            return 0;
+        }
+        if (control && wParam == L'Z')
+        {
+            if ((shift ? g_searchInput.Redo() : g_searchInput.Undo())) SearchTextChanged(hwnd, true);
+            return 0;
+        }
+        if (control && wParam == L'Y')
+        {
+            if (g_searchInput.Redo()) SearchTextChanged(hwnd, true);
             return 0;
         }
         if (wParam == VK_TAB)
         {
-            CompleteSearchFromSelection(hwnd, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
             return 0;
         }
         if (wParam == VK_RETURN) { LaunchItemAtFilteredIndex(g_selectedFilteredIndex); return 0; }
         if (wParam == VK_RIGHT)
         {
-            MoveSelectionHorizontal(1);
+            g_searchInput.MoveCaret(control ? llp::input::Move::WordRight : llp::input::Move::Right, shift);
+            SearchCaretChanged(hwnd);
             return 0;
         }
         if (wParam == VK_LEFT)
         {
-            MoveSelectionHorizontal(-1);
+            g_searchInput.MoveCaret(control ? llp::input::Move::WordLeft : llp::input::Move::Left, shift);
+            SearchCaretChanged(hwnd);
+            return 0;
+        }
+        if (wParam == VK_HOME)
+        {
+            g_searchInput.MoveCaret(llp::input::Move::Home, shift);
+            SearchCaretChanged(hwnd);
+            return 0;
+        }
+        if (wParam == VK_END)
+        {
+            g_searchInput.MoveCaret(llp::input::Move::End, shift);
+            SearchCaretChanged(hwnd);
+            return 0;
+        }
+        if (wParam == VK_DELETE)
+        {
+            if (g_searchInput.DeleteForward(control)) SearchTextChanged(hwnd, true);
             return 0;
         }
         if (wParam == VK_DOWN)
@@ -7533,41 +7821,46 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         return 0;
+    }
+    case WM_IME_STARTCOMPOSITION:
+        ActivateSearchInput();
+        g_searchInput.BeginComposition();
+        UpdateImeWindowPosition(hwnd);
+        RequestSearchRepaint(hwnd, false);
+        return 0;
     case WM_IME_COMPOSITION:
         UpdateSearchComposition(hwnd, lParam);
+        UpdateImeWindowPosition(hwnd);
         return 0;
     case WM_IME_ENDCOMPOSITION:
-        g_searchCompositionText.clear();
-        RequestSearchRepaint(hwnd, false);
+        if (g_searchInput.IsComposing())
+        {
+            g_searchInput.CancelComposition();
+            SearchTextChanged(hwnd, false);
+        }
         return 0;
     case WM_IME_CHAR:
         ActivateSearchInput();
-        CommitSearchCompletion();
-        g_searchCompositionText.clear();
-        if (wParam >= 32)
+        if (wParam >= 32 && g_searchInput.HandleLegacyImeCharacter(static_cast<wchar_t>(wParam)))
         {
-            g_searchText.push_back(static_cast<wchar_t>(wParam));
-            g_scrollOffset = 0;
-            RebuildFiltered();
+            SearchTextChanged(hwnd, true);
         }
-        ClearSearchCompletion();
-        RequestSearchRepaint(hwnd, true);
         return 0;
     case WM_CHAR:
+    {
         ActivateSearchInput();
-        if (wParam == VK_TAB)
+        if (wParam == VK_TAB || wParam == VK_RETURN || g_searchInput.IsComposing())
         {
             return 0;
         }
-        CommitSearchCompletion();
-        g_searchCompositionText.clear();
+        bool changed = false;
         if (wParam == VK_BACK)
         {
-            if (!g_searchText.empty()) g_searchText.pop_back();
+            changed = g_searchInput.Backspace((GetKeyState(VK_CONTROL) & 0x8000) != 0);
         }
         else if (wParam >= 32)
         {
-            g_searchText.push_back(static_cast<wchar_t>(wParam));
+            changed = g_searchInput.InsertText(std::wstring(1, static_cast<wchar_t>(wParam)));
         }
         if (g_catalogBrokerProbe.active
             && g_catalogBrokerProbe.stage == 1
@@ -7576,11 +7869,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             g_catalogBrokerProbe.inputResponseMilliseconds = GetTickCount64() - g_catalogBrokerProbe.inputPostedTick;
             g_catalogBrokerProbe.cachedItemCountDuringRefresh = g_items.size();
         }
-        g_scrollOffset = 0;
-        RebuildFiltered();
-        ClearSearchCompletion();
-        RequestSearchRepaint(hwnd, true);
+        if (changed) SearchTextChanged(hwnd, true);
         return 0;
+    }
     case WM_SIZE:
         ClampScroll();
         g_spotlightLayerDirty = true;
@@ -7592,6 +7883,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     case WM_CAPTURECHANGED:
+        if (reinterpret_cast<HWND>(lParam) != hwnd) g_searchPointerSelecting = false;
         if (reinterpret_cast<HWND>(lParam) != hwnd && g_selectionBoxActive)
         {
             CancelSelectionBox(hwnd);
@@ -7605,6 +7897,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_DESTROY:
     {
         KillTimer(hwnd, DragAnimationTimerId);
+        if (!g_textInputProbePath.empty()) WriteFileUtf8(g_textInputProbePath, BuildTextInputProbeJson());
+        g_searchAccessibility.Shutdown();
         g_shellBroker.Stop();
         MSG pendingBrokerResult = {};
         while (PeekMessageW(&pendingBrokerResult, hwnd, WmShellBrokerResult, WmShellBrokerResult, PM_REMOVE))
@@ -7661,7 +7955,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     g_shellImportProbe.root = CommandLineValue(L"--shell-import-root");
     g_shellImportProbe.destination = CommandLineValue(L"--shell-import-destination");
     g_shellImportProbe.repeat = CommandLineIntValue(L"--shell-import-repeat", 2, 2, 2);
-    if (g_catalogBrokerProbe.active && g_shellImportProbe.active) return 2;
+    g_textInputProbePath = CommandLineValue(L"--text-input-probe-file");
+    const bool textInputProbeActive = !g_textInputProbePath.empty();
+    const int activeBehaviorProbes = (g_catalogBrokerProbe.active ? 1 : 0) + (g_shellImportProbe.active ? 1 : 0) + (textInputProbeActive ? 1 : 0);
+    if (activeBehaviorProbes > 1) return 2;
     if (g_shellImportProbe.active && (g_shellImportProbe.root.empty() || g_shellImportProbe.destination.empty())) return 2;
     g_diagnosticsUiMode = CommandLineHasArgument(L"--diagnostics-ui");
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
@@ -7750,11 +8047,17 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         return 1;
     }
     AppendStartupLog(L"window-created", true, LLP_WINDOW_CLASS_NAME_WIDE);
+    llp::accessibility::Callbacks accessibilityCallbacks;
+    accessibilityCallbacks.focus = AccessibilityFocus;
+    accessibilityCallbacks.textChanged = AccessibilityTextChanged;
+    accessibilityCallbacks.selectionChanged = AccessibilitySelectionChanged;
+    g_searchAccessibilityReady = g_searchAccessibility.Initialize(g_hwnd, &g_searchInput, accessibilityCallbacks);
+    AppendStartupLog(L"search-accessibility", g_searchAccessibilityReady, g_searchAccessibilityReady ? L"UIA Value/Text providers ready" : L"provider initialization failed");
 
     const bool shellBrokerStarted = g_shellBroker.Start(g_hwnd, WmShellBrokerResult);
     AppendStartupLog(L"shell-broker", shellBrokerStarted, shellBrokerStarted ? L"dedicated STA queued" : L"thread creation failed");
 
-    if (!g_diagnosticsUiMode && !g_catalogBrokerProbe.active && !g_shellImportProbe.active)
+    if (!g_diagnosticsUiMode && !g_catalogBrokerProbe.active && !g_shellImportProbe.active && !textInputProbeActive)
     {
         RegisterCurrentHotkey();
         AppendStartupLog(L"hotkey-registered", g_hotkeyRegistered, g_settings.hotkey);
@@ -7810,6 +8113,12 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         CloseHandle(mutex);
         if (comInitialized) CoUninitialize();
         return 2;
+    }
+
+    if (textInputProbeActive)
+    {
+        ShowNativeUi();
+        g_textInputProbeWindowWasVisible = g_hwnd && IsWindowVisible(g_hwnd) != FALSE;
     }
 
     MSG msg = {};

@@ -127,8 +127,10 @@ try {
         src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp `
         src\LightLaunchpad.NativeUi\Catalog.cpp `
         src\LightLaunchpad.NativeUi\Persistence.cpp `
+        src\LightLaunchpad.NativeUi\SearchAccessibility.cpp `
         src\LightLaunchpad.NativeUi\SearchIndex.cpp `
         src\LightLaunchpad.NativeUi\ShellBroker.cpp `
+        src\LightLaunchpad.NativeUi\TextInput.cpp `
         $temporaryResourceObject `
         -I $temporaryDirectory `
         -I src\LightLaunchpad.NativeUi `
@@ -158,6 +160,8 @@ try {
         -ldwrite `
         -limm32 `
         -lole32 `
+        -loleaut32 `
+        -luiautomationcore `
         -luxtheme `
         -ladvapi32 `
         -luuid `

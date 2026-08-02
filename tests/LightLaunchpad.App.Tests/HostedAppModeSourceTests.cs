@@ -547,7 +547,7 @@ public sealed class HostedAppModeSourceTests
         TestAssert.Contains("active ? 0.035f : 0.020f", source);
         TestAssert.Contains("D2DColorAlpha(RGB(246, 252, 255), active ? 0.46f : 0.34f)", source);
         TestAssert.Contains("D2DColorAlpha(RGB(148, 214, 255), active ? 0.24f : 0.16f)", source);
-        TestAssert.Contains("g_searchText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72)", source);
+        TestAssert.Contains("displayText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72)", source);
         TestAssert.DoesNotContain("DrawLiquidGlassFocusLens(target, rounded, rect, active ? 1.12f : 1.06f", source);
         TestAssert.DoesNotContain("DrawLiquidGlassFocusLens(dc, rect, SpotlightSearchCornerRadius, active ? 1.12f : 1.06f", source);
         TestAssert.DoesNotContain("drawBand(topBand", source);
@@ -578,32 +578,39 @@ public sealed class HostedAppModeSourceTests
         TestAssert.DoesNotContain("std::vector<int> scores(g_items.size(), 0)", source);
     }
 
-    public static void NativeUiSource_ImprovesSearchAndTabCompletion()
+    public static void NativeUiSource_UsesProductionSearchAndTextControllers()
     {
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
         var searchSource = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "SearchIndex.cpp"));
+        var textSource = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "TextInput.cpp"));
+        var accessibilitySource = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "SearchAccessibility.cpp"));
 
         TestAssert.Contains("ActivateSearchInput", source);
         TestAssert.Contains("#include \"SearchIndex.h\"", source);
         TestAssert.Contains("RebuildSearchIndex", source);
         TestAssert.Contains("g_searchIndex.Rebuild(items, g_searchHistory)", source);
-        TestAssert.Contains("g_searchIndex.Query(g_searchText, options)", source);
+        TestAssert.Contains("g_searchIndex.Query(query, options)", source);
         TestAssert.Contains("options.showRecentAndFavorites", source);
         TestAssert.Contains("Index::BuildPinyinForms", searchSource);
         TestAssert.Contains("ScoreName", searchSource);
         TestAssert.Contains("DamerauLevenshtein", searchSource);
         TestAssert.Contains("History::RecordLaunch", searchSource);
-        TestAssert.Contains("CompleteSearchFromSelection", source);
-        TestAssert.Contains("SearchCompletionTail", source);
-        TestAssert.Contains("g_completionCandidateText", source);
-        TestAssert.Contains("SearchCompletionHighlightRect", source);
+        TestAssert.Contains("#include \"TextInput.h\"", source);
+        TestAssert.Contains("#include \"SearchAccessibility.h\"", source);
+        TestAssert.Contains("TextBuffer::MoveCaret", textSource);
+        TestAssert.Contains("TextBuffer::BeginComposition", textSource);
+        TestAssert.Contains("SearchAccessibility::HandleGetObject", accessibilitySource);
+        TestAssert.Contains("IValueProvider", accessibilitySource);
+        TestAssert.Contains("ITextProvider", accessibilitySource);
         TestAssert.Contains("DrawSearchGlassSurface", source);
         TestAssert.Contains("SpotlightSearchSideInset", source);
         TestAssert.Contains("SpotlightSearchCornerRadius", source);
         TestAssert.Contains("searchRect.top, searchRect.right", source);
         TestAssert.Contains("RGB(58, 140, 255)", source);
         TestAssert.Contains("VK_TAB", source);
-        TestAssert.Contains("metrics.groupByRegion = g_searchText.empty()", source);
+        TestAssert.Contains("metrics.groupByRegion = SearchCommittedText().empty()", source);
+        TestAssert.DoesNotContain("CompleteSearchFromSelection", source);
+        TestAssert.DoesNotContain("g_completionCandidateText", source);
         TestAssert.DoesNotContain("KnownPinyinForChar", source);
         TestAssert.DoesNotContain("BuildPinyinSearchText", source);
         TestAssert.DoesNotContain("searchCandidateLower", source);
@@ -613,17 +620,23 @@ public sealed class HostedAppModeSourceTests
     public static void NativeUiSource_ShowsSearchTypingStateAndImeComposition()
     {
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var textSource = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "TextInput.cpp"));
+        var accessibilitySource = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "SearchAccessibility.cpp"));
         var script = File.ReadAllText(FindRepoFile("tools", "build-native-ui.ps1"));
 
-        TestAssert.Contains("g_searchCompositionText", source);
+        TestAssert.Contains("g_searchInput", source);
         TestAssert.Contains("SearchCommittedText", source);
         TestAssert.Contains("SearchDisplayText", source);
-        TestAssert.Contains("SearchCompletionTail", source);
         TestAssert.Contains("DrawSearchCaret", source);
+        TestAssert.Contains("UpdateImeWindowPosition", source);
         TestAssert.Contains("WM_IME_COMPOSITION", source);
         TestAssert.Contains("ImmGetCompositionStringW", source);
         TestAssert.Contains("GCS_COMPSTR", source);
+        TestAssert.Contains("TextBuffer::CommitComposition", textSource);
+        TestAssert.Contains("UIA_TextPatternId", accessibilitySource);
+        TestAssert.Contains("WM_GETOBJECT", source);
         TestAssert.Contains("-limm32", script);
+        TestAssert.Contains("-luiautomationcore", script);
     }
 
     public static void NativeUiSource_CapturesHotkeyInputInSettings()
