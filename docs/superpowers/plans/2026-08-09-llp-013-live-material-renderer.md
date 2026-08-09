@@ -479,7 +479,7 @@ git commit -m "feat: add live desktop capture lifecycle"
 
 - [ ] Create one `IDCompositionTarget` for the existing HWND and exactly three child visuals. Create one premultiplied-alpha `IDCompositionSurface` per visual at the physical client size and set them on root in this order: material, overlay, content. Clear every surface to transparent at the start of a redraw.
 
-- [ ] For the acquired `ID3D11Texture2D`, query `IDXGISurface`, create an `ID2D1Bitmap1` with `D2D1_BITMAP_OPTIONS_CANNOT_DRAW`, and crop only `MapWindowCrop`'s exact aligned rectangle. Normalize rotation once in the crop transform; never scale the desktop source to manufacture refraction.
+- [ ] For the acquired `ID3D11Texture2D`, query `IDXGISurface`, create the desktop-source `ID2D1Bitmap1` with `D2D1_BITMAP_OPTIONS_NONE` so it is valid effect input (composition target bitmaps remain `TARGET | CANNOT_DRAW`), and crop only `MapWindowCrop`'s exact aligned rectangle. Normalize rotation once in the crop transform; never scale the desktop source to manufacture refraction.
 
 - [ ] Build one bounded material graph on the material surface:
 
@@ -494,7 +494,7 @@ context_->DrawImage(blur_, windowDestination, windowSource, D2D1_INTERPOLATION_M
 
 Then apply the bounded cool white-blue tint, clarity scrim, inner rim, and shadow from `MaterialTone`. Clip the whole graph to the same antialiased rounded geometry used by `SceneGeometry`; pixels outside the boundary remain alpha zero.
 
-- [ ] Reduce the desktop to a fixed 16×12 luminance texture on the GPU. Use two staging buffers alternately, request `D3D11_MAP_FLAG_DO_NOT_WAIT`, and read at most once per 100 ms only after a changed desktop frame. If mapping returns `DXGI_ERROR_WAS_STILL_DRAWING`, keep the prior grid without blocking.
+- [ ] Reduce the desktop to a fixed 16×12 luminance texture on the GPU. Its desktop-source D2D bitmap is also effect input and therefore uses `D2D1_BITMAP_OPTIONS_NONE`; the 16×12 target remains `TARGET | CANNOT_DRAW`. Use two staging buffers alternately, request `D3D11_MAP_FLAG_DO_NOT_WAIT`, and read at most once per 100 ms only after a changed desktop frame. If mapping returns `DXGI_ERROR_WAS_STILL_DRAWING`, keep the prior grid without blocking.
 
 - [ ] Draw the search/focus fills and edge light on the overlay surface. The search response uses `ComputeSearchSample`; its center remains aligned, its edge is capped, its coordinates are clamped inside `scene.metrics.search`, and reduced motion forces zero displacement. Focused tiles use fill/rim/shadow only.
 
