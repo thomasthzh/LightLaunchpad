@@ -2,16 +2,16 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-09 19:28:28 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-09 19:44:45 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `cde84d2`
+- HEAD: `7be8d13`
 - Remote main: `origin/main@33e91c2`
 - Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
 - Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
 - Goal status: active; LLP-013 remains the only task in progress.
-- Current gate: LLP-013 Task 2 implementation commit `cde84d2` is under legacy-icon alpha correction; specification re-review and code-quality review remain pending, and Task 3 has not started.
+- Current gate: LLP-013 Task 2 quality-review corrections are verified locally but review remains pending; Task 3 has not started.
 
 ## LLP-013 Task 2 Implementation Evidence (Review Pending)
 
@@ -21,7 +21,8 @@ Changed files in the initial implementation:
 
 - `src/LightLaunchpad.NativeUi/MaterialRenderer.{h,cpp}` - immutable scene/search/item/icon-raster contracts, mutex-protected latest-only scene ownership, and owned Win32 icon rasterization.
 - `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp` - real `HICON`, copied BGRA lifetime, premultiplication, scene replacement, and latest-generation ownership checks.
-- Initial implementation commit: `cde84d2f96e8ce5ef3a78cada0ce017b75590556` (`feat: add immutable material scenes`). The legacy-mask alpha correction is pending its scoped fix commit and must not be treated as reviewed completion.
+- Initial implementation commit: `cde84d2f96e8ce5ef3a78cada0ce017b75590556` (`feat: add immutable material scenes`); review found its legacy-mask alpha heuristic incomplete.
+- Legacy-mask correction commit: `7be8d1372995e341596a782d896f388a8ad3f90d` (`fix: preserve legacy icon alpha ownership`). The subsequent modern-alpha test correction remains pending its scoped commit and quality re-review.
 
 Original missing-contract RED evidence:
 
@@ -39,6 +40,14 @@ Specification-correction evidence in progress:
 - The correction renders the same icon over opaque black and white backgrounds, copies both results before DIB cleanup, derives alpha from their per-channel transmission delta, and retains the black-background RGB as premultiplied color. Final fresh verification reports `MaterialRenderer` 8/8 twice and `AdaptiveEnvironment` 3/3 under WinLibs-first Windows PowerShell 5.1; both temp-prefix sets remained 0 -> 0 with empty added/missing sets. The diff gate, scoped fix commit, specification re-review, and code-quality review remain pending.
 - The undocumented 1024 px cap and 1025 px test are removed. Validation now uses positive size plus checked `int` stride and `size_t` byte-count arithmetic; the regression uses `INT_MAX` to reject overflow without attempting a huge allocation.
 - No renderer thread/GPU bootstrap, build-tool change, protected EXE/install/startup mutation, `C:\TOOL` mutation, push, tag, release, or Task 3 work is included.
+
+Code-quality correction evidence in progress:
+
+- Quality review returned `Ready: No` because the modern test source used invalid `B=200, A=128` data, did not prove two distinct legal premultiplied colors through DrawIconEx byte rounding, and did not assert that caller-owned modern and legacy `HICON` destruction succeeded.
+- The strengthened modern fixture now uses two distinct legal premultiplied BGRA source pixels, `{B=64,G=32,R=16,A=128}` and `{B=24,G=144,R=80,A=192}`. It compares all four recovered channels against one CreateIconIndirect/DrawIconEx blend with a `+127 / 255` byte-rounding model and a `+/-1` tolerance, so hard-coded output, changed color, alpha loss, and a second RGB-alpha multiplication are observable.
+- Controlled mutation RED command: WinLibs-first Windows PowerShell 5.1 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\LightLaunchpad.NativeUi.Tests\MaterialRenderer.Tests.ps1`; production was temporarily changed to multiply the recovered black-background RGB by alpha a second time. It exited 1 with exact diagnostic text `Modern icon blue channel changed beyond DrawIconEx blending or was premultiplied again. actual=16 expected=32`. The mutation was restored before GREEN and is absent from the production diff. Temp roots remained 0 -> 0 with empty added/missing sets.
+- Both modern and legacy caller-owned handles now require `DestroyIcon(...) != FALSE` immediately after rasterization, proving the production path neither destroys nor retains the input handle.
+- Final fresh GREEN under the same WinLibs-first Windows PowerShell 5.1 environment reports `MaterialRenderer` 8/8 twice and `AdaptiveEnvironment` 3/3; both test temp-prefix sets remained 0 -> 0 with empty added/missing sets. Task 2 remains `in_progress`; scoped commit, review, and reviewer confirmation are pending.
 
 ## LLP-013 Task 1 Completion Evidence
 

@@ -5,6 +5,7 @@
 
 #include "MaterialRenderer.h"
 
+#include <array>
 #include <cstdint>
 #include <cmath>
 #include <iostream>
@@ -25,6 +26,18 @@ using llp::material::ResolveMaterialTone;
 
 int passed = 0;
 
+struct ExpectedModernPixel
+{
+    int x;
+    int y;
+    std::array<std::uint8_t, 4> bgra;
+};
+
+constexpr std::array<ExpectedModernPixel, 2> expectedModernPixels = { {
+    { 0, 0, { 64, 32, 16, 128 } },
+    { 1, 0, { 24, 144, 80, 192 } }
+} };
+
 void Require(bool condition, const char* message)
 {
     if (!condition) throw std::runtime_error(message);
@@ -33,6 +46,21 @@ void Require(bool condition, const char* message)
 void RequireNear(float actual, float expected, float tolerance, const char* message)
 {
     Require(std::abs(actual - expected) <= tolerance, message);
+}
+
+void RequireByteNear(std::uint8_t actual, std::uint8_t expected, int tolerance, const char* message)
+{
+    if (std::abs(static_cast<int>(actual) - static_cast<int>(expected)) > tolerance)
+    {
+        throw std::runtime_error(std::string(message) + " actual=" + std::to_string(actual)
+            + " expected=" + std::to_string(expected));
+    }
+}
+
+std::uint8_t ExpectedDrawIconChannel(std::uint8_t premultipliedChannel, std::uint8_t alpha)
+{
+    return static_cast<std::uint8_t>(
+        (static_cast<unsigned int>(premultipliedChannel) * alpha + 127u) / 255u);
 }
 
 void Pass(const char* name)
@@ -58,10 +86,18 @@ HICON CreateOwnedTestIcon()
     auto* pixels = static_cast<std::uint8_t*>(rawBits);
     for (int index = 0; index < size * size; ++index)
     {
-        pixels[index * 4 + 0] = 200;
-        pixels[index * 4 + 1] = 96;
-        pixels[index * 4 + 2] = 48;
-        pixels[index * 4 + 3] = 128;
+        pixels[index * 4 + 0] = 24;
+        pixels[index * 4 + 1] = 48;
+        pixels[index * 4 + 2] = 12;
+        pixels[index * 4 + 3] = 96;
+    }
+    for (const auto& expected : expectedModernPixels)
+    {
+        const auto offset = (expected.y * size + expected.x) * 4;
+        for (std::size_t channel = 0; channel < expected.bgra.size(); ++channel)
+        {
+            pixels[offset + channel] = expected.bgra[channel];
+        }
     }
 
     std::vector<std::uint8_t> maskBits(static_cast<std::size_t>(size * size) / 8, 0);
@@ -335,6 +371,24 @@ void TestSceneSnapshotsOwnCopiedPremultipliedIconBytes()
         }
     }
     Require(foundModernPartialAlpha, "Modern 32-bit icon lost its partial alpha coverage.");
+    for (const auto& expected : expectedModernPixels)
+    {
+        const auto offset = static_cast<std::size_t>(expected.y) * static_cast<std::size_t>(icon->stride)
+            + static_cast<std::size_t>(expected.x) * 4;
+        // CreateIconIndirect plus DrawIconEx applies one per-pixel blend with byte rounding.
+        // RasterizeIcon must preserve that black-background result without applying it again.
+        RequireByteNear(icon->premultipliedBgra[offset + 0],
+            ExpectedDrawIconChannel(expected.bgra[0], expected.bgra[3]), 1,
+            "Modern icon blue channel changed beyond DrawIconEx blending or was premultiplied again.");
+        RequireByteNear(icon->premultipliedBgra[offset + 1],
+            ExpectedDrawIconChannel(expected.bgra[1], expected.bgra[3]), 1,
+            "Modern icon green channel changed beyond DrawIconEx blending or was premultiplied again.");
+        RequireByteNear(icon->premultipliedBgra[offset + 2],
+            ExpectedDrawIconChannel(expected.bgra[2], expected.bgra[3]), 1,
+            "Modern icon red channel changed beyond DrawIconEx blending or was premultiplied again.");
+        RequireByteNear(icon->premultipliedBgra[offset + 3], expected.bgra[3], 1,
+            "Modern icon alpha changed during DrawIconEx coverage recovery.");
+    }
 
     const auto expectedBytes = icon->premultipliedBgra;
     auto firstScene = std::make_shared<llp::material::SceneSnapshot>();
@@ -347,7 +401,8 @@ void TestSceneSnapshotsOwnCopiedPremultipliedIconBytes()
     llp::material::LatestSceneSlot slot;
     slot.Submit(firstScene);
     icon.reset();
-    DestroyIcon(sourceIcon);
+    Require(DestroyIcon(sourceIcon) != FALSE,
+        "Caller could not destroy the modern input HICON after RasterizeIcon returned.");
     sourceIcon = nullptr;
     slot.Submit(newestScene);
     firstScene.reset();
@@ -366,7 +421,8 @@ void TestLegacyMaskIconDistinguishesOpaqueBlackFromTransparency()
 {
     HICON sourceIcon = CreateOwnedLegacyMaskIcon();
     const auto icon = RasterizeIcon(sourceIcon, 16);
-    DestroyIcon(sourceIcon);
+    Require(DestroyIcon(sourceIcon) != FALSE,
+        "Caller could not destroy the legacy input HICON after RasterizeIcon returned.");
     Require(icon != nullptr, "RasterizeIcon rejected a valid legacy AND/XOR HICON.");
     Require(icon->stride >= icon->width * 4, "Legacy icon stride was too small.");
 
