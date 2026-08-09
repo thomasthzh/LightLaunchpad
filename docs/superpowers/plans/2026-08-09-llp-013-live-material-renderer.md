@@ -408,6 +408,7 @@ git commit -m "feat: bootstrap native material renderer"
 
 **Files:**
 
+- Modify: `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
 - Modify: `src/LightLaunchpad.NativeUi/MaterialRenderer.cpp`
 - Modify: `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp`
 - Create: `tests/LightLaunchpad.NativeUi.Tests/MaterialRendererBehavior.Tests.ps1`
@@ -415,6 +416,8 @@ git commit -m "feat: bootstrap native material renderer"
 - [ ] Extend the C++ test with output enumeration selection, all four rotation mappings, negative virtual-desktop origins, partial-clamp rejection, 32 ms first-frame timeout, hide, access-loss, and exactly-one-rebuild cases. Add a fake backend interface private to `MaterialRenderer.cpp` under `LLP_MATERIAL_TESTING` so the production lifecycle loop is exercised without replacing the real backend.
 
 - [ ] Add the real-EXE harness shell now. It must build into a GUID-named temporary directory, use isolated `APPDATA`, `LOCALAPPDATA`, and `USERPROFILE`, never register the real hotkey/startup entry, and always stop only its captured PID in `finally`. First RED assertion: a development EXE launched with `--material-probe-file` and `--material-force-failure duplication` must emit `path=fallback`, `failure=ForcedForTest`, and responsive search input; it currently fails because the switches do not exist.
+
+- [ ] Add only the narrow host bridge required to exercise those real-EXE switches: `LightLaunchpad.NativeUi.cpp` parses and validates the material probe arguments, counts the development probe as a behavior-probe mode so no tray or real hotkey is registered, and owns a probe-only renderer instance until process shutdown. Stable builds reject every material test switch with exit 2 before COM, singleton, or window creation. This is not the normal Spotlight host integration: do not add the Task 6 material globals, submit production scenes, change `ShowNativeUi`/`HideNativeUi`, or bypass the legacy painter in this task.
 
 - [ ] Implement adapter/output selection on the renderer thread:
 
@@ -458,7 +461,7 @@ Expected: unit/state tests pass; real development EXE returns a stable fallback 
 - [ ] Commit:
 
 ```powershell
-git add src/LightLaunchpad.NativeUi/MaterialRenderer.cpp tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp tests/LightLaunchpad.NativeUi.Tests/MaterialRendererBehavior.Tests.ps1
+git add src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp src/LightLaunchpad.NativeUi/MaterialRenderer.cpp tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp tests/LightLaunchpad.NativeUi.Tests/MaterialRendererBehavior.Tests.ps1
 git diff --cached --check
 git commit -m "feat: add live desktop capture lifecycle"
 ```
