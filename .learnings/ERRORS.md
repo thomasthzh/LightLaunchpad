@@ -41,6 +41,82 @@ Before any test clicks a legacy or unknown settings Apply/Save path, inventory e
 
 ---
 
+## [ERR-20260809-005] native-build-selects-incomplete-mingw
+
+**Logged**: 2026-08-09T16:05:00+08:00
+**Priority**: high
+**Status**: in_progress
+**Area**: config
+
+### Summary
+
+The NativeUi build selected the first `g++.exe` on PATH even though that MinGW installation lacked the UIAutomationCore import library required by production.
+
+### Error
+
+```text
+ld.exe: cannot find -luiautomationcore: No such file or directory
+collect2.exe: error: ld returned 1 exit status
+```
+
+### Context
+
+- PATH selected `C:\Strawberry\c\bin\g++.exe` first.
+- Strawberry contains `libd3d11.a`, `libdxgi.a`, and `libdcomp.a`, but no `libuiautomationcore.a`.
+- The installed WinLibs compiler under the WinGet package contains all four required import libraries.
+- The failure occurred in the pre-implementation baseline at `AdaptiveWindowBehavior.Tests.ps1`; no LLP-013 production code existed yet.
+
+### Suggested Fix
+
+Make the production build probe candidate compilers for every required header/import library and select one complete toolchain deterministically. Fail with a capability-specific message if no candidate is complete. Until Task 3 implements that check, prepend the verified WinLibs `bin` directory for baseline commands only.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tools/build-native-ui.ps1`, `tests/LightLaunchpad.NativeUi.Tests/AdaptiveWindowBehavior.Tests.ps1`
+
+---
+
+## [ERR-20260809-004] windowsapps-pwsh-pty-access-denied
+
+**Logged**: 2026-08-09T16:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+The unified executor could not create a PTY process through the WindowsApps `pwsh.exe` alias, so the NativeUi baseline command never started.
+
+### Error
+
+```text
+Failed to create unified exec process ... WindowsApps\pwsh.exe ... 拒绝访问。 (os error 5)
+```
+
+### Context
+
+- The command requested `tty: true` for a long PowerShell test loop.
+- Process creation failed before the first suite ran.
+- The repository, product processes, and test outputs were not changed by the failed launch.
+
+### Suggested Fix
+
+Run PowerShell test loops without PTY in this Windows desktop environment. Use the returned session ID for long-running non-PTY commands when needed.
+
+### Metadata
+
+- Reproducible: unknown
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/*.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T16:00:00+08:00
+- **Commit/PR**: next scoped documentation commit
+- **Notes**: The baseline will be reissued without PTY; only actual suite output will count as verification.
+
+---
+
 ## [ERR-20260809-003] powershell-empty-git-output-trim
 
 **Logged**: 2026-08-09T15:55:00+08:00
