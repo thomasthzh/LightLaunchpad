@@ -2,16 +2,54 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-09 20:56:02 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-09 22:38:00 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `4f5b044c6c1e64af59859cebe4c5596b5b6a2e6d`
+- HEAD: `c4bc9b0241048c49132a8961d6396b5476ae2394`
 - Remote main: `origin/main@33e91c2`
 - Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
 - Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
 - Goal status: active; LLP-013 remains the only task in progress.
-- Current gate: LLP-013 Task 3 is complete after independent specification and code-quality re-review; Task 4 DXGI Desktop Duplication capture is the next gate and has not started.
+- Current gate: LLP-013 Task 4 is complete after independent specification and code-quality re-review; Task 5 three-layer DirectComposition rendering is the next gate and has not started.
+
+## LLP-013 Task 4 Completion Evidence
+
+Status at 2026-08-09 22:38 +08:00: Task 4 complete; LLP-013 remains the sole project-level `in_progress` task, and Task 5 is the next implementation gate.
+
+Changed files in the scoped implementation:
+
+- `src/LightLaunchpad.NativeUi/MaterialRenderer.cpp` - monitor-bound DXGI 1.2 Desktop Duplication backend, exact adapter/output selection, full-window containment, display-affinity exclusion, QPC-bounded first-frame acquisition, frame release, one-rebuild recovery, hidden resource release, stable fallback diagnostics, and test-only lifecycle runner behind an explicit build macro.
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - narrow development-only material lifecycle probe, Stable early rejection before COM/singleton/window creation, fresh diagnostics snapshots, and no normal Spotlight renderer wiring.
+- `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.{cpp,ps1}` - production lifecycle/state coverage using an explicit `LLP_MATERIAL_TESTING=1` build, bounded `int64_t` C ABI, shared selector adversarial candidates, rotation/crop/deadline/hide/release/acquire/rebuild/failure checks, and production-symbol exclusion.
+- `tests/LightLaunchpad.NativeUi.Tests/MaterialRendererBehavior.Tests.ps1` - isolated Development/Stable real-EXE builds, forced and real capture paths, UIA input responsiveness, fresh hidden snapshots, process-lifetime WinEvent monitoring, symbol checks, and exact temp/process/startup protection.
+- Plan scope correction `6044bf0` adds only the probe host file required to test the real NativeUi EXE while preserving normal host integration for Task 6.
+
+TDD RED and systematic-debugging evidence:
+
+- Initial C++ RED exited 1 with `undefined reference to LLP_MaterialRunFakeLifecycleScenario`; the initial real-EXE RED timed out waiting for `material-probe.json` because the old EXE ignored the new switches.
+- The first implementation reached real capture but started the 32 ms deadline before display-affinity and backend startup, producing `fallback/FirstFrameTimeout` with zero acquisitions. A fake 40 ms startup plus 5 ms acquisition reproduced the defect; the deadline now starts only after `backend.Start` succeeds.
+- The first hidden check reread stale JSON. The corrected probe explicitly requests a fresh snapshot; `probeGeneration` advances from 2 to 3 and both real and fake post-hide acquisition/presentation counters remain unchanged.
+- Quality REDs proved all four later findings: removing inferred test mode made the old runner fail to link; the old ABI accepted a short output buffer; the old selector failed to skip wrong/partial candidates for a later exact output; and ReleaseFrame access loss waited for another Acquire. A controlled 40 ms transient window produced old post-exit HWND count 0 while the process-lifetime WinEvent monitor captured 5 events; the mutation was restored before GREEN.
+
+Implementation, performance, and real-EXE evidence:
+
+- Implementation commits are `f6fcfb9f9d59` (`feat: add live desktop capture lifecycle`), `d7c72ae7e34e` (`fix: align material acquisition and hidden evidence`), and `c4bc9b024104` (`fix: harden material capture evidence`). The final quality correction changes exactly four Task 4 files; `git diff --check 6044bf0..c4bc9b0` passes.
+- Final production C++ gate passes 24/24 twice and again post-commit. It proves exact adapter 1/output 1 selection through the shared production operation, four rotations, negative origins, partial rejection, 32 ms first-frame deadline, per-wait cap 16 ms, nonblocking Hide, no hidden timed waits, ReleaseFrame AccessLost recovery (`acquire=2`, `release=1`, `rebuild=1`, `duplicate=2`), Acquire DeviceRemoved recovery (`acquire=2`, `rebuild=1`, `duplicate=2`), and direct generic-release fallback without rebuild. Independent final quality run completed in 6.470 seconds.
+- `AdaptiveEnvironment.Tests.ps1` passes 3/3; independent final quality run completed in 1.522 seconds. All focused GUID temp-root sets stayed 0 -> 0.
+- Final independent Lifecycle run passes in 59.293 seconds. Forced duplication reports `fallback/ForcedForTest` with zero acquired frames and responsive UIA search. The actual monitor reports `high-fidelity/None`, acquired 3 frames, rebuilt 0 times, and retained a valid last-frame identity. Hidden generation advances 2 -> 3 with no acquired/presented growth. Stable switches exit 2 with `stableWindowEvents=0`; Development and Stable production EXEs and a no-macro production object do not expose the fake runner symbol.
+- Final quality-review Development and Stable harness EXEs have SHA256 `10031FAEB4B847716DAF78D3BBC056FB0CB251D61E6EBADF597866F6494CF773` and `F51F5C56230200411AB61F5DF3D4457789E3515B0E33CAA10E059C224F0FBFA6`. The retained current-commit Development artifact is 1,761,280 bytes, SHA256 `7C08124DC2EFE790990668A7CA424059959646D91AB57958369A08D6916D19DA`, identity `development:c4bc9b024104`, and contains no fake symbol.
+- Task 4 owns capture lifecycle only; no DirectComposition target/surface rendering, normal Spotlight Show/Hide wiring, renderer frame-time claim, or visual screenshot acceptance is claimed. Screenshot/pixel evidence is N/A until Tasks 5, 6, and 8 create and audit the composed material output.
+
+Independent review and protection evidence:
+
+- Final specification review: PASS with zero findings. Final code-quality review: Ready Yes with Critical=0, Important=0, and Minor=0. Both independently reran the focused production and real-EXE gates and confirmed that Task 5/6 work was not introduced.
+- Exactly one protected process remains: PID `29376` at `C:\Users\thoma\Desktop\启动台\artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe`, SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`. HKCU Run remains its exact quoted path; the stable install remains absent; `C:\TOOL\LightLaunchpad-nativeui-win-x64-V1.10\LightLaunchpad.NativeUi.exe` remains SHA256 `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`.
+- Historical `lightlaunchpad-*` roots remain 6 -> 6, no harness/extra NativeUi process remains, `LLP_reconstruction/` remains untracked/unstaged, ignored `LightLaunchpad.NativeUi.o` is untouched, and no formal install, startup, `C:\TOOL`, push, tag, or release mutation occurred.
+
+Next step:
+
+- Start Task 5 RED for the exact three-layer DirectComposition renderer. Keep LLP-013 as the only project task in progress and do not start Task 6 until Task 5 implementation, specification review, quality review, and evidence update close.
 
 ## LLP-013 Task 3 Completion Evidence
 
