@@ -2,7 +2,7 @@
 
 ## [ERR-20260809-012] powershell-empty-temp-set-compare-object
 
-**Logged**: 2026-08-09T19:48:00+08:00
+**Logged**: 2026-08-09T19:04:00+08:00
 **Priority**: low
 **Status**: resolved
 **Area**: tests
@@ -36,7 +36,7 @@ Compare empty-safe arrays through explicit added/missing set differences and the
 
 ### Resolution
 
-- **Resolved**: 2026-08-09T19:48:00+08:00
+- **Resolved**: 2026-08-09T19:04:00+08:00
 - **Commit/PR**: next scoped learning-log commit
 - **Notes**: The reviewer used an empty-safe follow-up comparison for AdaptiveEnvironment and confirmed both relevant temp-prefix sets remained empty. Future review prompts will require explicit added/missing counts.
 
@@ -81,7 +81,7 @@ Keep the repository's UTF-8-without-BOM convention by expressing the three Chine
 
 ### Resolution
 
-- **Resolved**: 2026-08-09T19:15:00+08:00
+- **Resolved**: 2026-08-09T19:00:00+08:00
 - **Commit/PR**: `fe4b0f4c70775573799af08465ba4f02b4b3adb7`
 - **Notes**: Replaced non-ASCII source literals with three runtime UTF-16 code-point variables and composed expected strings, while converting all 13 nonzero/variable WPARAM values to explicit `UIntPtr` construction. The implementer demonstrated parser RED, encoding-only UIntPtr RED, and two real-EXE GREEN runs; independent spec and quality runs also passed with final value `中a文b末`, caret 5, and candidate `(188,118)`.
 

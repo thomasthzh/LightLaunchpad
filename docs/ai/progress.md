@@ -2,36 +2,42 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-09 18:46:44 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-09 19:10:32 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `d54f106`
+- HEAD: `659b0a9`
 - Remote main: `origin/main@33e91c2`
 - Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
 - Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
 - Goal status: active; LLP-013 remains the only task in progress.
-- Current gate: LLP-013 Task 1 pure material policies are committed at `d54f106`; specification and code-quality review remain pending before Task 1 can close.
+- Current gate: LLP-013 Task 1 pure material policies are complete through hardening commit `659b0a9`; Task 2 immutable scene and icon-raster ownership is next.
 
-## LLP-013 Task 1 Implementation Evidence
+## LLP-013 Task 1 Completion Evidence
 
-Status at 2026-08-09 18:46 +08:00: implementation committed; LLP-013 remains `in_progress`, and Task 1 review is not yet closed.
+Status at 2026-08-09 19:10 +08:00: Task 1 complete; LLP-013 remains `in_progress`, and Task 2 is the next implementation gate.
 
 Changed files in scope:
 
 - `src/LightLaunchpad.NativeUi/MaterialRenderer.{h,cpp}` - pure output-crop rotation, physical-pixel/DIP conversion, bounded search sampling, adaptive material tone, and one-rebuild lifecycle policies without Win32/GPU ownership.
 - `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.{cpp,ps1}` - direct production C++ policy checks and the isolated static WinLibs-linked runner.
+- `docs/superpowers/plans/2026-08-09-llp-013-live-material-renderer.md` - corrects the identity partial-crop example to clamp the bottom edge to `700`.
+- `docs/ai/{tasks,progress}.md` - closes Task 1 evidence and advances the next gate without changing LLP-013's sole project-level `in_progress` status.
 
 TDD and verification evidence:
 
 - RED ran under Windows PowerShell 5.1 with `C:\Users\thoma\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin` prepended to `PATH`: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\LightLaunchpad.NativeUi.Tests\MaterialRenderer.Tests.ps1`. It exited 1 with exact diagnostics `fatal error: MaterialRenderer.h: No such file or directory` and `fatal error: src\LightLaunchpad.NativeUi\MaterialRenderer.cpp: No such file or directory`; `lightlaunchpad-material-renderer-tests-*` roots remained 0 -> 0.
 - The plan's identity-crop example was corrected in `03df6b8` so the required partial crop clamps to the selected output bottom (`700`, not the out-of-bounds `840`). Pure implementation and tests were committed in `d54f106` (`test: lock LLP-013 material policies`).
-- Fresh GREEN runs reported `MaterialRenderer` 5/5 and `AdaptiveEnvironment` 3/3 under the same WinLibs-first Windows PowerShell 5.1 environment. Material and adaptive temporary roots both remained 0 -> 0; `git diff --cached --check` passed before the implementation commit.
-- Task 1 is pure, nonvisual policy work, so screenshot and runtime-performance evidence are not applicable at this checkpoint; real-renderer visual/performance gates remain assigned to later LLP-013 tasks.
+- Quality review first returned With fixes. New tests produced the required second RED, `FAIL Non-finite pixels did not return zero.` Commit `659b0a9` normalizes non-finite inputs, uses finite double intermediates, verifies every contrast candidate including a safe black/white fallback, proves a nonzero inward edge response, and adds negative-origin, partial-intersection, degenerate-crop, 96/144/192-DPI, dense-luminance, NaN, infinity, and overflow coverage.
+- Final fresh GREEN runs report `MaterialRenderer` 5/5 and `AdaptiveEnvironment` 3/3 under WinLibs-first Windows PowerShell 5.1. Independent specification and code-quality reruns report the same results; both temp-prefix sets remained 0 -> 0 with added=0 and missing=0. `git diff --cached --check` and post-commit checks passed.
+- Final measured contrast evidence is light text `14.9155:1`, light focus `4.6048:1`, dark text `15.1359:1`, and dark focus `11.9073:1`; center displacement is zero and the three-DPI edge response is nonzero, inward, in bounds, and no more than `1.5 DIP`.
+- Before Task 1 production work, the complete 16-suite NativeUi baseline passed under Windows PowerShell 5.1 with WinLibs first: `16/16`, `364.94 s`, six historical `lightlaunchpad-*` roots before and after, Spotlight P95 `16 ms`, SearchIndex 300-item P95 `92 us`, TextInput edit P95 `200 ns`, and TextInputBehavior value `中a文b末`, caret `5`, candidate `(188,118)`.
+- Task 1 is pure, nonvisual policy work, so screenshot and renderer frame-time evidence are not applicable at this checkpoint. The protected real EXE remains PID `29376` at the recorded artifacts path with SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run, stable-install absence, and `C:\TOOL` SHA remain unchanged.
+- Independent final reviews: specification PASS with no missing requirement or scope creep; code quality Ready: Yes with no Critical, Important, or Minor findings.
 
 Next step:
 
-- Complete Task 1 specification and code-quality review. Do not start Task 2 or mark LLP-013 complete until both reviews close.
+- Start Task 2 RED for immutable scene and icon-raster ownership. Keep LLP-013 as the only project task in progress and do not start Task 3 until Task 2 implementation, specification review, quality review, and evidence update close.
 
 ## LLP-013 Implementation Plan Checkpoint
 
