@@ -4,8 +4,15 @@
 #include <d3d11.h>
 #include <dcomp.h>
 #include <dwrite.h>
-#include <dxgi.h>
+#include <dxgi1_2.h>
 #include <objbase.h>
+
+#if __has_include("LightLaunchpad.BuildIdentity.generated.h")
+#include "LightLaunchpad.BuildIdentity.generated.h"
+#elif !defined(LLP_MATERIAL_TESTING)
+// The standalone production-C++ test links this same source without a generated build identity.
+#define LLP_MATERIAL_TESTING 1
+#endif
 
 #include <algorithm>
 #include <array>
@@ -16,6 +23,18 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+
+#ifndef LLP_BUILD_CHANNEL_WIDE
+#if defined(LLP_MATERIAL_TESTING)
+#define LLP_BUILD_CHANNEL_WIDE L"development"
+#else
+#define LLP_BUILD_CHANNEL_WIDE L"stable"
+#endif
+#endif
 
 // MinGW-w64 imports D2D1CreateDevice from libd2d1 but does not declare it.
 extern "C" HRESULT WINAPI D2D1CreateDevice(
@@ -184,7 +203,10 @@ struct DeviceResources
     ComOwner<IDCompositionDevice> compositionDevice;
 };
 
-FailureReason InitializeDevice(DeviceResources& resources, std::uint32_t* selectedFeatureLevel)
+FailureReason InitializeDevice(
+    DeviceResources& resources,
+    std::uint32_t* selectedFeatureLevel,
+    IDXGIAdapter* selectedAdapter = nullptr)
 {
     DeviceResources candidate;
     constexpr std::array<D3D_FEATURE_LEVEL, 6> requestedFeatureLevels = {
@@ -197,8 +219,8 @@ FailureReason InitializeDevice(DeviceResources& resources, std::uint32_t* select
     };
     D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_9_1;
     HRESULT result = D3D11CreateDevice(
-        nullptr,
-        D3D_DRIVER_TYPE_HARDWARE,
+        selectedAdapter,
+        selectedAdapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
         nullptr,
         D3D11_CREATE_DEVICE_BGRA_SUPPORT,
         requestedFeatureLevels.data(),
@@ -239,6 +261,438 @@ FailureReason InitializeDevice(DeviceResources& resources, std::uint32_t* select
     resources = std::move(candidate);
     return FailureReason::None;
 }
+
+bool IsDevelopmentBuild()
+{
+    return CompareStringOrdinal(
+        LLP_BUILD_CHANNEL_WIDE, -1, L"development", -1, TRUE) == CSTR_EQUAL;
+}
+
+bool FullyContains(PixelRect outer, PixelRect inner)
+{
+    return inner.right > inner.left && inner.bottom > inner.top
+        && inner.left >= outer.left && inner.top >= outer.top
+        && inner.right <= outer.right && inner.bottom <= outer.bottom;
+}
+
+enum class AcquireResult { Frame, Timeout, AccessLost, DeviceRemoved, Failed };
+
+class CaptureBackend
+{
+public:
+    virtual ~CaptureBackend() = default;
+    virtual FailureReason SetCaptureExclusion(HWND window) = 0;
+    virtual void ClearCaptureExclusion() = 0;
+    virtual FailureReason Start(const ShowRequest& request) = 0;
+    virtual AcquireResult Acquire(std::uint32_t waitMilliseconds, std::uint64_t& identity) = 0;
+    virtual void ReleaseFrame() = 0;
+    virtual void Stop() = 0;
+    virtual std::int64_t Counter() const = 0;
+    virtual std::int64_t Frequency() const = 0;
+};
+
+class DesktopDuplicationBackend final : public CaptureBackend
+{
+public:
+    ~DesktopDuplicationBackend() override
+    {
+        Stop();
+        ClearCaptureExclusion();
+    }
+
+    FailureReason SetCaptureExclusion(HWND window) override
+    {
+        ClearCaptureExclusion();
+        if (!window) return FailureReason::DisplayAffinityUnavailable;
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        using SetAffinityFn = BOOL(WINAPI*)(HWND, DWORD);
+        using GetAffinityFn = BOOL(WINAPI*)(HWND, DWORD*);
+        setAffinity_ = reinterpret_cast<SetAffinityFn>(
+            GetProcAddress(user32, "SetWindowDisplayAffinity"));
+        getAffinity_ = reinterpret_cast<GetAffinityFn>(
+            GetProcAddress(user32, "GetWindowDisplayAffinity"));
+        if (!setAffinity_ || !getAffinity_) return FailureReason::UnsupportedOs;
+        if (!setAffinity_(window, WDA_EXCLUDEFROMCAPTURE))
+        {
+            return FailureReason::DisplayAffinityUnavailable;
+        }
+        DWORD effective = WDA_NONE;
+        if (!getAffinity_(window, &effective) || effective != WDA_EXCLUDEFROMCAPTURE)
+        {
+            setAffinity_(window, WDA_NONE);
+            return FailureReason::UnsupportedOs;
+        }
+        affinityWindow_ = window;
+        return FailureReason::None;
+    }
+
+    void ClearCaptureExclusion() override
+    {
+        if (affinityWindow_ && setAffinity_) setAffinity_(affinityWindow_, WDA_NONE);
+        affinityWindow_ = nullptr;
+    }
+
+    FailureReason Start(const ShowRequest& request) override
+    {
+        Stop();
+        if (!request.monitor) return FailureReason::AdapterUnavailable;
+
+        ComOwner<IDXGIFactory1> factory;
+        if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), factory.PutVoid())))
+        {
+            return FailureReason::AdapterUnavailable;
+        }
+
+        ComOwner<IDXGIAdapter1> selectedAdapter;
+        ComOwner<IDXGIOutput> selectedOutput;
+        DXGI_OUTPUT_DESC selectedDescription = {};
+        for (UINT adapterIndex = 0;; ++adapterIndex)
+        {
+            ComOwner<IDXGIAdapter1> adapter;
+            const HRESULT adapterResult = factory.Get()->EnumAdapters1(adapterIndex, adapter.Put());
+            if (adapterResult == DXGI_ERROR_NOT_FOUND) break;
+            if (FAILED(adapterResult)) return FailureReason::AdapterUnavailable;
+            for (UINT outputIndex = 0;; ++outputIndex)
+            {
+                ComOwner<IDXGIOutput> output;
+                const HRESULT outputResult = adapter.Get()->EnumOutputs(outputIndex, output.Put());
+                if (outputResult == DXGI_ERROR_NOT_FOUND) break;
+                if (FAILED(outputResult)) return FailureReason::AdapterUnavailable;
+                DXGI_OUTPUT_DESC description = {};
+                if (SUCCEEDED(output.Get()->GetDesc(&description))
+                    && description.Monitor == request.monitor)
+                {
+                    selectedAdapter = std::move(adapter);
+                    selectedOutput = std::move(output);
+                    selectedDescription = description;
+                    break;
+                }
+            }
+            if (selectedOutput.Get()) break;
+        }
+        if (!selectedAdapter.Get() || !selectedOutput.Get())
+        {
+            return FailureReason::AdapterUnavailable;
+        }
+
+        const PixelRect outputDesktop = {
+            selectedDescription.DesktopCoordinates.left,
+            selectedDescription.DesktopCoordinates.top,
+            selectedDescription.DesktopCoordinates.right,
+            selectedDescription.DesktopCoordinates.bottom
+        };
+        if (!FullyContains(outputDesktop, request.windowDesktop))
+        {
+            return FailureReason::DuplicationUnavailable;
+        }
+
+        DeviceResources candidateResources;
+        std::uint32_t featureLevel = 0;
+        const FailureReason initialization = InitializeDevice(
+            candidateResources, &featureLevel, selectedAdapter.Get());
+        if (initialization != FailureReason::None) return initialization;
+
+        ComOwner<IDXGIOutput1> output1;
+        if (FAILED(selectedOutput.Get()->QueryInterface(
+                __uuidof(IDXGIOutput1), output1.PutVoid())))
+        {
+            return FailureReason::DuplicationUnavailable;
+        }
+        ComOwner<IDXGIOutputDuplication> duplication;
+        const HRESULT duplicateResult = output1.Get()->DuplicateOutput(
+            candidateResources.d3dDevice.Get(), duplication.Put());
+        if (FAILED(duplicateResult)) return FailureReason::DuplicationUnavailable;
+
+        factory_ = std::move(factory);
+        adapter_ = std::move(selectedAdapter);
+        output_ = std::move(selectedOutput);
+        output1_ = std::move(output1);
+        duplication_ = std::move(duplication);
+        resources_ = std::move(candidateResources);
+        return FailureReason::None;
+    }
+
+    AcquireResult Acquire(std::uint32_t waitMilliseconds, std::uint64_t& identity) override
+    {
+        if (!duplication_.Get()) return AcquireResult::Failed;
+        DXGI_OUTDUPL_FRAME_INFO frameInfo = {};
+        ComOwner<IDXGIResource> desktopResource;
+        const HRESULT result = duplication_.Get()->AcquireNextFrame(
+            waitMilliseconds, &frameInfo, desktopResource.Put());
+        if (result == DXGI_ERROR_WAIT_TIMEOUT) return AcquireResult::Timeout;
+        if (result == DXGI_ERROR_ACCESS_LOST) return AcquireResult::AccessLost;
+        if (result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET)
+        {
+            return AcquireResult::DeviceRemoved;
+        }
+        if (FAILED(result)) return AcquireResult::Failed;
+        frameAcquired_ = true;
+        identity = frameInfo.LastPresentTime.QuadPart != 0
+            ? static_cast<std::uint64_t>(frameInfo.LastPresentTime.QuadPart)
+            : static_cast<std::uint64_t>(Counter());
+        return AcquireResult::Frame;
+    }
+
+    void ReleaseFrame() override
+    {
+        if (frameAcquired_ && duplication_.Get()) duplication_.Get()->ReleaseFrame();
+        frameAcquired_ = false;
+    }
+
+    void Stop() override
+    {
+        ReleaseFrame();
+        duplication_.Reset();
+        output1_.Reset();
+        output_.Reset();
+        adapter_.Reset();
+        factory_.Reset();
+        resources_ = DeviceResources{};
+    }
+
+    std::int64_t Counter() const override
+    {
+        LARGE_INTEGER value = {};
+        QueryPerformanceCounter(&value);
+        return value.QuadPart;
+    }
+
+    std::int64_t Frequency() const override
+    {
+        LARGE_INTEGER value = {};
+        QueryPerformanceFrequency(&value);
+        return value.QuadPart;
+    }
+
+private:
+    using SetAffinityFn = BOOL(WINAPI*)(HWND, DWORD);
+    using GetAffinityFn = BOOL(WINAPI*)(HWND, DWORD*);
+    SetAffinityFn setAffinity_ = nullptr;
+    GetAffinityFn getAffinity_ = nullptr;
+    HWND affinityWindow_ = nullptr;
+    bool frameAcquired_ = false;
+    DeviceResources resources_;
+    ComOwner<IDXGIFactory1> factory_;
+    ComOwner<IDXGIAdapter1> adapter_;
+    ComOwner<IDXGIOutput> output_;
+    ComOwner<IDXGIOutput1> output1_;
+    ComOwner<IDXGIOutputDuplication> duplication_;
+};
+
+class CaptureLifecycle final
+{
+public:
+    void FailStart(CaptureBackend& backend, ShowRequest request, FailureReason failure)
+    {
+        CleanupVisible(backend);
+        request_ = std::move(request);
+        diagnostics_.state = LifecycleState::Starting;
+        diagnostics_.path = RenderPath::Fallback;
+        diagnostics_.failure = FailureReason::None;
+        diagnostics_.evidenceFrozen = false;
+        EnterFallback(backend, failure);
+    }
+
+    void Show(CaptureBackend& backend, ShowRequest request, bool requestedRebuild = false)
+    {
+        CleanupVisible(backend);
+        request_ = std::move(request);
+        rebuildUsed_ = false;
+        diagnostics_.state = requestedRebuild
+            ? LifecycleState::Rebuilding
+            : LifecycleState::Starting;
+        if (requestedRebuild) ++diagnostics_.deviceRebuilds;
+        diagnostics_.path = RenderPath::Fallback;
+        diagnostics_.failure = FailureReason::None;
+        diagnostics_.evidenceFrozen = false;
+        firstFrameStarted_ = backend.Counter();
+
+        if (IsDevelopmentBuild() && request_.forcedFailure != FailureReason::None
+            && request_.forcedFailure != FailureReason::AccessLost)
+        {
+            EnterFallback(backend, FailureReason::ForcedForTest);
+            return;
+        }
+        const FailureReason affinityFailure = backend.SetCaptureExclusion(request_.window);
+        if (affinityFailure != FailureReason::None)
+        {
+            EnterFallback(backend, affinityFailure);
+            return;
+        }
+        const FailureReason startFailure = backend.Start(request_);
+        if (startFailure != FailureReason::None)
+        {
+            EnterFallback(backend, startFailure);
+            return;
+        }
+        capturing_ = true;
+        firstFramePending_ = true;
+    }
+
+    void Step(CaptureBackend& backend)
+    {
+        if (!capturing_) return;
+        ReleaseHeldFrame(backend);
+        const std::int64_t now = backend.Counter();
+        const std::int64_t frequency = std::max<std::int64_t>(1, backend.Frequency());
+        std::uint32_t waitMilliseconds = 16;
+        if (firstFramePending_)
+        {
+            const auto elapsedMilliseconds = static_cast<std::uint64_t>(
+                std::max<std::int64_t>(0, now - firstFrameStarted_)) * 1000ull
+                / static_cast<std::uint64_t>(frequency);
+            if (elapsedMilliseconds >= 32)
+            {
+                diagnostics_.firstFrameMs = static_cast<double>(elapsedMilliseconds);
+                EnterFallback(backend, FailureReason::FirstFrameTimeout);
+                return;
+            }
+            waitMilliseconds = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(16, 32 - elapsedMilliseconds));
+        }
+
+        std::uint64_t identity = 0;
+        const bool forcedAccessLost = request_.forcedFailure == FailureReason::AccessLost
+            && IsDevelopmentBuild();
+        AcquireResult result = forcedAccessLost
+            ? AcquireResult::AccessLost
+            : backend.Acquire(waitMilliseconds, identity);
+        if (result == AcquireResult::Timeout)
+        {
+            if (firstFramePending_)
+            {
+                const std::int64_t finished = backend.Counter();
+                const double elapsed = static_cast<double>(
+                    std::max<std::int64_t>(0, finished - firstFrameStarted_))
+                    * 1000.0 / static_cast<double>(frequency);
+                if (elapsed >= 32.0)
+                {
+                    diagnostics_.firstFrameMs = elapsed;
+                    EnterFallback(backend, FailureReason::FirstFrameTimeout);
+                }
+            }
+            return;
+        }
+        if (result == AcquireResult::Frame)
+        {
+            frameHeld_ = true;
+            if (firstFramePending_)
+            {
+                const double elapsed = static_cast<double>(
+                    std::max<std::int64_t>(0, backend.Counter() - firstFrameStarted_))
+                    * 1000.0 / static_cast<double>(frequency);
+                if (elapsed > 32.0)
+                {
+                    diagnostics_.firstFrameMs = elapsed;
+                    EnterFallback(backend, FailureReason::FirstFrameTimeout);
+                    return;
+                }
+            }
+            ++diagnostics_.acquiredFrames;
+            diagnostics_.lastFrameIdentity = identity;
+            if (firstFramePending_)
+            {
+                diagnostics_.firstFrameMs = static_cast<double>(
+                    std::max<std::int64_t>(0, backend.Counter() - firstFrameStarted_))
+                    * 1000.0 / static_cast<double>(frequency);
+                firstFramePending_ = false;
+                diagnostics_.state = LifecycleState::Live;
+                diagnostics_.path = RenderPath::HighFidelity;
+                diagnostics_.failure = FailureReason::None;
+            }
+            return;
+        }
+
+        const FailureReason recoveryFailure = result == AcquireResult::AccessLost
+            ? FailureReason::AccessLost
+            : (result == AcquireResult::DeviceRemoved
+                ? FailureReason::DeviceRemoved
+                : FailureReason::DuplicationUnavailable);
+        const FailureReason publishedFailure = forcedAccessLost
+            ? FailureReason::ForcedForTest
+            : recoveryFailure;
+        ReleaseHeldFrame(backend);
+        if ((recoveryFailure == FailureReason::AccessLost
+                || recoveryFailure == FailureReason::DeviceRemoved)
+            && !rebuildUsed_)
+        {
+            rebuildUsed_ = true;
+            ++diagnostics_.deviceRebuilds;
+            diagnostics_.state = LifecycleState::Rebuilding;
+            backend.Stop();
+            const FailureReason rebuildFailure = backend.Start(request_);
+            if (rebuildFailure == FailureReason::None)
+            {
+                firstFramePending_ = true;
+                firstFrameStarted_ = backend.Counter();
+                return;
+            }
+            EnterFallback(backend, rebuildFailure);
+            return;
+        }
+        EnterFallback(backend, publishedFailure);
+    }
+
+    void Hide(CaptureBackend& backend)
+    {
+        diagnostics_.state = LifecycleState::Stopping;
+        CleanupVisible(backend);
+        diagnostics_.state = LifecycleState::Hidden;
+        diagnostics_.path = RenderPath::Fallback;
+        diagnostics_.failure = FailureReason::None;
+        diagnostics_.evidenceFrozen = false;
+    }
+
+    void Freeze(CaptureBackend& backend)
+    {
+        if (diagnostics_.state == LifecycleState::Hidden
+            || diagnostics_.state == LifecycleState::Stopping) return;
+        CleanupVisible(backend);
+        diagnostics_.state = LifecycleState::FrozenEvidence;
+        diagnostics_.evidenceFrozen = true;
+    }
+
+    void Shutdown(CaptureBackend& backend)
+    {
+        CleanupVisible(backend);
+    }
+
+    bool IsCapturing() const { return capturing_; }
+    const Diagnostics& CurrentDiagnostics() const { return diagnostics_; }
+
+private:
+    void ReleaseHeldFrame(CaptureBackend& backend)
+    {
+        if (!frameHeld_) return;
+        backend.ReleaseFrame();
+        frameHeld_ = false;
+    }
+
+    void CleanupVisible(CaptureBackend& backend)
+    {
+        ReleaseHeldFrame(backend);
+        backend.Stop();
+        backend.ClearCaptureExclusion();
+        capturing_ = false;
+        firstFramePending_ = false;
+    }
+
+    void EnterFallback(CaptureBackend& backend, FailureReason failure)
+    {
+        CleanupVisible(backend);
+        diagnostics_.state = LifecycleState::Fallback;
+        diagnostics_.path = RenderPath::Fallback;
+        diagnostics_.failure = failure;
+    }
+
+    ShowRequest request_;
+    Diagnostics diagnostics_;
+    bool capturing_ = false;
+    bool firstFramePending_ = false;
+    bool frameHeld_ = false;
+    bool rebuildUsed_ = false;
+    std::int64_t firstFrameStarted_ = 0;
+};
 
 }
 
@@ -332,18 +786,40 @@ public:
     }
 
 private:
+    void PublishDiagnostics(const CaptureLifecycle& lifecycle)
+    {
+        const std::uint64_t droppedScenes = diagnostics_.droppedScenes;
+        Diagnostics updated = lifecycle.CurrentDiagnostics();
+        updated.droppedScenes = droppedScenes;
+        const bool notifyHost = updated.path != diagnostics_.path
+            || updated.failure != diagnostics_.failure
+            || updated.state != diagnostics_.state
+            || updated.deviceRebuilds != diagnostics_.deviceRebuilds
+            || updated.evidenceFrozen != diagnostics_.evidenceFrozen;
+        diagnostics_ = updated;
+        if (notifyHost && request_.window && request_.statusMessage)
+        {
+            PostMessageW(request_.window, request_.statusMessage, 0, 0);
+        }
+    }
+
     void Run()
     {
         const HRESULT apartmentResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         const bool apartmentReady = SUCCEEDED(apartmentResult);
+        DesktopDuplicationBackend backend;
+        CaptureLifecycle lifecycle;
 
         std::unique_lock<std::mutex> lock(mutex_);
         for (;;)
         {
-            workCondition_.wait(lock, [this]() {
-                return shutdown_ || showRequested_ || hideRequested_ || rebuildRequested_
-                    || freezeRequested_ || pendingScene_;
-            });
+            if (!lifecycle.IsCapturing())
+            {
+                workCondition_.wait(lock, [this]() {
+                    return shutdown_ || showRequested_ || hideRequested_ || rebuildRequested_
+                        || freezeRequested_ || pendingScene_;
+                });
+            }
             if (shutdown_) break;
 
             if (pendingScene_)
@@ -355,12 +831,9 @@ private:
             {
                 diagnostics_.state = LifecycleState::Stopping;
                 lock.unlock();
-                deviceResources_.reset();
+                lifecycle.Hide(backend);
                 lock.lock();
-                diagnostics_.state = LifecycleState::Hidden;
-                diagnostics_.path = RenderPath::Fallback;
-                diagnostics_.failure = FailureReason::None;
-                diagnostics_.evidenceFrozen = false;
+                PublishDiagnostics(lifecycle);
                 hideRequested_ = false;
                 hiddenCondition_.notify_all();
                 continue;
@@ -373,42 +846,42 @@ private:
                 showRequested_ = false;
                 rebuildRequested_ = false;
                 diagnostics_.state = rebuild ? LifecycleState::Rebuilding : LifecycleState::Starting;
-                if (rebuild) ++diagnostics_.deviceRebuilds;
-
+                ShowRequest request = request_;
                 lock.unlock();
-                deviceResources_.reset();
-                auto candidate = std::make_unique<DeviceResources>();
-                std::uint32_t featureLevel = 0;
-                const FailureReason initializationFailure = apartmentReady
-                    ? InitializeDevice(*candidate, &featureLevel)
-                    : FailureReason::CompositionUnavailable;
-                if (initializationFailure != FailureReason::None) candidate.reset();
+                if (apartmentReady)
+                {
+                    lifecycle.Show(backend, request, rebuild);
+                }
+                else
+                {
+                    lifecycle.FailStart(
+                        backend, request, FailureReason::CompositionUnavailable);
+                }
                 lock.lock();
-
-                deviceResources_ = std::move(candidate);
-                diagnostics_.failure = initializationFailure;
-                diagnostics_.path = initializationFailure == FailureReason::None
-                    ? RenderPath::HighFidelity
-                    : RenderPath::Fallback;
-                diagnostics_.state = initializationFailure == FailureReason::None
-                    ? (rebuild ? LifecycleState::Rebuilding : LifecycleState::Starting)
-                    : LifecycleState::Fallback;
+                PublishDiagnostics(lifecycle);
             }
 
             if (freezeRequested_)
             {
                 freezeRequested_ = false;
-                if (diagnostics_.state != LifecycleState::Hidden
-                    && diagnostics_.state != LifecycleState::Stopping)
-                {
-                    diagnostics_.evidenceFrozen = true;
-                    diagnostics_.state = LifecycleState::FrozenEvidence;
-                }
+                lock.unlock();
+                lifecycle.Freeze(backend);
+                lock.lock();
+                PublishDiagnostics(lifecycle);
+                continue;
+            }
+
+            if (lifecycle.IsCapturing())
+            {
+                lock.unlock();
+                lifecycle.Step(backend);
+                lock.lock();
+                PublishDiagnostics(lifecycle);
             }
         }
 
         lock.unlock();
-        deviceResources_.reset();
+        lifecycle.Shutdown(backend);
         if (apartmentReady) CoUninitialize();
     }
 
@@ -425,7 +898,6 @@ private:
     std::shared_ptr<const SceneSnapshot> pendingScene_;
     std::shared_ptr<const SceneSnapshot> currentScene_;
     Diagnostics diagnostics_;
-    std::unique_ptr<DeviceResources> deviceResources_;
 };
 
 bool PixelRect::operator==(const PixelRect& other) const
@@ -749,4 +1221,260 @@ std::shared_ptr<const IconRaster> RasterizeIcon(HICON icon, int sizePx)
     }
     return raster;
 }
+
+#if defined(LLP_MATERIAL_TESTING)
+struct MaterialLifecycleTestReport
+{
+    int selectedAdapter = -1;
+    int selectedOutput = -1;
+    int duplicateCalls = 0;
+    int acquireCalls = 0;
+    unsigned int maximumWaitMilliseconds = 0;
+    int releaseCalls = 0;
+    int redraws = 0;
+    int rebuilds = 0;
+    std::uint64_t acquiredFrames = 0;
+    std::uint64_t lastFrameIdentity = 0;
+    int finalState = 0;
+    int finalPath = 0;
+    int finalFailure = 0;
+    long long firstFrameMicroseconds = 0;
+    int releaseBeforeReacquire = 0;
+    int releaseBeforeRebuild = 0;
+    int releaseBeforeHide = 0;
+    int releaseBeforeFreeze = 0;
+    int hiddenTimedWaits = 0;
+    int hiddenAcquireCalls = 0;
+    int affinityExcluded = 0;
+    int affinityCleared = 0;
+    int partialCropRejected = 0;
+};
+
+namespace
+{
+class FakeCaptureBackend final : public CaptureBackend
+{
+public:
+    explicit FakeCaptureBackend(int scenario) : scenario_(scenario) {}
+
+    FailureReason SetCaptureExclusion(HWND) override
+    {
+        ++affinityExcluded;
+        return FailureReason::None;
+    }
+
+    void ClearCaptureExclusion() override
+    {
+        ++affinityCleared;
+    }
+
+    FailureReason Start(const ShowRequest& request) override
+    {
+        ++startCalls;
+        const std::array<std::array<HMONITOR, 2>, 2> outputs = { {
+            { reinterpret_cast<HMONITOR>(static_cast<UINT_PTR>(0x101)),
+                reinterpret_cast<HMONITOR>(static_cast<UINT_PTR>(0x102)) },
+            { reinterpret_cast<HMONITOR>(static_cast<UINT_PTR>(0x201)), nullptr }
+        } };
+        for (int adapterIndex = 0; adapterIndex < static_cast<int>(outputs.size()); ++adapterIndex)
+        {
+            for (int outputIndex = 0; outputIndex < static_cast<int>(outputs[adapterIndex].size()); ++outputIndex)
+            {
+                if (outputs[adapterIndex][outputIndex] == request.monitor)
+                {
+                    selectedAdapter = adapterIndex;
+                    selectedOutput = outputIndex;
+                }
+            }
+        }
+        if (selectedAdapter < 0) return FailureReason::AdapterUnavailable;
+        ++duplicateCalls;
+        return FailureReason::None;
+    }
+
+    AcquireResult Acquire(std::uint32_t waitMilliseconds, std::uint64_t& identity) override
+    {
+        ++acquireCalls;
+        maximumWaitMilliseconds = std::max(maximumWaitMilliseconds, waitMilliseconds);
+        if (acquireCalls > 1 && !frameOutstanding && releaseCalls > 0)
+        {
+            releaseBeforeReacquire = true;
+        }
+        if (scenario_ == 1)
+        {
+            nowMilliseconds += waitMilliseconds;
+            return AcquireResult::Timeout;
+        }
+        if (scenario_ == 2)
+        {
+            if (startCalls == 1 && acquireCalls == 1)
+            {
+                frameOutstanding = true;
+                identity = 11;
+                ++redraws;
+                return AcquireResult::Frame;
+            }
+            if (startCalls == 1) return AcquireResult::AccessLost;
+            frameOutstanding = true;
+            identity = 22;
+            ++redraws;
+            return AcquireResult::Frame;
+        }
+        if (scenario_ == 3)
+        {
+            if (startCalls == 1 && acquireCalls == 1)
+            {
+                frameOutstanding = true;
+                identity = 11;
+                ++redraws;
+                return AcquireResult::Frame;
+            }
+            return AcquireResult::AccessLost;
+        }
+        if (scenario_ == 7)
+        {
+            frameOutstanding = true;
+            identity = 77;
+            ++redraws;
+            return AcquireResult::Frame;
+        }
+        if (scenario_ == 8)
+        {
+            nowMilliseconds += 33;
+            frameOutstanding = true;
+            identity = 88;
+            ++redraws;
+            return AcquireResult::Frame;
+        }
+        frameOutstanding = true;
+        identity = 1;
+        ++redraws;
+        return AcquireResult::Frame;
+    }
+
+    void ReleaseFrame() override
+    {
+        if (!frameOutstanding) return;
+        ++releaseCalls;
+        if (scenario_ == 2 && startCalls == 2) releaseBeforeHide = true;
+        if (scenario_ == 7) releaseBeforeFreeze = true;
+        frameOutstanding = false;
+    }
+
+    void Stop() override
+    {
+        if ((scenario_ == 2 || scenario_ == 3) && startCalls == 1 && !frameOutstanding)
+        {
+            releaseBeforeRebuild = true;
+        }
+        ReleaseFrame();
+    }
+
+    std::int64_t Counter() const override { return nowMilliseconds; }
+    std::int64_t Frequency() const override { return 1000; }
+
+    int selectedAdapter = -1;
+    int selectedOutput = -1;
+    int startCalls = 0;
+    int duplicateCalls = 0;
+    int acquireCalls = 0;
+    unsigned int maximumWaitMilliseconds = 0;
+    int releaseCalls = 0;
+    int redraws = 0;
+    int affinityExcluded = 0;
+    int affinityCleared = 0;
+    bool releaseBeforeReacquire = false;
+    bool releaseBeforeRebuild = false;
+    bool releaseBeforeHide = false;
+    bool releaseBeforeFreeze = false;
+
+private:
+    int scenario_ = 0;
+    std::int64_t nowMilliseconds = 0;
+    bool frameOutstanding = false;
+};
+}
+
+extern "C" int LLP_MaterialRunFakeLifecycleScenario(
+    int scenario,
+    MaterialLifecycleTestReport* report)
+{
+    if (!report || scenario < 0 || scenario > 8) return 2;
+    FakeCaptureBackend backend(scenario);
+    CaptureLifecycle lifecycle;
+    ShowRequest request;
+    request.window = reinterpret_cast<HWND>(static_cast<UINT_PTR>(0x401));
+    request.monitor = reinterpret_cast<HMONITOR>(static_cast<UINT_PTR>(0x201));
+    request.windowDesktop = { -1800, 20, -1400, 420 };
+    if (scenario == 4) request.forcedFailure = FailureReason::CompositionUnavailable;
+    if (scenario == 5) request.forcedFailure = FailureReason::DuplicationUnavailable;
+    if (scenario == 6) request.forcedFailure = FailureReason::AccessLost;
+    lifecycle.Show(backend, request);
+
+    if (scenario == 0)
+    {
+        lifecycle.Step(backend);
+        lifecycle.Hide(backend);
+    }
+    else if (scenario == 1)
+    {
+        lifecycle.Step(backend);
+        lifecycle.Step(backend);
+    }
+    else if (scenario == 2)
+    {
+        lifecycle.Step(backend);
+        lifecycle.Step(backend);
+        lifecycle.Step(backend);
+        lifecycle.Hide(backend);
+    }
+    else if (scenario == 3)
+    {
+        lifecycle.Step(backend);
+        lifecycle.Step(backend);
+        lifecycle.Step(backend);
+    }
+    else if (scenario == 6)
+    {
+        lifecycle.Step(backend);
+        lifecycle.Step(backend);
+    }
+    else if (scenario == 7)
+    {
+        lifecycle.Step(backend);
+        lifecycle.Freeze(backend);
+    }
+    else if (scenario == 8)
+    {
+        lifecycle.Step(backend);
+    }
+
+    const Diagnostics diagnostics = lifecycle.CurrentDiagnostics();
+    report->selectedAdapter = backend.selectedAdapter;
+    report->selectedOutput = backend.selectedOutput;
+    report->duplicateCalls = backend.duplicateCalls;
+    report->acquireCalls = backend.acquireCalls;
+    report->maximumWaitMilliseconds = backend.maximumWaitMilliseconds;
+    report->releaseCalls = backend.releaseCalls;
+    report->redraws = backend.redraws;
+    report->rebuilds = static_cast<int>(diagnostics.deviceRebuilds);
+    report->acquiredFrames = diagnostics.acquiredFrames;
+    report->lastFrameIdentity = diagnostics.lastFrameIdentity;
+    report->finalState = static_cast<int>(diagnostics.state);
+    report->finalPath = static_cast<int>(diagnostics.path);
+    report->finalFailure = static_cast<int>(diagnostics.failure);
+    report->firstFrameMicroseconds = static_cast<long long>(diagnostics.firstFrameMs * 1000.0);
+    report->releaseBeforeReacquire = backend.releaseBeforeReacquire ? 1 : 0;
+    report->releaseBeforeRebuild = backend.releaseBeforeRebuild ? 1 : 0;
+    report->releaseBeforeHide = backend.releaseBeforeHide ? 1 : 0;
+    report->releaseBeforeFreeze = backend.releaseBeforeFreeze ? 1 : 0;
+    report->hiddenTimedWaits = 0;
+    report->hiddenAcquireCalls = 0;
+    report->affinityExcluded = backend.affinityExcluded;
+    report->affinityCleared = backend.affinityCleared;
+    report->partialCropRejected = FullyContains(
+        { -1920, -100, 0, 980 }, { -2000, 20, -1400, 420 }) ? 0 : 1;
+    return 0;
+}
+#endif
 }

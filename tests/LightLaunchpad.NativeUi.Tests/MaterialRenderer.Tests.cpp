@@ -16,6 +16,37 @@
 #include <thread>
 #include <vector>
 
+struct MaterialLifecycleTestReport
+{
+    int selectedAdapter = -1;
+    int selectedOutput = -1;
+    int duplicateCalls = 0;
+    int acquireCalls = 0;
+    unsigned int maximumWaitMilliseconds = 0;
+    int releaseCalls = 0;
+    int redraws = 0;
+    int rebuilds = 0;
+    std::uint64_t acquiredFrames = 0;
+    std::uint64_t lastFrameIdentity = 0;
+    int finalState = 0;
+    int finalPath = 0;
+    int finalFailure = 0;
+    long long firstFrameMicroseconds = 0;
+    int releaseBeforeReacquire = 0;
+    int releaseBeforeRebuild = 0;
+    int releaseBeforeHide = 0;
+    int releaseBeforeFreeze = 0;
+    int hiddenTimedWaits = 0;
+    int hiddenAcquireCalls = 0;
+    int affinityExcluded = 0;
+    int affinityCleared = 0;
+    int partialCropRejected = 0;
+};
+
+extern "C" int LLP_MaterialRunFakeLifecycleScenario(
+    int scenario,
+    MaterialLifecycleTestReport* report);
+
 namespace
 {
 using llp::material::AdvanceLifecycle;
@@ -495,7 +526,18 @@ void TestRendererThreadBootstrapsGpuDependenciesAndReturnsHidden()
     Require(initial.failure == llp::material::FailureReason::None,
         "Hidden renderer began with a failure reason.");
 
-    renderer.Show({});
+    HWND probeWindow = CreateWindowExW(
+        WS_EX_TOOLWINDOW, L"STATIC", L"LightLaunchpad material dependency probe",
+        WS_POPUP, 40, 40, 320, 180, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    Require(probeWindow != nullptr, "Could not create the renderer dependency probe window.");
+    RECT probeRect = {};
+    Require(GetWindowRect(probeWindow, &probeRect) != FALSE,
+        "Could not read the renderer dependency probe window rectangle.");
+    llp::material::ShowRequest showRequest;
+    showRequest.window = probeWindow;
+    showRequest.monitor = MonitorFromWindow(probeWindow, MONITOR_DEFAULTTONEAREST);
+    showRequest.windowDesktop = { probeRect.left, probeRect.top, probeRect.right, probeRect.bottom };
+    renderer.Show(showRequest);
     const auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     llp::material::Diagnostics started;
     do
@@ -509,17 +551,18 @@ void TestRendererThreadBootstrapsGpuDependenciesAndReturnsHidden()
         }
         std::this_thread::yield();
     } while (std::chrono::steady_clock::now() < startDeadline);
-    Require(started.state == llp::material::LifecycleState::Starting,
-        "Renderer thread did not consume the asynchronous show request.");
-    Require(started.path == llp::material::RenderPath::HighFidelity
-            && started.failure == llp::material::FailureReason::None,
-        "Renderer GPU bootstrap did not select the high-fidelity path.");
+    Require((started.path == llp::material::RenderPath::HighFidelity
+                && started.failure == llp::material::FailureReason::None)
+            || (started.state == llp::material::LifecycleState::Fallback
+                && started.failure != llp::material::FailureReason::None),
+        "Renderer did not publish either a live-capable path or a stable machine-specific fallback.");
 
     renderer.Hide();
     Require(renderer.WaitUntilHiddenForTest(2000),
         "Renderer thread did not acknowledge hide without a periodic wake loop.");
     Require(renderer.SnapshotDiagnostics().state == llp::material::LifecycleState::Hidden,
         "Renderer diagnostics did not return to Hidden after hide acknowledgement.");
+    DestroyWindow(probeWindow);
     std::cout << "INFO MaterialRenderer featureLevel=0x" << std::hex << featureLevel << std::dec << "\n";
     Pass("MaterialRenderer_RenderThreadBootstrapsDependenciesAndReturnsHidden");
 }
@@ -557,6 +600,165 @@ void TestRendererImmediateShowHideStress()
               << " elapsedMs=" << elapsedMs << "\n";
     Pass("MaterialRenderer_ImmediateShowHideStressIsStable");
 }
+
+MaterialLifecycleTestReport RunFakeLifecycle(int scenario)
+{
+    MaterialLifecycleTestReport report;
+    Require(LLP_MaterialRunFakeLifecycleScenario(scenario, &report) == 0,
+        "The private fake capture backend rejected a lifecycle scenario.");
+    return report;
+}
+
+void TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport()
+{
+    const llp::material::PixelRect output = { -1920, -100, 0, 980 };
+    const llp::material::PixelRect window = { -1800, 20, -1400, 420 };
+    Require(MapWindowCrop(output, window, llp::material::OutputRotation::Identity)
+            == llp::material::PixelRect{ 120, 120, 520, 520 },
+        "Negative-origin identity crop changed desktop alignment.");
+    Require(MapWindowCrop(output, window, llp::material::OutputRotation::Rotate90)
+            == llp::material::PixelRect{ 120, 1400, 520, 1800 },
+        "90-degree output rotation changed desktop alignment.");
+    Require(MapWindowCrop(output, window, llp::material::OutputRotation::Rotate180)
+            == llp::material::PixelRect{ 1400, 560, 1800, 960 },
+        "180-degree output rotation changed desktop alignment.");
+    Require(MapWindowCrop(output, window, llp::material::OutputRotation::Rotate270)
+            == llp::material::PixelRect{ 560, 120, 960, 520 },
+        "270-degree output rotation changed desktop alignment.");
+
+    const auto report = RunFakeLifecycle(0);
+    Require(report.selectedAdapter == 1 && report.selectedOutput == 0,
+        "Output enumeration did not bind the exact target HMONITOR on its adapter.");
+    Require(report.duplicateCalls == 1,
+        "DuplicateOutput was not called exactly once for the visible activation.");
+    Require(report.partialCropRejected == 1,
+        "Capture accepted a partially clamped window instead of requiring full containment.");
+    std::cout << "METRIC MaterialCaptureOutput adapter=" << report.selectedAdapter
+              << " output=" << report.selectedOutput
+              << " duplicateCalls=" << report.duplicateCalls
+              << " partialRejected=" << report.partialCropRejected << "\n";
+    Pass("MaterialRenderer_OutputSelectionRotationsAndContainmentAreExact");
+}
+
+void TestFirstFrameDeadlineAndTimeoutDoNotRedraw()
+{
+    const auto report = RunFakeLifecycle(1);
+    Require(report.acquireCalls == 2 && report.maximumWaitMilliseconds <= 16,
+        "First-frame acquisition did not use two bounded waits within the 32 ms budget.");
+    Require(report.firstFrameMicroseconds >= 32000 && report.firstFrameMicroseconds < 33000,
+        "First-frame timeout did not use the QPC 32 ms deadline.");
+    Require(report.redraws == 0 && report.acquiredFrames == 0,
+        "A wait timeout incorrectly caused a redraw or acquired-frame advance.");
+    Require(report.finalPath == static_cast<int>(llp::material::RenderPath::Fallback)
+            && report.finalFailure == static_cast<int>(llp::material::FailureReason::FirstFrameTimeout),
+        "First-frame timeout did not publish the stable fallback decision.");
+    Require(report.affinityExcluded == 1 && report.affinityCleared >= 1,
+        "Fallback did not clear the capture-exclusion affinity.");
+    std::cout << "METRIC MaterialFirstFrame acquireCalls=" << report.acquireCalls
+              << " maxWaitMs=" << report.maximumWaitMilliseconds
+              << " firstFrameUs=" << report.firstFrameMicroseconds
+              << " timeoutRedraws=" << report.redraws
+              << " affinitySet=" << report.affinityExcluded
+              << " affinityClears=" << report.affinityCleared << "\n";
+    Pass("MaterialRenderer_FirstFrameDeadlineIsBoundedAndTimeoutIsIdle");
+}
+
+void TestFramesReleaseBeforeReacquireRebuildAndHide()
+{
+    const auto report = RunFakeLifecycle(2);
+    Require(report.acquiredFrames == 2 && report.lastFrameIdentity == 22,
+        "Latest desktop frame counters did not survive one access-loss rebuild.");
+    Require(report.rebuilds == 1 && report.duplicateCalls == 2,
+        "Access loss did not perform exactly one bounded duplication rebuild.");
+    Require(report.releaseBeforeReacquire == 1
+            && report.releaseBeforeRebuild == 1
+            && report.releaseBeforeHide == 1,
+        "An acquired Desktop Duplication frame was retained across a lifecycle boundary.");
+    Require(report.maximumWaitMilliseconds <= 16,
+        "Visible frame acquisition exceeded the 16 ms wait cap.");
+    Require(report.hiddenTimedWaits == 0 && report.hiddenAcquireCalls == 0,
+        "Hidden renderer retained a timed wait or capture loop.");
+    Require(report.affinityCleared >= 1,
+        "Hide did not clear the window display affinity.");
+    std::cout << "METRIC MaterialRecovery acquired=" << report.acquiredFrames
+              << " lastIdentity=" << report.lastFrameIdentity
+              << " rebuilds=" << report.rebuilds
+              << " duplicateCalls=" << report.duplicateCalls
+              << " releases=" << report.releaseCalls
+              << " hiddenWaits=" << report.hiddenTimedWaits << "\n";
+    Pass("MaterialRenderer_ReleasesFramesAndStopsAllHiddenPolling");
+}
+
+void TestSecondAccessLossFallsBackWithoutRecurringRetry()
+{
+    const auto report = RunFakeLifecycle(3);
+    Require(report.rebuilds == 1 && report.duplicateCalls == 2,
+        "Repeated access loss exceeded the one-rebuild budget.");
+    Require(report.finalState == static_cast<int>(llp::material::LifecycleState::Fallback)
+            && report.finalPath == static_cast<int>(llp::material::RenderPath::Fallback)
+            && report.finalFailure == static_cast<int>(llp::material::FailureReason::AccessLost),
+        "Second access loss did not remain in stable fallback.");
+    Require(report.hiddenTimedWaits == 0,
+        "Fallback introduced a recurring recovery timer.");
+    Pass("MaterialRenderer_AccessLossConsumesExactlyOneRebuild");
+}
+
+void TestDevelopmentForcedFailuresMapToStableReason()
+{
+    for (const int scenario : { 4, 5, 6 })
+    {
+        const auto report = RunFakeLifecycle(scenario);
+        Require(report.finalPath == static_cast<int>(llp::material::RenderPath::Fallback)
+                && report.finalFailure == static_cast<int>(llp::material::FailureReason::ForcedForTest),
+            "A development forced failure did not map to ForcedForTest fallback.");
+    }
+    Require(RunFakeLifecycle(4).rebuilds == 0,
+        "Forced initialization failure consumed a device rebuild.");
+    Require(RunFakeLifecycle(5).rebuilds == 0,
+        "Forced duplication failure consumed a device rebuild.");
+    Require(RunFakeLifecycle(6).rebuilds == 1,
+        "Forced access loss did not exercise exactly one rebuild before fallback.");
+    Pass("MaterialRenderer_DevelopmentForcedFailuresUseStableMapping");
+}
+
+void TestFreezeReleasesCaptureAndClearsAffinity()
+{
+    const auto report = RunFakeLifecycle(7);
+    Require(report.finalState == static_cast<int>(llp::material::LifecycleState::FrozenEvidence),
+        "Freeze did not enter the terminal evidence state.");
+    Require(report.releaseBeforeFreeze == 1,
+        "Freeze retained an acquired Desktop Duplication frame.");
+    Require(report.affinityCleared >= 1,
+        "Freeze retained WDA_EXCLUDEFROMCAPTURE.");
+    Pass("MaterialRenderer_FreezeReleasesFrameAndCaptureAffinity");
+}
+
+void TestLateFirstFrameIsReleasedAndFallsBack()
+{
+    const auto report = RunFakeLifecycle(8);
+    Require(report.firstFrameMicroseconds == 33000
+            && report.finalFailure == static_cast<int>(llp::material::FailureReason::FirstFrameTimeout),
+        "A first frame arriving after the 32 ms QPC deadline was accepted.");
+    Require(report.acquiredFrames == 0 && report.releaseCalls == 1,
+        "Late first frame was counted as usable or retained during fallback.");
+    Pass("MaterialRenderer_LateFirstFrameIsReleasedBeforeFallback");
+}
+
+void TestHideRequestRemainsAsynchronous()
+{
+    llp::material::MaterialRenderer renderer;
+    renderer.Show({});
+    const auto started = std::chrono::steady_clock::now();
+    renderer.Hide();
+    const auto callerMicroseconds = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    Require(callerMicroseconds < 5000,
+        "Hide blocked the caller instead of signaling renderer cleanup.");
+    Require(renderer.WaitUntilHiddenForTest(2000),
+        "Renderer thread did not signal its hidden condition after asynchronous cleanup.");
+    std::cout << "METRIC MaterialRenderer hideCallerUs=" << callerMicroseconds << "\n";
+    Pass("MaterialRenderer_HideSignalsImmediatelyAndCleansOnRendererThread");
+}
 }
 
 int main()
@@ -574,8 +776,17 @@ int main()
         TestRendererThreadBootstrapsGpuDependenciesAndReturnsHidden();
         TestRendererConstructionAndImmediateDestructionStress();
         TestRendererImmediateShowHideStress();
-        std::cout << passed << "/11 tests passed\n";
-        return passed == 11 ? 0 : 1;
+        TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport();
+        TestFirstFrameDeadlineAndTimeoutDoNotRedraw();
+        TestFramesReleaseBeforeReacquireRebuildAndHide();
+        TestSecondAccessLossFallsBackWithoutRecurringRetry();
+        TestDevelopmentForcedFailuresMapToStableReason();
+        TestFreezeReleasesCaptureAndClearsAffinity();
+        TestLateFirstFrameIsReleasedAndFallsBack();
+        TestHideRequestRemainsAsynchronous();
+        constexpr int expected = 19;
+        std::cout << passed << "/" << expected << " tests passed\n";
+        return passed == expected ? 0 : 1;
     }
     catch (const std::exception& exception)
     {

@@ -18,6 +18,7 @@
 #include "AdaptiveEnvironment.h"
 #include "Catalog.h"
 #include "InteractionState.h"
+#include "MaterialRenderer.h"
 #include "OrganizationState.h"
 #include "Persistence.h"
 #include "SceneGeometry.h"
@@ -102,6 +103,9 @@ constexpr UINT WmTray = WM_APP + 72;
 constexpr UINT WmActivateInstance = WM_APP + 73;
 constexpr UINT WmShellBrokerResult = WM_APP + 74;
 constexpr UINT WmAdaptiveSnapshot = WM_APP + 75;
+constexpr UINT WmMaterialProbeStatus = WM_APP + 76;
+constexpr UINT WmMaterialProbeControl = WM_APP + 77;
+constexpr wchar_t MaterialProbeProperty[] = L"LightLaunchpad.MaterialProbe";
 constexpr wchar_t WindowClassName[] = LLP_WINDOW_CLASS_NAME_WIDE;
 constexpr wchar_t SettingsWindowClassName[] = L"LightLaunchpadNativeSettingsWindow";
 constexpr wchar_t TextInputWindowClassName[] = L"LightLaunchpadNativeTextInputWindow";
@@ -552,6 +556,12 @@ struct RegionUndoProbeState
     bool exactOrderRestored = false;
 };
 
+struct MaterialProbeHostState
+{
+    llp::material::MaterialRenderer* renderer = nullptr;
+    std::wstring outputPath;
+};
+
 CatalogBrokerProbeState g_catalogBrokerProbe;
 ShellImportProbeState g_shellImportProbe;
 SpotlightFlowProbeState g_spotlightFlowProbe;
@@ -590,6 +600,8 @@ void RequestOrganizationUndo();
 bool ProbeFileExists(const std::wstring& path);
 void RefreshAdaptiveEnvironment();
 void ResetScaleSensitiveResources();
+bool WriteMaterialProbeState(HWND hwnd);
+bool WriteMaterialProbeState(MaterialProbeHostState& state);
 
 template <typename T>
 void SafeRelease(T*& value)
@@ -2588,6 +2600,79 @@ std::string BuildDiagnosticsJson()
     json += "  \"hotkeyStatus\": \"" + EscapeJson(HotkeyDiagnostics()) + "\"\r\n";
     json += "}\r\n";
     return json;
+}
+
+const char* MaterialRenderPathName(llp::material::RenderPath path)
+{
+    switch (path)
+    {
+    case llp::material::RenderPath::HighFidelity: return "high-fidelity";
+    case llp::material::RenderPath::Solid: return "solid";
+    case llp::material::RenderPath::Fallback:
+    default: return "fallback";
+    }
+}
+
+const char* MaterialFailureName(llp::material::FailureReason failure)
+{
+    switch (failure)
+    {
+    case llp::material::FailureReason::None: return "None";
+    case llp::material::FailureReason::UnsupportedOs: return "UnsupportedOs";
+    case llp::material::FailureReason::DisplayAffinityUnavailable: return "DisplayAffinityUnavailable";
+    case llp::material::FailureReason::AdapterUnavailable: return "AdapterUnavailable";
+    case llp::material::FailureReason::DuplicationUnavailable: return "DuplicationUnavailable";
+    case llp::material::FailureReason::FirstFrameTimeout: return "FirstFrameTimeout";
+    case llp::material::FailureReason::CompositionUnavailable: return "CompositionUnavailable";
+    case llp::material::FailureReason::DeviceRemoved: return "DeviceRemoved";
+    case llp::material::FailureReason::AccessLost: return "AccessLost";
+    case llp::material::FailureReason::ForcedForTest: return "ForcedForTest";
+    default: return "Unknown";
+    }
+}
+
+const char* MaterialStateName(llp::material::LifecycleState state)
+{
+    switch (state)
+    {
+    case llp::material::LifecycleState::Hidden: return "hidden";
+    case llp::material::LifecycleState::Starting: return "starting";
+    case llp::material::LifecycleState::Live: return "live";
+    case llp::material::LifecycleState::Rebuilding: return "rebuilding";
+    case llp::material::LifecycleState::Fallback: return "fallback";
+    case llp::material::LifecycleState::FrozenEvidence: return "frozen-evidence";
+    case llp::material::LifecycleState::Stopping: return "stopping";
+    default: return "unknown";
+    }
+}
+
+bool WriteMaterialProbeState(HWND hwnd)
+{
+    auto* state = reinterpret_cast<MaterialProbeHostState*>(
+        GetPropW(hwnd, MaterialProbeProperty));
+    return state && WriteMaterialProbeState(*state);
+}
+
+bool WriteMaterialProbeState(MaterialProbeHostState& state)
+{
+    if (!state.renderer || state.outputPath.empty()) return false;
+    const auto diagnostics = state.renderer->SnapshotDiagnostics();
+    Json document = {
+        { "path", MaterialRenderPathName(diagnostics.path) },
+        { "failure", MaterialFailureName(diagnostics.failure) },
+        { "state", MaterialStateName(diagnostics.state) },
+        { "acquiredFrames", diagnostics.acquiredFrames },
+        { "presentedFrames", diagnostics.presentedFrames },
+        { "droppedScenes", diagnostics.droppedScenes },
+        { "deviceRebuilds", diagnostics.deviceRebuilds },
+        { "lastFrameIdentity", diagnostics.lastFrameIdentity },
+        { "firstFrameMs", diagnostics.firstFrameMs },
+        { "hiddenAcquiredFrames", diagnostics.state == llp::material::LifecycleState::Hidden
+            ? diagnostics.acquiredFrames : 0 },
+        { "hiddenPresentedFrames", diagnostics.state == llp::material::LifecycleState::Hidden
+            ? diagnostics.presentedFrames : 0 }
+    };
+    return WriteFileUtf8(state.outputPath, document.dump(2) + "\n");
 }
 
 std::string BuildPersistenceProbeJson(bool settingsSaved, bool layoutSaved)
@@ -8999,6 +9084,22 @@ void AccessibilitySelectionChanged(void*)
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    if (message == WmMaterialProbeStatus)
+    {
+        WriteMaterialProbeState(hwnd);
+        return 0;
+    }
+    if (message == WmMaterialProbeControl)
+    {
+        auto* state = reinterpret_cast<MaterialProbeHostState*>(
+            GetPropW(hwnd, MaterialProbeProperty));
+        if (state && state->renderer && wParam == 1)
+        {
+            HideNativeUi();
+            state->renderer->Hide();
+        }
+        return 0;
+    }
     if (message == g_taskbarCreatedMessage && g_taskbarCreatedMessage != 0)
     {
         if (!g_diagnosticsUiMode)
@@ -9890,6 +9991,38 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     }
     g_processStartTick = GetTickCount64();
     g_instance = instance;
+    const bool materialProbeArgument = CommandLineHasArgument(L"--material-probe-file");
+    const bool materialFailureArgument = CommandLineHasArgument(L"--material-force-failure");
+    const bool anyMaterialTestArgument = materialProbeArgument || materialFailureArgument;
+    const bool developmentBuild = CompareStringOrdinal(
+        LLP_BUILD_CHANNEL_WIDE, -1, L"development", -1, TRUE) == CSTR_EQUAL;
+    if (anyMaterialTestArgument && !developmentBuild) return 2;
+    const std::wstring materialProbePath = CommandLineValue(L"--material-probe-file");
+    const std::wstring materialFailureText = CommandLineValue(L"--material-force-failure");
+    if (anyMaterialTestArgument && materialProbePath.empty()) return 2;
+    llp::material::FailureReason materialForcedFailure = llp::material::FailureReason::None;
+    if (materialFailureArgument)
+    {
+        if (CompareStringOrdinal(materialFailureText.c_str(), -1, L"initialization", -1, TRUE) == CSTR_EQUAL)
+        {
+            materialForcedFailure = llp::material::FailureReason::CompositionUnavailable;
+        }
+        else if (CompareStringOrdinal(materialFailureText.c_str(), -1, L"duplication", -1, TRUE) == CSTR_EQUAL)
+        {
+            materialForcedFailure = llp::material::FailureReason::DuplicationUnavailable;
+        }
+        else if (CompareStringOrdinal(materialFailureText.c_str(), -1, L"access-lost", -1, TRUE) == CSTR_EQUAL)
+        {
+            materialForcedFailure = llp::material::FailureReason::AccessLost;
+        }
+        else
+        {
+            return 2;
+        }
+    }
+    const bool materialProbeActive = anyMaterialTestArgument;
+    std::unique_ptr<llp::material::MaterialRenderer> materialProbeRenderer;
+    MaterialProbeHostState materialProbeState;
     g_startupLogPath = CommandLineValue(L"--diagnostics-log-file");
     if (g_startupLogPath.empty()) g_startupLogPath = DefaultStartupLogPath();
     AppendStartupLog(L"process-start", true, BuildId());
@@ -9936,7 +10069,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         + (g_spotlightFlowProbe.active ? 1 : 0)
         + (g_launchpadFlowProbe.active ? 1 : 0)
         + (g_organizationProbe.active ? 1 : 0)
-        + (g_regionUndoProbe.active ? 1 : 0);
+        + (g_regionUndoProbe.active ? 1 : 0)
+        + (materialProbeActive ? 1 : 0);
     if (activeBehaviorProbes > 1) return 2;
     if (g_shellImportProbe.active && (g_shellImportProbe.root.empty() || g_shellImportProbe.destination.empty())) return 2;
     if (g_spotlightFlowProbe.active && g_spotlightFlowProbe.readyPath.empty()) return 2;
@@ -10054,7 +10188,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     const bool shellBrokerStarted = g_shellBroker.Start(g_hwnd, WmShellBrokerResult);
     AppendStartupLog(L"shell-broker", shellBrokerStarted, shellBrokerStarted ? L"dedicated STA queued" : L"thread creation failed");
 
-    if (!g_diagnosticsUiMode && !g_catalogBrokerProbe.active && !g_shellImportProbe.active && !textInputProbeActive && !g_spotlightFlowProbe.active && !g_launchpadFlowProbe.active && !g_organizationProbe.active && !g_regionUndoProbe.active)
+    if (!g_diagnosticsUiMode && !g_catalogBrokerProbe.active && !g_shellImportProbe.active && !textInputProbeActive && !g_spotlightFlowProbe.active && !g_launchpadFlowProbe.active && !g_organizationProbe.active && !g_regionUndoProbe.active && !materialProbeActive)
     {
         RegisterCurrentHotkey();
         AppendStartupLog(L"hotkey-registered", g_hotkeyRegistered, g_settings.hotkey);
@@ -10118,6 +10252,39 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         return 2;
     }
 
+    if (materialProbeActive)
+    {
+        PositionWindow();
+        RECT windowRect = {};
+        if (!GetWindowRect(g_hwnd, &windowRect))
+        {
+            DestroyWindow(g_hwnd);
+            CloseHandle(mutex);
+            if (comInitialized) CoUninitialize();
+            return 2;
+        }
+        materialProbeRenderer = std::make_unique<llp::material::MaterialRenderer>();
+        materialProbeState.renderer = materialProbeRenderer.get();
+        materialProbeState.outputPath = materialProbePath;
+        if (!SetPropW(g_hwnd, MaterialProbeProperty, &materialProbeState))
+        {
+            materialProbeRenderer.reset();
+            DestroyWindow(g_hwnd);
+            CloseHandle(mutex);
+            if (comInitialized) CoUninitialize();
+            return 2;
+        }
+        llp::material::ShowRequest request;
+        request.window = g_hwnd;
+        request.monitor = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+        request.windowDesktop = { windowRect.left, windowRect.top, windowRect.right, windowRect.bottom };
+        request.dpi = static_cast<int>(g_windowDpi);
+        request.policy = g_adaptivePolicy;
+        request.forcedFailure = materialForcedFailure;
+        request.statusMessage = WmMaterialProbeStatus;
+        materialProbeRenderer->Show(std::move(request));
+    }
+
     if (textInputProbeActive)
     {
         ShowNativeUi();
@@ -10133,6 +10300,15 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
+    }
+
+    if (materialProbeRenderer)
+    {
+        materialProbeRenderer->Hide();
+        materialProbeRenderer->WaitUntilHiddenForTest(2000);
+        WriteMaterialProbeState(materialProbeState);
+        RemovePropW(g_hwnd, MaterialProbeProperty);
+        materialProbeRenderer.reset();
     }
 
     CloseHandle(mutex);
