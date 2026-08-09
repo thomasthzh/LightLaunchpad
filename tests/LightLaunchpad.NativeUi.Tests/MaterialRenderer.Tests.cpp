@@ -83,6 +83,19 @@ HICON CreateOwnedTestIcon()
     return icon;
 }
 
+HICON CreateOwnedLegacyMaskIcon()
+{
+    constexpr int size = 16;
+    constexpr std::size_t bytesPerMaskRow = 2;
+    std::vector<std::uint8_t> andBits(bytesPerMaskRow * size, 0);
+    std::vector<std::uint8_t> xorBits(bytesPerMaskRow * size, 0);
+    andBits[0] = 0x40; // x=1 is transparent; x=0 remains opaque black.
+    HICON icon = CreateIcon(
+        GetModuleHandleW(nullptr), size, size, 1, 1, andBits.data(), xorBits.data());
+    Require(icon != nullptr, "Could not create the owned legacy AND/XOR test HICON.");
+    return icon;
+}
+
 void TestWindowCropUsesOutputRelativePhysicalCoordinates()
 {
     Require(MapWindowCrop({ 100, 200, 1100, 900 }, { 260, 320, 1240, 1040 }, llp::material::OutputRotation::Identity)
@@ -298,7 +311,8 @@ void TestSceneSnapshotsOwnCopiedPremultipliedIconBytes()
     Require(RasterizeIcon(nullptr, 16) == nullptr, "RasterizeIcon accepted a null HICON.");
     Require(RasterizeIcon(sourceIcon, 0) == nullptr, "RasterizeIcon accepted a zero target size.");
     Require(RasterizeIcon(sourceIcon, -1) == nullptr, "RasterizeIcon accepted a negative target size.");
-    Require(RasterizeIcon(sourceIcon, 1025) == nullptr, "RasterizeIcon accepted an unbounded target size.");
+    Require(RasterizeIcon(sourceIcon, std::numeric_limits<int>::max()) == nullptr,
+        "RasterizeIcon did not reject stride arithmetic overflow.");
     auto icon = RasterizeIcon(sourceIcon, 16);
     Require(icon != nullptr, "RasterizeIcon rejected a valid owned HICON.");
     Require(icon->width == 16 && icon->height == 16, "Rasterized icon dimensions changed.");
@@ -307,9 +321,11 @@ void TestSceneSnapshotsOwnCopiedPremultipliedIconBytes()
             == static_cast<std::size_t>(icon->stride) * static_cast<std::size_t>(icon->height),
         "Rasterized icon byte count did not match stride times height.");
     Require(!icon->premultipliedBgra.empty(), "Rasterized icon did not own BGRA bytes.");
+    bool foundModernPartialAlpha = false;
     for (std::size_t offset = 0; offset + 3 < icon->premultipliedBgra.size(); offset += 4)
     {
         const auto alpha = icon->premultipliedBgra[offset + 3];
+        foundModernPartialAlpha = foundModernPartialAlpha || (alpha > 0 && alpha < 255);
         if (alpha != 0)
         {
             Require(icon->premultipliedBgra[offset + 0] <= alpha
@@ -318,6 +334,7 @@ void TestSceneSnapshotsOwnCopiedPremultipliedIconBytes()
                 "Rasterized icon contained non-premultiplied color channels.");
         }
     }
+    Require(foundModernPartialAlpha, "Modern 32-bit icon lost its partial alpha coverage.");
 
     const auto expectedBytes = icon->premultipliedBgra;
     auto firstScene = std::make_shared<llp::material::SceneSnapshot>();
@@ -343,6 +360,30 @@ void TestSceneSnapshotsOwnCopiedPremultipliedIconBytes()
     Require(taken->items[0].icon->premultipliedBgra == expectedBytes,
         "Icon bytes changed after producer references and input HICON were released.");
     Pass("MaterialRenderer_SceneOwnsCopiedPremultipliedIconBytes");
+}
+
+void TestLegacyMaskIconDistinguishesOpaqueBlackFromTransparency()
+{
+    HICON sourceIcon = CreateOwnedLegacyMaskIcon();
+    const auto icon = RasterizeIcon(sourceIcon, 16);
+    DestroyIcon(sourceIcon);
+    Require(icon != nullptr, "RasterizeIcon rejected a valid legacy AND/XOR HICON.");
+    Require(icon->stride >= icon->width * 4, "Legacy icon stride was too small.");
+
+    const auto pixelOffset = [icon](int x, int y) {
+        return static_cast<std::size_t>(y) * static_cast<std::size_t>(icon->stride)
+            + static_cast<std::size_t>(x) * 4;
+    };
+    const auto opaqueBlack = pixelOffset(0, 0);
+    Require(icon->premultipliedBgra[opaqueBlack + 0] == 0
+            && icon->premultipliedBgra[opaqueBlack + 1] == 0
+            && icon->premultipliedBgra[opaqueBlack + 2] == 0
+            && icon->premultipliedBgra[opaqueBlack + 3] == 255,
+        "Legacy opaque black pixel lost full alpha coverage.");
+    const auto transparent = pixelOffset(1, 0);
+    Require(icon->premultipliedBgra[transparent + 3] == 0,
+        "Legacy transparent mask pixel gained alpha coverage.");
+    Pass("MaterialRenderer_LegacyMaskSeparatesOpaqueBlackAndTransparentPixels");
 }
 
 void TestLatestSceneSlotReturnsOnlyNewestCompleteGeneration()
@@ -388,9 +429,10 @@ int main()
         TestLifecycleStartsFallsBackAndConsumesOneRebuild();
         TestLifecycleHandlesReadyFreezeAndHideEvents();
         TestSceneSnapshotsOwnCopiedPremultipliedIconBytes();
+        TestLegacyMaskIconDistinguishesOpaqueBlackFromTransparency();
         TestLatestSceneSlotReturnsOnlyNewestCompleteGeneration();
-        std::cout << passed << "/7 tests passed\n";
-        return passed == 7 ? 0 : 1;
+        std::cout << passed << "/8 tests passed\n";
+        return passed == 8 ? 0 : 1;
     }
     catch (const std::exception& exception)
     {

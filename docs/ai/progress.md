@@ -2,16 +2,43 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-09 19:10:32 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-09 19:28:28 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `659b0a9`
+- HEAD: `cde84d2`
 - Remote main: `origin/main@33e91c2`
 - Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
 - Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
 - Goal status: active; LLP-013 remains the only task in progress.
-- Current gate: LLP-013 Task 1 pure material policies are complete through hardening commit `659b0a9`; Task 2 immutable scene and icon-raster ownership is next.
+- Current gate: LLP-013 Task 2 implementation commit `cde84d2` is under legacy-icon alpha correction; specification re-review and code-quality review remain pending, and Task 3 has not started.
+
+## LLP-013 Task 2 Implementation Evidence (Review Pending)
+
+Status at 2026-08-09 19:27 +08:00: Task 2 implementation exists but is not complete; LLP-013 remains the sole `in_progress` project task. Specification re-review and code-quality review are pending, and Task 3 must not start yet.
+
+Changed files in the initial implementation:
+
+- `src/LightLaunchpad.NativeUi/MaterialRenderer.{h,cpp}` - immutable scene/search/item/icon-raster contracts, mutex-protected latest-only scene ownership, and owned Win32 icon rasterization.
+- `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp` - real `HICON`, copied BGRA lifetime, premultiplication, scene replacement, and latest-generation ownership checks.
+- Initial implementation commit: `cde84d2f96e8ce5ef3a78cada0ce017b75590556` (`feat: add immutable material scenes`). The legacy-mask alpha correction is pending its scoped fix commit and must not be treated as reviewed completion.
+
+Original missing-contract RED evidence:
+
+- Command: Windows PowerShell 5.1 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\LightLaunchpad.NativeUi.Tests\MaterialRenderer.Tests.ps1`, with `C:\Users\thoma\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin` prepended to `PATH`; exit 1.
+- The retained raw compiler output contains these exact diagnostic lines:
+  - `tests\LightLaunchpad.NativeUi.Tests\MaterialRenderer.Tests.cpp:23:22: error: 'RasterizeIcon' has not been declared in 'llp::material'`
+  - `tests\LightLaunchpad.NativeUi.Tests\MaterialRenderer.Tests.cpp:298:17: error: 'RasterizeIcon' was not declared in this scope`
+  - `tests\LightLaunchpad.NativeUi.Tests\MaterialRenderer.Tests.cpp:319:55: error: 'SceneSnapshot' is not a member of 'llp::material'`
+  - `tests\LightLaunchpad.NativeUi.Tests\MaterialRenderer.Tests.cpp:326:20: error: 'LatestSceneSlot' is not a member of 'llp::material'`
+- `lightlaunchpad-material-renderer-tests-*` roots were 0 before and 0 after; added and missing sets were both empty.
+
+Specification-correction evidence in progress:
+
+- Specification review found that the initial `RGB != 0` legacy-alpha heuristic could not distinguish an opaque black AND/XOR pixel from a transparent black pixel. A deterministic legacy-mask regression produced exit 1 after the first six passes with exact failure `FAIL Legacy opaque black pixel lost full alpha coverage.`; temp roots again remained 0 -> 0 with empty added/missing sets.
+- The correction renders the same icon over opaque black and white backgrounds, copies both results before DIB cleanup, derives alpha from their per-channel transmission delta, and retains the black-background RGB as premultiplied color. Final fresh verification reports `MaterialRenderer` 8/8 twice and `AdaptiveEnvironment` 3/3 under WinLibs-first Windows PowerShell 5.1; both temp-prefix sets remained 0 -> 0 with empty added/missing sets. The diff gate, scoped fix commit, specification re-review, and code-quality review remain pending.
+- The undocumented 1024 px cap and 1025 px test are removed. Validation now uses positive size plus checked `int` stride and `size_t` byte-count arithmetic; the regression uses `INT_MAX` to reject overflow without attempting a huge allocation.
+- No renderer thread/GPU bootstrap, build-tool change, protected EXE/install/startup mutation, `C:\TOOL` mutation, push, tag, release, or Task 3 work is included.
 
 ## LLP-013 Task 1 Completion Evidence
 

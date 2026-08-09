@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -115,10 +114,6 @@ private:
     HGDIOBJ previous_ = nullptr;
 };
 
-std::uint8_t Premultiply(std::uint8_t channel, std::uint8_t alpha)
-{
-    return static_cast<std::uint8_t>((static_cast<unsigned int>(channel) * alpha + 127u) / 255u);
-}
 }
 
 bool PixelRect::operator==(const PixelRect& other) const
@@ -301,8 +296,12 @@ std::shared_ptr<const SceneSnapshot> LatestSceneSlot::Take()
 
 std::shared_ptr<const IconRaster> RasterizeIcon(HICON icon, int sizePx)
 {
-    constexpr int maximumIconSizePx = 1024;
-    if (!icon || sizePx <= 0 || sizePx > maximumIconSizePx) return nullptr;
+    if (!icon || sizePx <= 0) return nullptr;
+    if (sizePx > std::numeric_limits<int>::max() / 4) return nullptr;
+    const int stride = sizePx * 4;
+    const auto height = static_cast<std::size_t>(sizePx);
+    if (height > std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(stride)) return nullptr;
+    const auto byteCount = static_cast<std::size_t>(stride) * height;
 
     WindowDc screenDc;
     if (!screenDc.Get()) return nullptr;
@@ -324,32 +323,54 @@ std::shared_ptr<const IconRaster> RasterizeIcon(HICON icon, int sizePx)
     BitmapSelection selectedBitmap(iconDc.Get(), bitmap.Get());
     if (!selectedBitmap.Valid()) return nullptr;
 
-    const int stride = sizePx * 4;
-    const auto byteCount = static_cast<std::size_t>(stride) * static_cast<std::size_t>(sizePx);
-    std::memset(rawBits, 0, byteCount);
-    if (!DrawIconEx(iconDc.Get(), 0, 0, icon, sizePx, sizePx, 0, nullptr, DI_NORMAL)) return nullptr;
+    const auto renderOntoOpaqueBackground = [&](std::uint8_t background,
+                                                std::vector<std::uint8_t>& rendered) {
+        auto* destination = static_cast<std::uint8_t*>(rawBits);
+        for (std::size_t offset = 0; offset + 3 < byteCount; offset += 4)
+        {
+            destination[offset + 0] = background;
+            destination[offset + 1] = background;
+            destination[offset + 2] = background;
+            destination[offset + 3] = 255;
+        }
+        if (!DrawIconEx(iconDc.Get(), 0, 0, icon, sizePx, sizePx, 0, nullptr, DI_NORMAL)) return false;
+        rendered.assign(destination, destination + byteCount);
+        return true;
+    };
+
+    std::vector<std::uint8_t> blackBackground;
+    std::vector<std::uint8_t> whiteBackground;
+    if (!renderOntoOpaqueBackground(0, blackBackground)
+        || !renderOntoOpaqueBackground(255, whiteBackground))
+    {
+        return nullptr;
+    }
 
     auto raster = std::make_shared<IconRaster>();
     raster->width = sizePx;
     raster->height = sizePx;
     raster->stride = stride;
-    const auto* sourceBytes = static_cast<const std::uint8_t*>(rawBits);
-    raster->premultipliedBgra.assign(sourceBytes, sourceBytes + byteCount);
+    raster->premultipliedBgra = std::move(blackBackground);
 
     for (std::size_t offset = 0; offset + 3 < byteCount; offset += 4)
     {
         auto* pixel = raster->premultipliedBgra.data() + offset;
-        const auto alpha = pixel[3];
-        if (alpha == 0)
+        unsigned int transmissionSum = 0;
+        for (std::size_t channel = 0; channel < 3; ++channel)
         {
-            if (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0) pixel[3] = 255;
+            const int delta = static_cast<int>(whiteBackground[offset + channel])
+                - static_cast<int>(pixel[channel]);
+            transmissionSum += static_cast<unsigned int>(std::clamp(delta, 0, 255));
         }
-        else if (pixel[0] > alpha || pixel[1] > alpha || pixel[2] > alpha)
+        // Round the mean black-to-white transmission to the nearest integer;
+        // its complement is coverage alpha, while black-background RGB is already premultiplied.
+        const auto transmission = static_cast<std::uint8_t>((transmissionSum + 1u) / 3u);
+        const auto alpha = static_cast<std::uint8_t>(255u - transmission);
+        for (std::size_t channel = 0; channel < 3; ++channel)
         {
-            pixel[0] = Premultiply(pixel[0], alpha);
-            pixel[1] = Premultiply(pixel[1], alpha);
-            pixel[2] = Premultiply(pixel[2], alpha);
+            pixel[channel] = std::min(pixel[channel], alpha);
         }
+        pixel[3] = alpha;
     }
     return raster;
 }
