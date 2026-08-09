@@ -47,7 +47,7 @@ function New-LlpMouseLParam {
 
 function Send-LlpMouse {
     param([IntPtr]$Window, [uint32]$Message, [int]$X, [int]$Y, [uint32]$Keys = 0)
-    [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($Window, $Message, [UIntPtr]$Keys, (New-LlpMouseLParam $X $Y))
+    [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($Window, $Message, [UIntPtr]::new([uint64]$Keys), (New-LlpMouseLParam $X $Y))
 }
 
 function Send-LlpClick {
@@ -60,16 +60,16 @@ function Send-LlpClick {
 
 function Send-LlpKey {
     param([IntPtr]$Window, [UInt16]$Key)
-    [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($Window, 0x0100, [UIntPtr]$Key, [IntPtr]::Zero)
+    [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($Window, 0x0100, [UIntPtr]::new([uint64]$Key), [IntPtr]::Zero)
 }
 
 function Invoke-LlpContextCommand {
     param([IntPtr]$Window, [int]$X, [int]$Y, [uint32]$Command)
     Assert-True ([LightLaunchpadLaunchpadProbeNative]::PostMessage($Window, 0x0205, [UIntPtr]::Zero, (New-LlpMouseLParam $X $Y))) 'Could not open the item context menu.'
     Start-Sleep -Milliseconds 180
-    Assert-True ([LightLaunchpadLaunchpadProbeNative]::PostMessage($Window, 0x0100, [UIntPtr]0x1B, [IntPtr]::Zero)) 'Could not dismiss the item context menu.'
+    Assert-True ([LightLaunchpadLaunchpadProbeNative]::PostMessage($Window, 0x0100, [UIntPtr]::new([uint64]0x1B), [IntPtr]::Zero)) 'Could not dismiss the item context menu.'
     Start-Sleep -Milliseconds 100
-    Assert-True ([LightLaunchpadLaunchpadProbeNative]::PostMessage($Window, 0x0111, [UIntPtr]$Command, [IntPtr]::Zero)) 'Could not invoke the context command.'
+    Assert-True ([LightLaunchpadLaunchpadProbeNative]::PostMessage($Window, 0x0111, [UIntPtr]::new([uint64]$Command), [IntPtr]::Zero)) 'Could not invoke the context command.'
 }
 
 function Get-LlpMarkerNames {
@@ -202,7 +202,7 @@ public static class LightLaunchpadLaunchpadProbeNative {
     $llpWindow = [LightLaunchpadLaunchpadProbeNative]::FindWindowForProcess([uint32]$llpProcess.Id)
     Assert-True ($llpWindow -ne [IntPtr]::Zero) 'Could not discover the hidden real NativeUi window.'
 
-    [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]0x4C55, [IntPtr]::Zero)
+    [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Assert-True ([LightLaunchpadLaunchpadProbeNative]::IsWindowVisible($llpWindow)) 'First Alt+D path did not show Launchpad.'
     Wait-LlpCondition {
         try {
@@ -246,7 +246,7 @@ public static class LightLaunchpadLaunchpadProbeNative {
     }
     Wait-LlpCondition { -not [LightLaunchpadLaunchpadProbeNative]::IsWindowVisible($llpWindow) } 3000 'Launchpad did not hide after browse launch.'
 
-    [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]0x4C55, [IntPtr]::Zero)
+    [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Send-LlpKey $llpWindow 0x28
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) { Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '03-browse-keyboard-focus.png') }
     Send-LlpKey $llpWindow 0x26
@@ -274,7 +274,7 @@ public static class LightLaunchpadLaunchpadProbeNative {
     Start-Sleep -Milliseconds 150
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) { Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '08-edit-favorites-saved.png') }
 
-    Assert-True ([LightLaunchpadLaunchpadProbeNative]::PostMessage($llpWindow, 0x0111, [UIntPtr]2003, [IntPtr]::Zero)) 'Could not invoke batch delete.'
+    Assert-True ([LightLaunchpadLaunchpadProbeNative]::PostMessage($llpWindow, 0x0111, [UIntPtr]::new([uint64]2003), [IntPtr]::Zero)) 'Could not invoke batch delete.'
     $llpFirstPath = Join-Path $llpLaunchpad 'Flow Alpha.exe'
     $llpSecondPath = Join-Path $llpLaunchpad 'Flow Beta.exe'
     Wait-LlpCondition { -not (Test-Path -LiteralPath $llpFirstPath) -and -not (Test-Path -LiteralPath $llpSecondPath) } 8000 'Batch delete did not move both selected files to the Recycle Bin.'
@@ -355,7 +355,7 @@ public static class LightLaunchpadLaunchpadProbeNative {
     Wait-LlpCondition { Test-Path -LiteralPath $llpRestartReadyPath } 10000 'Restart catalog did not become ready.'
     $llpRestartWindow = [LightLaunchpadLaunchpadProbeNative]::FindWindowForProcess([uint32]$llpProcess.Id)
     Assert-True ($llpRestartWindow -ne [IntPtr]::Zero) 'Could not discover the restarted NativeUi window.'
-    [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($llpRestartWindow, 0x0312, [UIntPtr]0x4C55, [IntPtr]::Zero)
+    [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($llpRestartWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Start-Sleep -Milliseconds 250
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) { Save-LlpWindowEvidence $llpRestartWindow (Join-Path $llpEvidenceRoot '11-restart-favorites-persisted.png') }
     [void][LightLaunchpadLaunchpadProbeNative]::SendMessage($llpRestartWindow, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)
