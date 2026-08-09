@@ -203,14 +203,31 @@ function Invoke-LlpAdaptiveCase {
         $llpRestoreRect.Right = [int]$llpReady.windowRect.right
         $llpRestoreRect.Bottom = [int]$llpReady.windowRect.bottom
         [void][LightLaunchpadAdaptiveProbeNative]::SendDpiChanged($llpWindow, [uint32]$llpOriginalDpi, $llpRestoreRect)
-        $llpForegroundWindow = [LightLaunchpadAdaptiveProbeNative]::GetForegroundWindow()
-        Assert-True ($llpForegroundWindow -ne [IntPtr]::Zero) 'Could not determine the foreground window before WM_DISPLAYCHANGE.'
-        $llpExpectedMonitorSource = if ($llpForegroundWindow -eq $llpWindow) { 'cursor' } else { 'foreground' }
+        [void][LightLaunchpadAdaptiveProbeNative]::SetForegroundWindow($llpWindow)
+        Wait-LlpCondition { [LightLaunchpadAdaptiveProbeNative]::GetForegroundWindow() -eq $llpWindow } 3000 'Could not establish the NativeUi window as foreground before WM_DISPLAYCHANGE.'
+        $llpCursor = [LightLaunchpadAdaptiveProbeNative+POINT]::new()
+        Assert-True ([LightLaunchpadAdaptiveProbeNative]::GetCursorPos([ref]$llpCursor)) 'Could not read the cursor position before WM_DISPLAYCHANGE.'
+        $llpCursorMonitor = [LightLaunchpadAdaptiveProbeNative]::MonitorFromPoint($llpCursor, [LightLaunchpadAdaptiveProbeNative]::MonitorDefaultToPrimary)
+        Assert-True ($llpCursorMonitor -ne [IntPtr]::Zero) 'Could not resolve the cursor monitor before WM_DISPLAYCHANGE.'
+        $llpCursorMonitorInfo = [LightLaunchpadAdaptiveProbeNative+MONITORINFO]::new()
+        $llpCursorMonitorInfo.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type][LightLaunchpadAdaptiveProbeNative+MONITORINFO])
+        Assert-True ([LightLaunchpadAdaptiveProbeNative]::GetMonitorInfoW($llpCursorMonitor, [ref]$llpCursorMonitorInfo)) 'Could not read the cursor monitor work area before WM_DISPLAYCHANGE.'
+        Assert-Equal $llpWindow ([LightLaunchpadAdaptiveProbeNative]::GetForegroundWindow()) 'NativeUi lost foreground before WM_DISPLAYCHANGE.'
         [void][LightLaunchpadAdaptiveProbeNative]::SendMessage($llpWindow, 0x007E, [UIntPtr]::Zero, [IntPtr]::Zero)
         [void][LightLaunchpadAdaptiveProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
         $llpReady = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpReadyPath | ConvertFrom-Json
         Assert-Equal $llpOriginalDpi ([int]$llpReady.effectiveDpi) 'Display-change reposition did not return to the monitor DPI.'
-        Assert-Equal $llpExpectedMonitorSource ([string]$llpReady.monitorSource) 'Display-change reposition did not use the hierarchy-consistent monitor source.'
+        Assert-Equal 'cursor' ([string]$llpReady.monitorSource) 'Display-change reposition did not use the cursor monitor fallback.'
+
+        $llpDisplayRect = [LightLaunchpadAdaptiveProbeNative+RECT]::new()
+        Assert-True ([LightLaunchpadAdaptiveProbeNative]::GetWindowRect($llpWindow, [ref]$llpDisplayRect)) 'Could not read the NativeUi window placement after WM_DISPLAYCHANGE.'
+        $llpDisplayWidth = $llpDisplayRect.Right - $llpDisplayRect.Left
+        $llpDisplayHeight = $llpDisplayRect.Bottom - $llpDisplayRect.Top
+        $llpExpectedLeft = $llpCursorMonitorInfo.rcWork.Left + [int][Math]::Truncate((($llpCursorMonitorInfo.rcWork.Right - $llpCursorMonitorInfo.rcWork.Left) - $llpDisplayWidth) / 2.0)
+        $llpExpectedTop = $llpCursorMonitorInfo.rcWork.Top + [int][Math]::Truncate((($llpCursorMonitorInfo.rcWork.Bottom - $llpCursorMonitorInfo.rcWork.Top) - $llpDisplayHeight) / 2.0)
+        Assert-True ([Math]::Abs($llpDisplayRect.Left - $llpExpectedLeft) -le 1) 'WM_DISPLAYCHANGE did not horizontally center the NativeUi window in the cursor monitor work area.'
+        Assert-True ([Math]::Abs($llpDisplayRect.Top - $llpExpectedTop) -le 1) 'WM_DISPLAYCHANGE did not vertically center the NativeUi window in the cursor monitor work area.'
+        Assert-True ($llpDisplayRect.Left -ge $llpCursorMonitorInfo.rcWork.Left -and $llpDisplayRect.Top -ge $llpCursorMonitorInfo.rcWork.Top -and $llpDisplayRect.Right -le $llpCursorMonitorInfo.rcWork.Right -and $llpDisplayRect.Bottom -le $llpCursorMonitorInfo.rcWork.Bottom) 'WM_DISPLAYCHANGE placed the NativeUi window outside the cursor monitor work area.'
     }
 
     $llpCenterX = ([int]$llpReady.firstHit.left + [int]$llpReady.firstHit.right) / 2
@@ -250,8 +267,10 @@ try {
 using System;
 using System.Runtime.InteropServices;
 public static class LightLaunchpadAdaptiveProbeNative {
+    public const uint MonitorDefaultToPrimary = 1;
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
-    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO { public uint cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
     [StructLayout(LayoutKind.Sequential)] private struct MSG { public IntPtr hwnd; public uint message; public UIntPtr wParam; public IntPtr lParam; public uint time; public POINT pt; }
     private delegate bool EnumWindowsCallback(IntPtr hwnd, IntPtr state);
     private delegate void WinEventDelegate(IntPtr hook, uint eventType, IntPtr hwnd, int objectId, int childId, uint threadId, uint time);
@@ -271,6 +290,10 @@ public static class LightLaunchpadAdaptiveProbeNative {
     [DllImport("user32.dll")] public static extern bool UpdateWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr hwnd, IntPtr updateRect, IntPtr updateRegion, uint flags);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
+    [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(POINT point, uint flags);
+    [DllImport("user32.dll", ExactSpelling = true)] public static extern bool GetMonitorInfoW(IntPtr monitor, ref MONITORINFO info);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
     public static IntPtr SendDpiChanged(IntPtr hwnd, uint dpi, RECT suggested) {
         IntPtr memory = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(RECT)));
