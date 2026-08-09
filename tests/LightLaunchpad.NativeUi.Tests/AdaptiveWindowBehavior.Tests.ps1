@@ -203,11 +203,14 @@ function Invoke-LlpAdaptiveCase {
         $llpRestoreRect.Right = [int]$llpReady.windowRect.right
         $llpRestoreRect.Bottom = [int]$llpReady.windowRect.bottom
         [void][LightLaunchpadAdaptiveProbeNative]::SendDpiChanged($llpWindow, [uint32]$llpOriginalDpi, $llpRestoreRect)
+        $llpForegroundWindow = [LightLaunchpadAdaptiveProbeNative]::GetForegroundWindow()
+        Assert-True ($llpForegroundWindow -ne [IntPtr]::Zero) 'Could not determine the foreground window before WM_DISPLAYCHANGE.'
+        $llpExpectedMonitorSource = if ($llpForegroundWindow -eq $llpWindow) { 'cursor' } else { 'foreground' }
         [void][LightLaunchpadAdaptiveProbeNative]::SendMessage($llpWindow, 0x007E, [UIntPtr]::Zero, [IntPtr]::Zero)
         [void][LightLaunchpadAdaptiveProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
         $llpReady = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpReadyPath | ConvertFrom-Json
         Assert-Equal $llpOriginalDpi ([int]$llpReady.effectiveDpi) 'Display-change reposition did not return to the monitor DPI.'
-        Assert-Equal 'foreground' ([string]$llpReady.monitorSource) 'Display-change reposition lost foreground-monitor ownership.'
+        Assert-Equal $llpExpectedMonitorSource ([string]$llpReady.monitorSource) 'Display-change reposition did not use the hierarchy-consistent monitor source.'
     }
 
     $llpCenterX = ([int]$llpReady.firstHit.left + [int]$llpReady.firstHit.right) / 2
@@ -267,6 +270,7 @@ public static class LightLaunchpadAdaptiveProbeNative {
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] public static extern bool UpdateWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr hwnd, IntPtr updateRect, IntPtr updateRegion, uint flags);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
     public static IntPtr SendDpiChanged(IntPtr hwnd, uint dpi, RECT suggested) {
         IntPtr memory = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(RECT)));
