@@ -75,7 +75,7 @@ using llp::material::MapWindowCrop;
 using llp::material::ResolveMaterialTone;
 
 Require(MapWindowCrop({ 100, 200, 1100, 900 }, { 260, 320, 1240, 1040 }, llp::material::OutputRotation::Identity)
-            == llp::material::PixelRect{ 160, 120, 1000, 840 },
+            == llp::material::PixelRect{ 160, 120, 1000, 700 },
     "Identity crop was not output-relative and window-aligned.");
 Require(MapWindowCrop({ 0, 0, 1080, 1920 }, { 140, 420, 860, 1400 }, llp::material::OutputRotation::Rotate90)
             == llp::material::PixelRect{ 420, 220, 1400, 940 },
@@ -112,6 +112,8 @@ transition = AdvanceLifecycle(llp::material::LifecycleState::Rebuilding,
 Require(transition.next == llp::material::LifecycleState::Fallback && !transition.consumeRebuild,
     "Failed rebuild did not remain in fallback.");
 ```
+
+The identity case intentionally extends past the output's right and bottom edges. Its expected `right=1000` and `bottom=700` assert that the output-relative crop is clamped on both axes.
 
 - [ ] Add `MaterialRenderer.Tests.ps1` using the same validated temporary-directory cleanup pattern as `SceneGeometry.Tests.ps1`. Compile the test with production `MaterialRenderer.cpp`, `AdaptiveEnvironment.cpp`, and these exact libraries:
 
