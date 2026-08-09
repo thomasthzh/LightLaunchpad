@@ -25,7 +25,7 @@ try {
         'Source SHA256 kMandarin_8105.txt: 1B1546F6E190C0F1CBF23E3BB436B41C3ACE16F852BE4DAEBC2C7295636628A4',
         'Source SHA256 pinyin.txt: 621F8CA9EFF8519F47E2B17B564FD318161E13BCA07EEA8C8E04993CD5D3B52E'
     )) {
-        if (-not $llpHeader.Contains($llpEvidence, [System.StringComparison]::Ordinal)) {
+        if ($llpHeader.IndexOf($llpEvidence, [System.StringComparison]::Ordinal) -lt 0) {
             throw "Generated pinyin header is missing provenance evidence: $llpEvidence"
         }
     }
