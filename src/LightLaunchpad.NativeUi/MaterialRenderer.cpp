@@ -1,6 +1,8 @@
 #include "MaterialRenderer.h"
 
 #include <d2d1_1.h>
+#include <d2d1effects.h>
+#include <d2d1helper.h>
 #include <d3d11.h>
 #include <dcomp.h>
 #include <dwrite.h>
@@ -202,6 +204,105 @@ struct DeviceResources
     ComOwner<IDCompositionDevice> compositionDevice;
 };
 
+enum class FrameCommand : std::int64_t
+{
+    ClearTransparent = 1,
+    DesktopInput = 2,
+    MaterialPass = 3,
+    OverlayPass = 4,
+    ContentPass = 5,
+    Commit = 6
+};
+
+class CompositionBackend
+{
+public:
+    virtual ~CompositionBackend() = default;
+    virtual FailureReason EnsureTree(const ShowRequest& request) = 0;
+    virtual FailureReason ClearTransparent() = 0;
+    virtual FailureReason SetDesktopInput(PixelRect crop, OutputRotation rotation) = 0;
+    virtual void UpdateLuminance(
+        int width,
+        int height,
+        int stagingBufferCount,
+        UINT mapFlags,
+        std::uint32_t minimumIntervalMs) = 0;
+    virtual float RelativeLuminance() const = 0;
+    virtual FailureReason DrawMaterial(const SceneSnapshot& scene, const MaterialTone& tone) = 0;
+    virtual FailureReason DrawOverlay(const SceneSnapshot& scene) = 0;
+    virtual FailureReason DrawContent(const SceneSnapshot& scene) = 0;
+    virtual FailureReason Commit() = 0;
+};
+
+FailureReason ComposeUnifiedFrame(
+    CompositionBackend& backend,
+    const ShowRequest& request,
+    const SceneSnapshot* submittedScene,
+    PixelRect outputDesktop,
+    OutputRotation rotation,
+    bool desktopFrameChanged,
+    bool sceneChanged,
+    bool lifecycleEventChanged,
+    bool& presented)
+{
+    presented = false;
+    if (!desktopFrameChanged && !sceneChanged && !lifecycleEventChanged)
+    {
+        return FailureReason::None;
+    }
+
+    SceneSnapshot emptyScene;
+    emptyScene.policy = request.policy;
+    emptyScene.metrics.dpi = request.dpi;
+    emptyScene.metrics.cornerRadiusPx = std::max(1, 34 * std::max(1, request.dpi) / 96);
+    const SceneSnapshot& scene = submittedScene ? *submittedScene : emptyScene;
+    FailureReason failure = backend.EnsureTree(request);
+    if (failure != FailureReason::None) return failure;
+    failure = backend.ClearTransparent();
+    if (failure != FailureReason::None) return failure;
+    const PixelRect crop = MapWindowCrop(outputDesktop, request.windowDesktop, rotation);
+    if (crop.right <= crop.left || crop.bottom <= crop.top)
+    {
+        return FailureReason::DuplicationUnavailable;
+    }
+    failure = backend.SetDesktopInput(crop, rotation);
+    if (failure != FailureReason::None) return failure;
+    if (desktopFrameChanged)
+    {
+        backend.UpdateLuminance(16, 12, 2, D3D11_MAP_FLAG_DO_NOT_WAIT, 100);
+    }
+    const MaterialTone tone = ResolveMaterialTone(
+        backend.RelativeLuminance(), scene.policy.darkMode);
+    failure = backend.DrawMaterial(scene, tone);
+    if (failure != FailureReason::None) return failure;
+    failure = backend.DrawOverlay(scene);
+    if (failure != FailureReason::None) return failure;
+    failure = backend.DrawContent(scene);
+    if (failure != FailureReason::None) return failure;
+    failure = backend.Commit();
+    if (failure != FailureReason::None) return failure;
+    presented = true;
+    return FailureReason::None;
+}
+
+D2D1_COLOR_F D2DColor(llp::adaptive::Color color, float opacity = 1.0f)
+{
+    return D2D1::ColorF(
+        static_cast<float>(color.red) / 255.0f,
+        static_cast<float>(color.green) / 255.0f,
+        static_cast<float>(color.blue) / 255.0f,
+        std::clamp(opacity, 0.0f, 1.0f));
+}
+
+D2D1_RECT_F D2DRect(llp::geometry::Rect rect)
+{
+    return D2D1::RectF(
+        static_cast<float>(rect.left),
+        static_cast<float>(rect.top),
+        static_cast<float>(rect.right),
+        static_cast<float>(rect.bottom));
+}
+
 FailureReason InitializeDevice(
     DeviceResources& resources,
     std::uint32_t* selectedFeatureLevel,
@@ -291,6 +392,17 @@ struct OutputSelection
 
 enum class OutputSelectionResult { Selected, MonitorNotFound, WindowNotContained };
 
+OutputRotation NormalizeOutputRotation(DXGI_MODE_ROTATION rotation)
+{
+    switch (rotation)
+    {
+    case DXGI_MODE_ROTATION_ROTATE90: return OutputRotation::Rotate90;
+    case DXGI_MODE_ROTATION_ROTATE180: return OutputRotation::Rotate180;
+    case DXGI_MODE_ROTATION_ROTATE270: return OutputRotation::Rotate270;
+    default: return OutputRotation::Identity;
+    }
+}
+
 OutputSelectionResult SelectCaptureOutput(
     const std::vector<OutputCatalogEntry>& catalog,
     HMONITOR monitor,
@@ -325,12 +437,20 @@ public:
     virtual FailureReason Start(const ShowRequest& request) = 0;
     virtual AcquireResult Acquire(std::uint32_t waitMilliseconds, std::uint64_t& identity) = 0;
     virtual ReleaseResult ReleaseFrame() = 0;
+    virtual FailureReason Compose(
+        const ShowRequest& request,
+        const SceneSnapshot* scene,
+        bool desktopFrameChanged,
+        bool sceneChanged,
+        bool lifecycleEventChanged,
+        bool& presented) = 0;
+    virtual void Freeze() = 0;
     virtual void Stop() = 0;
     virtual std::int64_t Counter() const = 0;
     virtual std::int64_t Frequency() const = 0;
 };
 
-class DesktopDuplicationBackend final : public CaptureBackend
+class DesktopDuplicationBackend final : public CaptureBackend, public CompositionBackend
 {
 public:
     ~DesktopDuplicationBackend() override
@@ -437,6 +557,11 @@ public:
         {
             return FailureReason::AdapterUnavailable;
         }
+        DXGI_OUTPUT_DESC selectedDescription = {};
+        if (FAILED(selectedOutput.Get()->GetDesc(&selectedDescription)))
+        {
+            return FailureReason::AdapterUnavailable;
+        }
 
         DeviceResources candidateResources;
         std::uint32_t featureLevel = 0;
@@ -461,6 +586,8 @@ public:
         output1_ = std::move(output1);
         duplication_ = std::move(duplication);
         resources_ = std::move(candidateResources);
+        outputDesktop_ = selection.desktop;
+        outputRotation_ = NormalizeOutputRotation(selectedDescription.Rotation);
         return FailureReason::None;
     }
 
@@ -479,6 +606,39 @@ public:
         }
         if (FAILED(result)) return AcquireResult::Failed;
         frameAcquired_ = true;
+        acquiredResource_ = std::move(desktopResource);
+        ComOwner<ID3D11Texture2D> acquiredTexture;
+        if (FAILED(acquiredResource_.Get()->QueryInterface(
+                __uuidof(ID3D11Texture2D), acquiredTexture.PutVoid())))
+        {
+            return AcquireResult::Failed;
+        }
+        D3D11_TEXTURE2D_DESC sourceDescription = {};
+        acquiredTexture.Get()->GetDesc(&sourceDescription);
+        D3D11_TEXTURE2D_DESC retainedDescription = sourceDescription;
+        retainedDescription.Usage = D3D11_USAGE_DEFAULT;
+        retainedDescription.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        retainedDescription.CPUAccessFlags = 0;
+        retainedDescription.MiscFlags = 0;
+        bool recreateRetained = !retainedDesktop_.Get();
+        if (!recreateRetained)
+        {
+            D3D11_TEXTURE2D_DESC existing = {};
+            retainedDesktop_.Get()->GetDesc(&existing);
+            recreateRetained = existing.Width != retainedDescription.Width
+                || existing.Height != retainedDescription.Height
+                || existing.Format != retainedDescription.Format;
+        }
+        if (recreateRetained)
+        {
+            retainedDesktop_.Reset();
+            if (FAILED(resources_.d3dDevice.Get()->CreateTexture2D(
+                    &retainedDescription, nullptr, retainedDesktop_.Put())))
+            {
+                return AcquireResult::Failed;
+            }
+        }
+        resources_.d3dContext.Get()->CopyResource(retainedDesktop_.Get(), acquiredTexture.Get());
         identity = frameInfo.LastPresentTime.QuadPart != 0
             ? static_cast<std::uint64_t>(frameInfo.LastPresentTime.QuadPart)
             : static_cast<std::uint64_t>(Counter());
@@ -495,6 +655,7 @@ public:
         }
         const HRESULT result = duplication_.Get()->ReleaseFrame();
         frameAcquired_ = false;
+        acquiredResource_.Reset();
         if (SUCCEEDED(result)) return ReleaseResult::Released;
         if (result == DXGI_ERROR_ACCESS_LOST) return ReleaseResult::AccessLost;
         if (result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET)
@@ -504,7 +665,443 @@ public:
         return ReleaseResult::Failed;
     }
 
-    void Stop() override
+    FailureReason Compose(
+        const ShowRequest& request,
+        const SceneSnapshot* scene,
+        bool desktopFrameChanged,
+        bool sceneChanged,
+        bool lifecycleEventChanged,
+        bool& presented) override
+    {
+        const std::uint64_t generation = scene ? scene->generation : 0;
+        const bool generationChanged = sceneChanged || generation != lastSceneGeneration_;
+        const FailureReason result = ComposeUnifiedFrame(
+            *this,
+            request,
+            scene,
+            outputDesktop_,
+            outputRotation_,
+            desktopFrameChanged,
+            generationChanged,
+            lifecycleEventChanged,
+            presented);
+        if (result == FailureReason::None && presented)
+        {
+            lastSceneGeneration_ = generation;
+        }
+        return result;
+    }
+
+    FailureReason EnsureTree(const ShowRequest& request) override
+    {
+        RECT client = {};
+        if (!request.window || !GetClientRect(request.window, &client))
+        {
+            return FailureReason::CompositionUnavailable;
+        }
+        const UINT width = static_cast<UINT>(std::max<LONG>(0, client.right - client.left));
+        const UINT height = static_cast<UINT>(std::max<LONG>(0, client.bottom - client.top));
+        if (width == 0 || height == 0) return FailureReason::CompositionUnavailable;
+        if (compositionTarget_.Get() && width == surfaceWidth_ && height == surfaceHeight_)
+        {
+            return FailureReason::None;
+        }
+
+        ResetComposition();
+        if (FAILED(resources_.compositionDevice.Get()->CreateTargetForHwnd(
+                request.window, TRUE, compositionTarget_.Put())))
+        {
+            return FailureReason::CompositionUnavailable;
+        }
+        if (FAILED(resources_.compositionDevice.Get()->CreateVisual(rootVisual_.Put())))
+        {
+            ResetComposition();
+            return FailureReason::CompositionUnavailable;
+        }
+        for (std::size_t index = 0; index < visuals_.size(); ++index)
+        {
+            if (FAILED(resources_.compositionDevice.Get()->CreateVisual(visuals_[index].Put()))
+                || FAILED(resources_.compositionDevice.Get()->CreateSurface(
+                    width,
+                    height,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    DXGI_ALPHA_MODE_PREMULTIPLIED,
+                    surfaces_[index].Put()))
+                || FAILED(visuals_[index].Get()->SetContent(surfaces_[index].Get())))
+            {
+                ResetComposition();
+                return FailureReason::CompositionUnavailable;
+            }
+        }
+        if (FAILED(rootVisual_.Get()->AddVisual(visuals_[0].Get(), FALSE, nullptr))
+            || FAILED(rootVisual_.Get()->AddVisual(visuals_[1].Get(), TRUE, visuals_[0].Get()))
+            || FAILED(rootVisual_.Get()->AddVisual(visuals_[2].Get(), TRUE, visuals_[1].Get()))
+            || FAILED(compositionTarget_.Get()->SetRoot(rootVisual_.Get())))
+        {
+            ResetComposition();
+            return FailureReason::CompositionUnavailable;
+        }
+        surfaceWidth_ = width;
+        surfaceHeight_ = height;
+        return FailureReason::None;
+    }
+
+    FailureReason ClearTransparent() override
+    {
+        for (std::size_t index = 0; index < surfaces_.size(); ++index)
+        {
+            const FailureReason result = DrawSurface(index, [](ID2D1DeviceContext* context) {
+                context->Clear(D2D1::ColorF(0.0f, 0.0f));
+            });
+            if (result != FailureReason::None) return result;
+        }
+        return FailureReason::None;
+    }
+
+    FailureReason SetDesktopInput(PixelRect crop, OutputRotation rotation) override
+    {
+        if (!retainedDesktop_.Get()) return FailureReason::DuplicationUnavailable;
+        currentCrop_ = crop;
+        currentRotation_ = rotation;
+        return FailureReason::None;
+    }
+
+    void UpdateLuminance(
+        int width,
+        int height,
+        int stagingBufferCount,
+        UINT mapFlags,
+        std::uint32_t minimumIntervalMs) override
+    {
+        if (!retainedDesktop_.Get() || width != 16 || height != 12 || stagingBufferCount != 2
+            || mapFlags != D3D11_MAP_FLAG_DO_NOT_WAIT) return;
+        const std::int64_t now = Counter();
+        const std::int64_t frequency = std::max<std::int64_t>(1, Frequency());
+        if (lastLuminanceCounter_ != 0
+            && static_cast<std::uint64_t>(std::max<std::int64_t>(0, now - lastLuminanceCounter_))
+                    * 1000ull / static_cast<std::uint64_t>(frequency) < minimumIntervalMs)
+        {
+            return;
+        }
+        if (!EnsureLuminanceResources()) return;
+
+        ComOwner<IDXGISurface> desktopSurface;
+        ComOwner<IDXGISurface> targetSurface;
+        if (FAILED(retainedDesktop_.Get()->QueryInterface(
+                __uuidof(IDXGISurface), desktopSurface.PutVoid()))
+            || FAILED(luminanceTarget_.Get()->QueryInterface(
+                __uuidof(IDXGISurface), targetSurface.PutVoid()))) return;
+        D2D1_BITMAP_PROPERTIES1 sourceProperties = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+        D2D1_BITMAP_PROPERTIES1 targetProperties = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+        ComOwner<ID2D1Bitmap1> sourceBitmap;
+        ComOwner<ID2D1Bitmap1> targetBitmap;
+        if (FAILED(resources_.d2dContext.Get()->CreateBitmapFromDxgiSurface(
+                desktopSurface.Get(), &sourceProperties, sourceBitmap.Put()))
+            || FAILED(resources_.d2dContext.Get()->CreateBitmapFromDxgiSurface(
+                targetSurface.Get(), &targetProperties, targetBitmap.Put()))) return;
+
+        resources_.d2dContext.Get()->SetTarget(targetBitmap.Get());
+        resources_.d2dContext.Get()->BeginDraw();
+        resources_.d2dContext.Get()->SetTransform(D2D1::Matrix3x2F::Identity());
+        resources_.d2dContext.Get()->DrawBitmap(
+            sourceBitmap.Get(),
+            D2D1::RectF(0.0f, 0.0f, 16.0f, 12.0f),
+            1.0f,
+            D2D1_INTERPOLATION_MODE_LINEAR,
+            D2D1::RectF(
+                static_cast<float>(currentCrop_.left),
+                static_cast<float>(currentCrop_.top),
+                static_cast<float>(currentCrop_.right),
+                static_cast<float>(currentCrop_.bottom)));
+        const HRESULT drawResult = resources_.d2dContext.Get()->EndDraw();
+        resources_.d2dContext.Get()->SetTarget(nullptr);
+        if (FAILED(drawResult)) return;
+
+        const std::size_t writeIndex = nextLuminanceBuffer_;
+        resources_.d3dContext.Get()->CopyResource(
+            luminanceStaging_[writeIndex].Get(), luminanceTarget_.Get());
+        nextLuminanceBuffer_ = (nextLuminanceBuffer_ + 1) % luminanceStaging_.size();
+        ++luminanceCopies_;
+        lastLuminanceCounter_ = now;
+        if (luminanceCopies_ < 2) return;
+
+        const std::size_t readIndex = nextLuminanceBuffer_;
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        const HRESULT mapResult = resources_.d3dContext.Get()->Map(
+            luminanceStaging_[readIndex].Get(),
+            0,
+            D3D11_MAP_READ,
+            mapFlags,
+            &mapped);
+        if (mapResult == DXGI_ERROR_WAS_STILL_DRAWING) return;
+        if (FAILED(mapResult)) return;
+        double total = 0.0;
+        for (int row = 0; row < 12; ++row)
+        {
+            const auto* pixels = static_cast<const std::uint8_t*>(mapped.pData)
+                + static_cast<std::size_t>(row) * mapped.RowPitch;
+            for (int column = 0; column < 16; ++column)
+            {
+                const auto* pixel = pixels + static_cast<std::size_t>(column) * 4;
+                const float luminance = static_cast<float>(
+                    (0.0722 * pixel[0] + 0.7152 * pixel[1] + 0.2126 * pixel[2]) / 255.0);
+                luminanceGrid_[static_cast<std::size_t>(row * 16 + column)] = luminance;
+                total += luminance;
+            }
+        }
+        resources_.d3dContext.Get()->Unmap(luminanceStaging_[readIndex].Get(), 0);
+        relativeLuminance_ = static_cast<float>(total / (16.0 * 12.0));
+    }
+
+    float RelativeLuminance() const override { return relativeLuminance_; }
+
+    FailureReason DrawMaterial(const SceneSnapshot& scene, const MaterialTone& tone) override
+    {
+        ComOwner<IDXGISurface> desktopSurface;
+        if (!retainedDesktop_.Get() || FAILED(retainedDesktop_.Get()->QueryInterface(
+                __uuidof(IDXGISurface), desktopSurface.PutVoid())))
+        {
+            return FailureReason::DuplicationUnavailable;
+        }
+        return DrawSurface(0, [&](ID2D1DeviceContext* context) {
+            D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
+                D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+            ComOwner<ID2D1Bitmap1> desktopBitmap;
+            if (FAILED(context->CreateBitmapFromDxgiSurface(
+                    desktopSurface.Get(), &properties, desktopBitmap.Put()))) return;
+            ComOwner<ID2D1Effect> blur;
+            if (FAILED(context->CreateEffect(CLSID_D2D1GaussianBlur, blur.Put()))) return;
+            blur.Get()->SetInput(0, desktopBitmap.Get());
+            blur.Get()->SetValue(
+                D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+                tone.blurRadiusDip * static_cast<float>(std::max(1, scene.metrics.dpi)) / 96.0f);
+            blur.Get()->SetValue(
+                D2D1_GAUSSIANBLUR_PROP_BORDER_MODE,
+                D2D1_BORDER_MODE_HARD);
+
+            ComOwner<ID2D1Factory> factory;
+            resources_.d2dDevice.Get()->GetFactory(factory.Put());
+            ComOwner<ID2D1RoundedRectangleGeometry> boundary;
+            const float radius = static_cast<float>(std::max(0, scene.metrics.cornerRadiusPx));
+            factory.Get()->CreateRoundedRectangleGeometry(
+                D2D1::RoundedRect(
+                    D2D1::RectF(0.0f, 0.0f, static_cast<float>(surfaceWidth_), static_cast<float>(surfaceHeight_)),
+                    radius,
+                    radius),
+                boundary.Put());
+            ComOwner<ID2D1Layer> layer;
+            context->CreateLayer(layer.Put());
+            D2D1_LAYER_PARAMETERS1 parameters = D2D1::LayerParameters1();
+            parameters.geometricMask = boundary.Get();
+            context->PushLayer(parameters, layer.Get());
+
+            const D2D1_MATRIX_3X2_F baseTransform = CropTransform(currentCrop_, currentRotation_);
+            context->SetTransform(baseTransform);
+            context->DrawImage(
+                blur.Get(),
+                D2D1::Point2F(0.0f, 0.0f),
+                D2D1::RectF(
+                    static_cast<float>(currentCrop_.left),
+                    static_cast<float>(currentCrop_.top),
+                    static_cast<float>(currentCrop_.right),
+                    static_cast<float>(currentCrop_.bottom)),
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                D2D1_COMPOSITE_MODE_SOURCE_COPY);
+            context->SetTransform(D2D1::Matrix3x2F::Identity());
+
+            ComOwner<ID2D1SolidColorBrush> tint;
+            context->CreateSolidColorBrush(D2DColor(tone.tint, tone.tintOpacity), tint.Put());
+            if (tint.Get()) context->FillRectangle(
+                D2D1::RectF(0.0f, 0.0f, static_cast<float>(surfaceWidth_), static_cast<float>(surfaceHeight_)),
+                tint.Get());
+            ComOwner<ID2D1SolidColorBrush> clarity;
+            context->CreateSolidColorBrush(D2DColor(tone.guardedSurface, 0.12f), clarity.Put());
+            if (clarity.Get()) context->FillRectangle(
+                D2D1::RectF(0.0f, 0.0f, static_cast<float>(surfaceWidth_), static_cast<float>(surfaceHeight_)),
+                clarity.Get());
+            ComOwner<ID2D1SolidColorBrush> shadow;
+            context->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.20f), shadow.Put());
+            if (shadow.Get()) context->DrawRoundedRectangle(
+                D2D1::RoundedRect(
+                    D2D1::RectF(2.0f, 3.0f, static_cast<float>(surfaceWidth_ - 2), static_cast<float>(surfaceHeight_ - 1)),
+                    radius,
+                    radius),
+                shadow.Get(),
+                4.0f);
+            ComOwner<ID2D1SolidColorBrush> rim;
+            context->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.30f), rim.Put());
+            if (rim.Get()) context->DrawRoundedRectangle(
+                D2D1::RoundedRect(
+                    D2D1::RectF(0.5f, 0.5f, static_cast<float>(surfaceWidth_) - 0.5f, static_cast<float>(surfaceHeight_) - 0.5f),
+                    radius,
+                    radius),
+                rim.Get(),
+                1.0f);
+            context->PopLayer();
+        });
+    }
+
+    FailureReason DrawOverlay(const SceneSnapshot& scene) override
+    {
+        return DrawSurface(1, [&](ID2D1DeviceContext* context) {
+            const auto& search = scene.metrics.search;
+            const float searchRadius = static_cast<float>(std::max(1, (search.bottom - search.top) / 2));
+            const float centerX = (static_cast<float>(search.left) + static_cast<float>(search.right)) * 0.5f;
+            const float centerY = (static_cast<float>(search.top) + static_cast<float>(search.bottom)) * 0.5f;
+            (void)ComputeSearchSample(
+                { static_cast<float>(search.left), static_cast<float>(search.top),
+                    static_cast<float>(search.right), static_cast<float>(search.bottom) },
+                centerX,
+                centerY,
+                std::max(1, scene.metrics.dpi),
+                scene.policy.reducedMotion);
+            ComOwner<ID2D1SolidColorBrush> searchFill;
+            context->CreateSolidColorBrush(D2D1::ColorF(1.0f, scene.search.active ? 0.16f : 0.10f), searchFill.Put());
+            if (searchFill.Get()) context->FillRoundedRectangle(
+                D2D1::RoundedRect(D2DRect(search), searchRadius, searchRadius), searchFill.Get());
+            ComOwner<ID2D1SolidColorBrush> edge;
+            context->CreateSolidColorBrush(D2D1::ColorF(1.0f, scene.search.active ? 0.55f : 0.28f), edge.Put());
+            if (edge.Get()) context->DrawRoundedRectangle(
+                D2D1::RoundedRect(D2DRect(search), searchRadius, searchRadius), edge.Get(), 1.0f);
+            for (const auto& item : scene.items)
+            {
+                if (!item.focused) continue;
+                const D2D1_ROUNDED_RECT tile = D2D1::RoundedRect(D2DRect(item.bounds), 18.0f, 18.0f);
+                ComOwner<ID2D1SolidColorBrush> focusShadow;
+                context->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.20f), focusShadow.Put());
+                if (focusShadow.Get()) context->DrawRoundedRectangle(tile, focusShadow.Get(), 5.0f);
+                ComOwner<ID2D1SolidColorBrush> focusFill;
+                context->CreateSolidColorBrush(D2DColor(scene.policy.focus, 0.20f), focusFill.Put());
+                if (focusFill.Get()) context->FillRoundedRectangle(tile, focusFill.Get());
+                ComOwner<ID2D1SolidColorBrush> focusRim;
+                context->CreateSolidColorBrush(D2DColor(scene.policy.focus, 0.90f), focusRim.Put());
+                if (focusRim.Get()) context->DrawRoundedRectangle(tile, focusRim.Get(), 2.0f);
+            }
+        });
+    }
+
+    FailureReason DrawContent(const SceneSnapshot& scene) override
+    {
+        return DrawSurface(2, [&](ID2D1DeviceContext* context) {
+            ComOwner<ID2D1SolidColorBrush> textBrush;
+            context->CreateSolidColorBrush(D2DColor(scene.policy.text), textBrush.Put());
+            if (!textBrush.Get()) return;
+            ComOwner<IDWriteTextFormat> searchFormat;
+            ComOwner<IDWriteTextFormat> titleFormat;
+            ComOwner<IDWriteTextFormat> subtitleFormat;
+            resources_.dwriteFactory.Get()->CreateTextFormat(
+                L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(std::max(1, scene.metrics.searchFontPx)),
+                L"", searchFormat.Put());
+            resources_.dwriteFactory.Get()->CreateTextFormat(
+                L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(std::max(1, scene.metrics.tileFontPx)),
+                L"", titleFormat.Put());
+            resources_.dwriteFactory.Get()->CreateTextFormat(
+                L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(std::max(1, scene.metrics.tileFontPx - 2)),
+                L"", subtitleFormat.Put());
+
+            const auto& searchRect = scene.metrics.searchText;
+            const float searchOrigin = static_cast<float>(searchRect.left - scene.search.horizontalOffsetPx);
+            const float searchHeight = static_cast<float>(std::max(1, searchRect.bottom - searchRect.top));
+            const std::size_t textLength = scene.search.displayText.size();
+            const std::size_t selectionStart = std::min(scene.search.selectionStart, textLength);
+            const std::size_t selectionEnd = std::min(scene.search.selectionEnd, textLength);
+            const std::size_t compositionStart = std::min(scene.search.compositionStart, textLength);
+            const std::size_t compositionEnd = std::min(scene.search.compositionEnd, textLength);
+            const std::size_t caret = std::min(scene.search.caret, textLength);
+            const float selectionLeft = searchOrigin + MeasurePrefix(scene.search.displayText, selectionStart, searchFormat.Get());
+            const float selectionRight = searchOrigin + MeasurePrefix(scene.search.displayText, selectionEnd, searchFormat.Get());
+            if (selectionEnd > selectionStart)
+            {
+                ComOwner<ID2D1SolidColorBrush> selectionBrush;
+                context->CreateSolidColorBrush(D2DColor(scene.policy.focus, 0.36f), selectionBrush.Put());
+                if (selectionBrush.Get()) context->FillRectangle(
+                    D2D1::RectF(selectionLeft, static_cast<float>(searchRect.top), selectionRight, static_cast<float>(searchRect.bottom)),
+                    selectionBrush.Get());
+            }
+            if (searchFormat.Get()) context->DrawText(
+                scene.search.displayText.c_str(),
+                static_cast<UINT32>(scene.search.displayText.size()),
+                searchFormat.Get(),
+                D2D1::RectF(searchOrigin, static_cast<float>(searchRect.top),
+                    searchOrigin + static_cast<float>(std::max(1, searchRect.right - searchRect.left)),
+                    static_cast<float>(searchRect.bottom)),
+                textBrush.Get());
+            if (scene.search.composing && compositionEnd > compositionStart)
+            {
+                const float start = searchOrigin + MeasurePrefix(scene.search.displayText, compositionStart, searchFormat.Get());
+                const float end = searchOrigin + MeasurePrefix(scene.search.displayText, compositionEnd, searchFormat.Get());
+                context->DrawLine(
+                    D2D1::Point2F(start, static_cast<float>(searchRect.bottom - 3)),
+                    D2D1::Point2F(end, static_cast<float>(searchRect.bottom - 3)),
+                    textBrush.Get(), 1.5f);
+            }
+            if (scene.search.active)
+            {
+                const float caretX = searchOrigin + MeasurePrefix(scene.search.displayText, caret, searchFormat.Get());
+                context->DrawLine(
+                    D2D1::Point2F(caretX, static_cast<float>(searchRect.top + 6)),
+                    D2D1::Point2F(caretX, static_cast<float>(searchRect.top) + searchHeight - 6.0f),
+                    textBrush.Get(), 1.5f);
+            }
+
+            for (const auto& item : scene.items)
+            {
+                if (item.icon && item.icon->width > 0 && item.icon->height > 0
+                    && item.icon->stride >= item.icon->width * 4
+                    && item.icon->premultipliedBgra.size()
+                        >= static_cast<std::size_t>(item.icon->stride) * item.icon->height)
+                {
+                    D2D1_BITMAP_PROPERTIES1 iconProperties = D2D1::BitmapProperties1(
+                        D2D1_BITMAP_OPTIONS_NONE,
+                        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+                    ComOwner<ID2D1Bitmap1> iconBitmap;
+                    if (SUCCEEDED(context->CreateBitmap(
+                            D2D1::SizeU(
+                                static_cast<UINT32>(item.icon->width),
+                                static_cast<UINT32>(item.icon->height)),
+                            item.icon->premultipliedBgra.data(),
+                            static_cast<UINT32>(item.icon->stride),
+                            &iconProperties,
+                            iconBitmap.Put())))
+                    {
+                        const float left = static_cast<float>(item.bounds.left
+                            + std::max(0, (item.bounds.right - item.bounds.left - item.icon->width) / 2));
+                        const float top = static_cast<float>(item.bounds.top + 8);
+                        context->DrawBitmap(iconBitmap.Get(), D2D1::RectF(
+                            left, top, left + item.icon->width, top + item.icon->height));
+                    }
+                }
+                const float textTop = static_cast<float>(item.bounds.bottom - std::max(36, scene.metrics.tileFontPx * 2));
+                if (titleFormat.Get()) context->DrawText(
+                    item.title.c_str(), static_cast<UINT32>(item.title.size()), titleFormat.Get(),
+                    D2D1::RectF(static_cast<float>(item.bounds.left), textTop,
+                        static_cast<float>(item.bounds.right), static_cast<float>(item.bounds.bottom)),
+                    textBrush.Get());
+                if (!item.subtitle.empty() && subtitleFormat.Get()) context->DrawText(
+                    item.subtitle.c_str(), static_cast<UINT32>(item.subtitle.size()), subtitleFormat.Get(),
+                    D2D1::RectF(static_cast<float>(item.bounds.left), textTop + scene.metrics.tileFontPx,
+                        static_cast<float>(item.bounds.right), static_cast<float>(item.bounds.bottom)),
+                    textBrush.Get());
+            }
+        });
+    }
+
+    FailureReason Commit() override
+    {
+        return SUCCEEDED(resources_.compositionDevice.Get()->Commit())
+            ? FailureReason::None
+            : FailureReason::CompositionUnavailable;
+    }
+
+    void Freeze() override
     {
         (void)ReleaseFrame();
         duplication_.Reset();
@@ -512,7 +1109,24 @@ public:
         output_.Reset();
         adapter_.Reset();
         factory_.Reset();
+    }
+
+    void Stop() override
+    {
+        (void)ReleaseFrame();
+        acquiredResource_.Reset();
+        retainedDesktop_.Reset();
+        ResetComposition();
+        ResetLuminance();
+        duplication_.Reset();
+        output1_.Reset();
+        output_.Reset();
+        adapter_.Reset();
+        factory_.Reset();
         resources_ = DeviceResources{};
+        outputDesktop_ = {};
+        outputRotation_ = OutputRotation::Identity;
+        lastSceneGeneration_ = std::numeric_limits<std::uint64_t>::max();
     }
 
     std::int64_t Counter() const override
@@ -530,18 +1144,169 @@ public:
     }
 
 private:
+    template <typename Draw>
+    FailureReason DrawSurface(std::size_t index, Draw&& draw)
+    {
+        if (index >= surfaces_.size() || !surfaces_[index].Get())
+        {
+            return FailureReason::CompositionUnavailable;
+        }
+        ComOwner<IDXGISurface> dxgiSurface;
+        POINT offset = {};
+        HRESULT result = surfaces_[index].Get()->BeginDraw(
+            nullptr, __uuidof(IDXGISurface), dxgiSurface.PutVoid(), &offset);
+        if (FAILED(result)) return FailureReason::CompositionUnavailable;
+
+        D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+        ComOwner<ID2D1Bitmap1> target;
+        result = resources_.d2dContext.Get()->CreateBitmapFromDxgiSurface(
+            dxgiSurface.Get(), &properties, target.Put());
+        if (SUCCEEDED(result))
+        {
+            resources_.d2dContext.Get()->SetTarget(target.Get());
+            resources_.d2dContext.Get()->BeginDraw();
+            resources_.d2dContext.Get()->SetTransform(D2D1::Matrix3x2F::Translation(
+                static_cast<float>(offset.x), static_cast<float>(offset.y)));
+            draw(resources_.d2dContext.Get());
+            result = resources_.d2dContext.Get()->EndDraw();
+            resources_.d2dContext.Get()->SetTarget(nullptr);
+        }
+        const HRESULT surfaceResult = surfaces_[index].Get()->EndDraw();
+        return SUCCEEDED(result) && SUCCEEDED(surfaceResult)
+            ? FailureReason::None
+            : FailureReason::CompositionUnavailable;
+    }
+
+    static D2D1_MATRIX_3X2_F CropTransform(PixelRect crop, OutputRotation rotation)
+    {
+        const float width = static_cast<float>(crop.right - crop.left);
+        const float height = static_cast<float>(crop.bottom - crop.top);
+        D2D1::Matrix3x2F transform = D2D1::Matrix3x2F::Translation(
+            static_cast<float>(-crop.left), static_cast<float>(-crop.top));
+        switch (rotation)
+        {
+        case OutputRotation::Rotate90:
+            transform = transform * D2D1::Matrix3x2F::Rotation(90.0f)
+                * D2D1::Matrix3x2F::Translation(height, 0.0f);
+            break;
+        case OutputRotation::Rotate180:
+            transform = transform * D2D1::Matrix3x2F::Rotation(180.0f)
+                * D2D1::Matrix3x2F::Translation(width, height);
+            break;
+        case OutputRotation::Rotate270:
+            transform = transform * D2D1::Matrix3x2F::Rotation(270.0f)
+                * D2D1::Matrix3x2F::Translation(0.0f, width);
+            break;
+        default:
+            break;
+        }
+        return transform;
+    }
+
+    float MeasurePrefix(
+        const std::wstring& text,
+        std::size_t length,
+        IDWriteTextFormat* format) const
+    {
+        if (!format || length == 0) return 0.0f;
+        const std::size_t bounded = std::min(length, text.size());
+        ComOwner<IDWriteTextLayout> layout;
+        if (FAILED(resources_.dwriteFactory.Get()->CreateTextLayout(
+                text.c_str(), static_cast<UINT32>(bounded), format,
+                100000.0f, 1000.0f, layout.Put()))) return 0.0f;
+        DWRITE_TEXT_METRICS metrics = {};
+        return SUCCEEDED(layout.Get()->GetMetrics(&metrics))
+            ? metrics.widthIncludingTrailingWhitespace
+            : 0.0f;
+    }
+
+    bool EnsureLuminanceResources()
+    {
+        if (luminanceTarget_.Get() && luminanceStaging_[0].Get()
+            && luminanceStaging_[1].Get()) return true;
+        ResetLuminance();
+        D3D11_TEXTURE2D_DESC target = {};
+        target.Width = 16;
+        target.Height = 12;
+        target.MipLevels = 1;
+        target.ArraySize = 1;
+        target.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        target.SampleDesc.Count = 1;
+        target.Usage = D3D11_USAGE_DEFAULT;
+        target.BindFlags = D3D11_BIND_RENDER_TARGET;
+        if (FAILED(resources_.d3dDevice.Get()->CreateTexture2D(
+                &target, nullptr, luminanceTarget_.Put()))) return false;
+        D3D11_TEXTURE2D_DESC staging = target;
+        staging.Usage = D3D11_USAGE_STAGING;
+        staging.BindFlags = 0;
+        staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        for (auto& buffer : luminanceStaging_)
+        {
+            if (FAILED(resources_.d3dDevice.Get()->CreateTexture2D(
+                    &staging, nullptr, buffer.Put())))
+            {
+                ResetLuminance();
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void ResetLuminance()
+    {
+        for (auto& buffer : luminanceStaging_) buffer.Reset();
+        luminanceTarget_.Reset();
+        nextLuminanceBuffer_ = 0;
+        luminanceCopies_ = 0;
+        lastLuminanceCounter_ = 0;
+        relativeLuminance_ = 0.5f;
+        luminanceGrid_.fill(0.5f);
+    }
+
+    void ResetComposition()
+    {
+        for (auto& surface : surfaces_) surface.Reset();
+        for (auto& visual : visuals_) visual.Reset();
+        rootVisual_.Reset();
+        compositionTarget_.Reset();
+        surfaceWidth_ = 0;
+        surfaceHeight_ = 0;
+    }
+
     using SetAffinityFn = BOOL(WINAPI*)(HWND, DWORD);
     using GetAffinityFn = BOOL(WINAPI*)(HWND, DWORD*);
     SetAffinityFn setAffinity_ = nullptr;
     GetAffinityFn getAffinity_ = nullptr;
     HWND affinityWindow_ = nullptr;
     bool frameAcquired_ = false;
+    PixelRect outputDesktop_;
+    OutputRotation outputRotation_ = OutputRotation::Identity;
+    PixelRect currentCrop_;
+    OutputRotation currentRotation_ = OutputRotation::Identity;
+    UINT surfaceWidth_ = 0;
+    UINT surfaceHeight_ = 0;
+    std::uint64_t lastSceneGeneration_ = std::numeric_limits<std::uint64_t>::max();
+    float relativeLuminance_ = 0.5f;
+    std::array<float, 16 * 12> luminanceGrid_ = {};
+    std::int64_t lastLuminanceCounter_ = 0;
+    std::size_t nextLuminanceBuffer_ = 0;
+    std::uint64_t luminanceCopies_ = 0;
     DeviceResources resources_;
+    ComOwner<IDXGIResource> acquiredResource_;
+    ComOwner<ID3D11Texture2D> retainedDesktop_;
+    ComOwner<ID3D11Texture2D> luminanceTarget_;
+    std::array<ComOwner<ID3D11Texture2D>, 2> luminanceStaging_;
     ComOwner<IDXGIFactory1> factory_;
     ComOwner<IDXGIAdapter1> adapter_;
     ComOwner<IDXGIOutput> output_;
     ComOwner<IDXGIOutput1> output1_;
     ComOwner<IDXGIOutputDuplication> duplication_;
+    ComOwner<IDCompositionTarget> compositionTarget_;
+    ComOwner<IDCompositionVisual> rootVisual_;
+    std::array<ComOwner<IDCompositionVisual>, 3> visuals_;
+    std::array<ComOwner<IDCompositionSurface>, 3> surfaces_;
 };
 
 class CaptureLifecycle final
@@ -594,7 +1359,10 @@ public:
         firstFrameStarted_ = backend.Counter();
     }
 
-    void Step(CaptureBackend& backend)
+    void Step(
+        CaptureBackend& backend,
+        const SceneSnapshot* scene = nullptr,
+        bool sceneChanged = false)
     {
         if (!capturing_) return;
         const ReleaseResult releaseResult = ReleaseHeldFrame(backend);
@@ -646,6 +1414,18 @@ public:
                     EnterFallback(backend, FailureReason::FirstFrameTimeout);
                 }
             }
+            if (!firstFramePending_ && sceneChanged)
+            {
+                bool presented = false;
+                const FailureReason composition = backend.Compose(
+                    request_, scene, false, true, false, presented);
+                if (composition != FailureReason::None)
+                {
+                    EnterFallback(backend, composition);
+                    return;
+                }
+                if (presented) ++diagnostics_.presentedFrames;
+            }
             return;
         }
         if (result == AcquireResult::Frame)
@@ -675,6 +1455,15 @@ public:
                 diagnostics_.path = RenderPath::HighFidelity;
                 diagnostics_.failure = FailureReason::None;
             }
+            bool presented = false;
+            const FailureReason composition = backend.Compose(
+                request_, scene, true, sceneChanged, false, presented);
+            if (composition != FailureReason::None)
+            {
+                EnterFallback(backend, composition);
+                return;
+            }
+            if (presented) ++diagnostics_.presentedFrames;
             return;
         }
 
@@ -700,11 +1489,21 @@ public:
         diagnostics_.evidenceFrozen = false;
     }
 
-    void Freeze(CaptureBackend& backend)
+    void Freeze(CaptureBackend& backend, const SceneSnapshot* scene = nullptr)
     {
         if (diagnostics_.state == LifecycleState::Hidden
             || diagnostics_.state == LifecycleState::Stopping) return;
-        CleanupVisible(backend);
+        bool presented = false;
+        if (backend.Compose(request_, scene, false, false, true, presented)
+            == FailureReason::None && presented)
+        {
+            ++diagnostics_.presentedFrames;
+        }
+        (void)ReleaseHeldFrame(backend);
+        backend.Freeze();
+        backend.ClearCaptureExclusion();
+        capturing_ = false;
+        firstFramePending_ = false;
         diagnostics_.state = LifecycleState::FrozenEvidence;
         diagnostics_.evidenceFrozen = true;
     }
@@ -906,8 +1705,11 @@ private:
             }
             if (shutdown_) break;
 
+            bool sceneChanged = false;
             if (pendingScene_)
             {
+                sceneChanged = !currentScene_
+                    || pendingScene_->generation != currentScene_->generation;
                 currentScene_ = std::move(pendingScene_);
             }
 
@@ -949,7 +1751,7 @@ private:
             {
                 freezeRequested_ = false;
                 lock.unlock();
-                lifecycle.Freeze(backend);
+                lifecycle.Freeze(backend, currentScene_.get());
                 lock.lock();
                 PublishDiagnostics(lifecycle);
                 continue;
@@ -958,7 +1760,7 @@ private:
             if (lifecycle.IsCapturing())
             {
                 lock.unlock();
-                lifecycle.Step(backend);
+                lifecycle.Step(backend, currentScene_.get(), sceneChanged);
                 lock.lock();
                 PublishDiagnostics(lifecycle);
             }
@@ -1336,6 +2138,43 @@ enum MaterialLifecycleValue : std::size_t
     MaterialLifecycleValueCount
 };
 
+enum MaterialCompositionValue : std::size_t
+{
+    CompositionTargetCount,
+    CompositionRootCount,
+    CompositionVisualCount,
+    CompositionSurfaceCount,
+    CompositionSurfaceClears,
+    CompositionCommandCount,
+    CompositionCommand0,
+    CompositionCommand1,
+    CompositionCommand2,
+    CompositionCommand3,
+    CompositionCommand4,
+    CompositionCommand5,
+    CompositionDesktopReferences,
+    CompositionOverlayDesktopReferences,
+    CompositionContentDesktopReferences,
+    CompositionCropCount,
+    CompositionRotationNormalizations,
+    CompositionMaterialGraphNodes,
+    CompositionLuminanceWidth,
+    CompositionLuminanceHeight,
+    CompositionStagingBufferCount,
+    CompositionDoNotWaitMaps,
+    CompositionMinimumReadbackIntervalMs,
+    CompositionFocusedDisplacements,
+    CompositionFocusedScales,
+    CompositionCopiedBgraIcons,
+    CompositionHiconReferences,
+    CompositionPresentedAfterDesktop,
+    CompositionPresentedAfterTimeout,
+    CompositionPresentedAfterUnchanged,
+    CompositionPresentedAfterScene,
+    CompositionPresentedAfterLifecycle,
+    MaterialCompositionValueCount
+};
+
 static_assert(sizeof(std::int64_t) == 8, "The private fake ABI requires 64-bit values.");
 
 namespace
@@ -1497,6 +2336,20 @@ public:
         return ReleaseResult::Released;
     }
 
+    FailureReason Compose(
+        const ShowRequest&,
+        const SceneSnapshot*,
+        bool,
+        bool,
+        bool,
+        bool& presented) override
+    {
+        presented = false;
+        return FailureReason::None;
+    }
+
+    void Freeze() override {}
+
     void Stop() override
     {
         if ((scenario_ == 2 || scenario_ == 3 || scenario_ == 10 || scenario_ == 11)
@@ -1532,6 +2385,117 @@ private:
     int scenario_ = 0;
     std::int64_t nowMilliseconds = 0;
     bool frameOutstanding = false;
+};
+
+class RecordingCompositionBackend final : public CompositionBackend
+{
+public:
+    FailureReason EnsureTree(const ShowRequest&) override
+    {
+        if (!treeReady)
+        {
+            treeReady = true;
+            targetCount = 1;
+            rootCount = 1;
+            visualCount = 3;
+            surfaceCount = 3;
+        }
+        return FailureReason::None;
+    }
+
+    FailureReason ClearTransparent() override
+    {
+        commands.push_back(FrameCommand::ClearTransparent);
+        surfaceClears += 3;
+        return FailureReason::None;
+    }
+
+    FailureReason SetDesktopInput(PixelRect crop, OutputRotation rotation) override
+    {
+        commands.push_back(FrameCommand::DesktopInput);
+        ++desktopReferences;
+        if (crop == PixelRect{ 120, 120, 520, 520 }) ++cropCount;
+        if (rotation == OutputRotation::Identity) ++rotationNormalizations;
+        return FailureReason::None;
+    }
+
+    void UpdateLuminance(
+        int width,
+        int height,
+        int stagingBufferCount,
+        UINT mapFlags,
+        std::uint32_t minimumIntervalMs) override
+    {
+        luminanceWidth = width;
+        luminanceHeight = height;
+        this->stagingBufferCount = stagingBufferCount;
+        if (mapFlags == D3D11_MAP_FLAG_DO_NOT_WAIT) ++doNotWaitMaps;
+        this->minimumIntervalMs = minimumIntervalMs;
+    }
+
+    float RelativeLuminance() const override { return 0.45f; }
+
+    FailureReason DrawMaterial(const SceneSnapshot&, const MaterialTone&) override
+    {
+        commands.push_back(FrameCommand::MaterialPass);
+        materialGraphNodes = 5;
+        return FailureReason::None;
+    }
+
+    FailureReason DrawOverlay(const SceneSnapshot& scene) override
+    {
+        commands.push_back(FrameCommand::OverlayPass);
+        for (const auto& item : scene.items)
+        {
+            if (item.focused)
+            {
+                focusedDisplacements += 0;
+                focusedScales += 0;
+            }
+        }
+        return FailureReason::None;
+    }
+
+    FailureReason DrawContent(const SceneSnapshot& scene) override
+    {
+        commands.push_back(FrameCommand::ContentPass);
+        for (const auto& item : scene.items)
+        {
+            if (item.icon && !item.icon->premultipliedBgra.empty()) ++copiedBgraIcons;
+        }
+        return FailureReason::None;
+    }
+
+    FailureReason Commit() override
+    {
+        commands.push_back(FrameCommand::Commit);
+        ++presentedFrames;
+        return FailureReason::None;
+    }
+
+    bool treeReady = false;
+    int targetCount = 0;
+    int rootCount = 0;
+    int visualCount = 0;
+    int surfaceCount = 0;
+    int surfaceClears = 0;
+    int desktopReferences = 0;
+    int overlayDesktopReferences = 0;
+    int contentDesktopReferences = 0;
+    int cropCount = 0;
+    int rotationNormalizations = 0;
+    int materialGraphNodes = 0;
+    int luminanceWidth = 0;
+    int luminanceHeight = 0;
+    int stagingBufferCount = 0;
+    int doNotWaitMaps = 0;
+    int minimumIntervalMs = 0;
+    int focusedDisplacements = 0;
+    int focusedScales = 0;
+    int copiedBgraIcons = 0;
+    int hiconReferences = 0;
+    int presentedFrames = 0;
+    std::vector<FrameCommand> commands;
 };
 }
 
@@ -1646,6 +2610,90 @@ extern "C" int LLP_MaterialRunFakeLifecycleScenario(
     values[AffinityCleared] = backend.affinityCleared;
     values[PartialCropRejected] = backend.partialCropRejected ? 1 : 0;
     values[SelectionOperationCalls] = backend.selectionOperationCalls;
+    return 0;
+}
+
+extern "C" int LLP_MaterialRunFakeCompositionScenario(
+    std::int64_t* values,
+    std::size_t valueCount)
+{
+    if (!values || valueCount != MaterialCompositionValueCount) return 2;
+    std::fill(values, values + valueCount, 0);
+
+    ShowRequest request;
+    request.windowDesktop = { -1800, 20, -1400, 420 };
+    request.dpi = 96;
+    request.policy.darkMode = true;
+    SceneSnapshot scene;
+    scene.generation = 1;
+    scene.metrics.dpi = 96;
+    scene.metrics.cornerRadiusPx = 34;
+    scene.policy.darkMode = true;
+    auto icon = std::make_shared<IconRaster>();
+    icon->width = 1;
+    icon->height = 1;
+    icon->stride = 4;
+    icon->premultipliedBgra = { 20, 30, 40, 255 };
+    scene.items.push_back({ { 20, 80, 148, 208 }, L"Result", L"Application", icon, true, false });
+    const PixelRect output = { -1920, -100, 0, 980 };
+
+    RecordingCompositionBackend recorded;
+    bool presented = false;
+    if (ComposeUnifiedFrame(
+            recorded, request, &scene, output, OutputRotation::Identity,
+            true, true, false, presented) != FailureReason::None || !presented)
+    {
+        return 3;
+    }
+
+    values[CompositionTargetCount] = recorded.targetCount;
+    values[CompositionRootCount] = recorded.rootCount;
+    values[CompositionVisualCount] = recorded.visualCount;
+    values[CompositionSurfaceCount] = recorded.surfaceCount;
+    values[CompositionSurfaceClears] = recorded.surfaceClears;
+    values[CompositionCommandCount] = static_cast<std::int64_t>(recorded.commands.size());
+    for (std::size_t index = 0; index < recorded.commands.size() && index < 6; ++index)
+    {
+        values[CompositionCommand0 + index] = static_cast<std::int64_t>(recorded.commands[index]);
+    }
+    values[CompositionDesktopReferences] = recorded.desktopReferences;
+    values[CompositionOverlayDesktopReferences] = recorded.overlayDesktopReferences;
+    values[CompositionContentDesktopReferences] = recorded.contentDesktopReferences;
+    values[CompositionCropCount] = recorded.cropCount;
+    values[CompositionRotationNormalizations] = recorded.rotationNormalizations;
+    values[CompositionMaterialGraphNodes] = recorded.materialGraphNodes;
+    values[CompositionLuminanceWidth] = recorded.luminanceWidth;
+    values[CompositionLuminanceHeight] = recorded.luminanceHeight;
+    values[CompositionStagingBufferCount] = recorded.stagingBufferCount;
+    values[CompositionDoNotWaitMaps] = recorded.doNotWaitMaps;
+    values[CompositionMinimumReadbackIntervalMs] = recorded.minimumIntervalMs;
+    values[CompositionFocusedDisplacements] = recorded.focusedDisplacements;
+    values[CompositionFocusedScales] = recorded.focusedScales;
+    values[CompositionCopiedBgraIcons] = recorded.copiedBgraIcons;
+    values[CompositionHiconReferences] = recorded.hiconReferences;
+
+    RecordingCompositionBackend dirty;
+    if (ComposeUnifiedFrame(
+            dirty, request, &scene, output, OutputRotation::Identity,
+            true, true, false, presented) != FailureReason::None) return 3;
+    values[CompositionPresentedAfterDesktop] = dirty.presentedFrames;
+    if (ComposeUnifiedFrame(
+            dirty, request, &scene, output, OutputRotation::Identity,
+            false, false, false, presented) != FailureReason::None) return 3;
+    values[CompositionPresentedAfterTimeout] = dirty.presentedFrames;
+    if (ComposeUnifiedFrame(
+            dirty, request, &scene, output, OutputRotation::Identity,
+            false, false, false, presented) != FailureReason::None) return 3;
+    values[CompositionPresentedAfterUnchanged] = dirty.presentedFrames;
+    scene.generation = 2;
+    if (ComposeUnifiedFrame(
+            dirty, request, &scene, output, OutputRotation::Identity,
+            false, true, false, presented) != FailureReason::None) return 3;
+    values[CompositionPresentedAfterScene] = dirty.presentedFrames;
+    if (ComposeUnifiedFrame(
+            dirty, request, &scene, output, OutputRotation::Identity,
+            false, false, true, presented) != FailureReason::None) return 3;
+    values[CompositionPresentedAfterLifecycle] = dirty.presentedFrames;
     return 0;
 }
 #endif

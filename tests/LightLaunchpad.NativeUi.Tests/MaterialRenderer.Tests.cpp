@@ -50,6 +50,10 @@ extern "C" int LLP_MaterialRunFakeLifecycleScenario(
     std::int64_t* values,
     std::size_t valueCount);
 
+extern "C" int LLP_MaterialRunFakeCompositionScenario(
+    std::int64_t* values,
+    std::size_t valueCount);
+
 namespace
 {
 using llp::material::AdvanceLifecycle;
@@ -92,6 +96,43 @@ enum MaterialLifecycleValue : std::size_t
 };
 
 static_assert(sizeof(std::int64_t) == 8, "The private fake ABI requires 64-bit values.");
+
+enum MaterialCompositionValue : std::size_t
+{
+    CompositionTargetCount,
+    CompositionRootCount,
+    CompositionVisualCount,
+    CompositionSurfaceCount,
+    CompositionSurfaceClears,
+    CompositionCommandCount,
+    CompositionCommand0,
+    CompositionCommand1,
+    CompositionCommand2,
+    CompositionCommand3,
+    CompositionCommand4,
+    CompositionCommand5,
+    CompositionDesktopReferences,
+    CompositionOverlayDesktopReferences,
+    CompositionContentDesktopReferences,
+    CompositionCropCount,
+    CompositionRotationNormalizations,
+    CompositionMaterialGraphNodes,
+    CompositionLuminanceWidth,
+    CompositionLuminanceHeight,
+    CompositionStagingBufferCount,
+    CompositionDoNotWaitMaps,
+    CompositionMinimumReadbackIntervalMs,
+    CompositionFocusedDisplacements,
+    CompositionFocusedScales,
+    CompositionCopiedBgraIcons,
+    CompositionHiconReferences,
+    CompositionPresentedAfterDesktop,
+    CompositionPresentedAfterTimeout,
+    CompositionPresentedAfterUnchanged,
+    CompositionPresentedAfterScene,
+    CompositionPresentedAfterLifecycle,
+    MaterialCompositionValueCount
+};
 
 struct ExpectedModernPixel
 {
@@ -691,6 +732,60 @@ void TestPrivateFakeAbiIsExplicitAndBounded()
     Pass("MaterialRenderer_PrivateFakeAbiIsExplicitAndBounded");
 }
 
+void TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit()
+{
+    constexpr std::int64_t guard = 0x2233445566778811ll;
+    std::array<std::int64_t, MaterialCompositionValueCount + 1> values = {};
+    values.back() = guard;
+    Require(LLP_MaterialRunFakeCompositionScenario(
+                values.data(), MaterialCompositionValueCount) == 0,
+        "The production composition path rejected the recording backend scenario.");
+    Require(values.back() == guard,
+        "The private composition ABI wrote beyond the caller-provided value count.");
+    Require(values[CompositionTargetCount] == 1 && values[CompositionRootCount] == 1,
+        "Spotlight composition did not create one target and one root.");
+    Require(values[CompositionVisualCount] == 3 && values[CompositionSurfaceCount] == 3,
+        "Spotlight composition did not create exactly three child visuals and surfaces.");
+    Require(values[CompositionSurfaceClears] == 3,
+        "A redraw did not clear every premultiplied-alpha surface to transparent.");
+    const std::array<std::int64_t, 6> expectedCommands = { 1, 2, 3, 4, 5, 6 };
+    Require(values[CompositionCommandCount] == static_cast<std::int64_t>(expectedCommands.size()),
+        "The unified frame emitted an unexpected number of render commands.");
+    for (std::size_t index = 0; index < expectedCommands.size(); ++index)
+    {
+        Require(values[CompositionCommand0 + index] == expectedCommands[index],
+            "The unified frame command order changed.");
+    }
+    Require(values[CompositionDesktopReferences] == 1
+            && values[CompositionOverlayDesktopReferences] == 0
+            && values[CompositionContentDesktopReferences] == 0,
+        "Desktop pixels escaped the single material input into overlay or content.");
+    Require(values[CompositionCropCount] == 1
+            && values[CompositionRotationNormalizations] == 1,
+        "Desktop crop or output rotation was applied more than once.");
+    Require(values[CompositionMaterialGraphNodes] == 5,
+        "The material graph was not the bounded blur/tint/clarity/rim/shadow graph.");
+    Require(values[CompositionLuminanceWidth] == 16
+            && values[CompositionLuminanceHeight] == 12
+            && values[CompositionStagingBufferCount] == 2
+            && values[CompositionDoNotWaitMaps] == 1
+            && values[CompositionMinimumReadbackIntervalMs] == 100,
+        "Luminance analysis was not a nonblocking 16x12 alternating readback.");
+    Require(values[CompositionFocusedDisplacements] == 0
+            && values[CompositionFocusedScales] == 0,
+        "A focused tile displaced or scaled desktop pixels.");
+    Require(values[CompositionCopiedBgraIcons] == 1
+            && values[CompositionHiconReferences] == 0,
+        "Content did not consume the scene's copied BGRA icon bytes.");
+    Require(values[CompositionPresentedAfterDesktop] == 1
+            && values[CompositionPresentedAfterTimeout] == 1
+            && values[CompositionPresentedAfterUnchanged] == 1
+            && values[CompositionPresentedAfterScene] == 2
+            && values[CompositionPresentedAfterLifecycle] == 3,
+        "Presentation was not limited to desktop, scene, or rebuild/freeze dirtiness.");
+    Pass("MaterialRenderer_UnifiedCompositionUsesThreeIsolatedLayersAndOneCommit");
+}
+
 void TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport()
 {
     const llp::material::PixelRect output = { -1920, -100, 0, 980 };
@@ -936,6 +1031,7 @@ int main()
         TestRendererConstructionAndImmediateDestructionStress();
         TestRendererImmediateShowHideStress();
         TestPrivateFakeAbiIsExplicitAndBounded();
+        TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit();
         TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport();
         TestFirstFrameDeadlineAndTimeoutDoNotRedraw();
         TestFramesReleaseBeforeReacquireRebuildAndHide();
@@ -948,7 +1044,7 @@ int main()
         TestAcquireDeviceRemovalUsesOneBoundedRebuild();
         TestReleaseGenericFailureFallsBackWithoutRebuild();
         TestHideRequestRemainsAsynchronous();
-        constexpr int expected = 24;
+        constexpr int expected = 25;
         std::cout << passed << "/" << expected << " tests passed\n";
         return passed == expected ? 0 : 1;
     }
