@@ -2,27 +2,27 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-09 19:44:45 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-09 19:49:18 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `7be8d13`
+- HEAD: `db24ecf`
 - Remote main: `origin/main@33e91c2`
 - Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
 - Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
 - Goal status: active; LLP-013 remains the only task in progress.
-- Current gate: LLP-013 Task 2 quality-review corrections are verified locally but review remains pending; Task 3 has not started.
+- Current gate: LLP-013 Task 2 is complete after independent specification and code-quality review; Task 3 renderer-thread GPU bootstrap is the next gate and has not started.
 
-## LLP-013 Task 2 Implementation Evidence (Review Pending)
+## LLP-013 Task 2 Completion Evidence
 
-Status at 2026-08-09 19:27 +08:00: Task 2 implementation exists but is not complete; LLP-013 remains the sole `in_progress` project task. Specification re-review and code-quality review are pending, and Task 3 must not start yet.
+Status at 2026-08-09 19:49 +08:00: Task 2 complete; LLP-013 remains the sole `in_progress` project task, and Task 3 is the next implementation gate.
 
 Changed files in the initial implementation:
 
 - `src/LightLaunchpad.NativeUi/MaterialRenderer.{h,cpp}` - immutable scene/search/item/icon-raster contracts, mutex-protected latest-only scene ownership, and owned Win32 icon rasterization.
 - `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp` - real `HICON`, copied BGRA lifetime, premultiplication, scene replacement, and latest-generation ownership checks.
-- Initial implementation commit: `cde84d2f96e8ce5ef3a78cada0ce017b75590556` (`feat: add immutable material scenes`); review found its legacy-mask alpha heuristic incomplete.
-- Legacy-mask correction commit: `7be8d1372995e341596a782d896f388a8ad3f90d` (`fix: preserve legacy icon alpha ownership`). The subsequent modern-alpha test correction remains pending its scoped commit and quality re-review.
+- Initial implementation commit: `cde84d2f96e8ce5ef3a78cada0ce017b75590556` (`feat: add immutable material scenes`); specification review found its legacy-mask alpha heuristic incomplete.
+- Legacy-mask correction commit: `7be8d1372995e341596a782d896f388a8ad3f90d` (`fix: preserve legacy icon alpha ownership`). Modern-alpha ownership proof commit: `db24ecfeaa2fdf41e100c517108853c7a9e586ad` (`test: prove modern icon alpha ownership`).
 
 Original missing-contract RED evidence:
 
@@ -34,20 +34,27 @@ Original missing-contract RED evidence:
   - `tests\LightLaunchpad.NativeUi.Tests\MaterialRenderer.Tests.cpp:326:20: error: 'LatestSceneSlot' is not a member of 'llp::material'`
 - `lightlaunchpad-material-renderer-tests-*` roots were 0 before and 0 after; added and missing sets were both empty.
 
-Specification-correction evidence in progress:
+Specification-correction evidence:
 
 - Specification review found that the initial `RGB != 0` legacy-alpha heuristic could not distinguish an opaque black AND/XOR pixel from a transparent black pixel. A deterministic legacy-mask regression produced exit 1 after the first six passes with exact failure `FAIL Legacy opaque black pixel lost full alpha coverage.`; temp roots again remained 0 -> 0 with empty added/missing sets.
-- The correction renders the same icon over opaque black and white backgrounds, copies both results before DIB cleanup, derives alpha from their per-channel transmission delta, and retains the black-background RGB as premultiplied color. Final fresh verification reports `MaterialRenderer` 8/8 twice and `AdaptiveEnvironment` 3/3 under WinLibs-first Windows PowerShell 5.1; both temp-prefix sets remained 0 -> 0 with empty added/missing sets. The diff gate, scoped fix commit, specification re-review, and code-quality review remain pending.
+- The correction renders the same icon over opaque black and white backgrounds, copies both results before DIB cleanup, derives alpha from their per-channel transmission delta, and retains the black-background RGB as premultiplied color. It does not retain, copy, or destroy the input `HICON`; GDI selection is restored before bitmap/DC cleanup on every return and exception path.
 - The undocumented 1024 px cap and 1025 px test are removed. Validation now uses positive size plus checked `int` stride and `size_t` byte-count arithmetic; the regression uses `INT_MAX` to reject overflow without attempting a huge allocation.
 - No renderer thread/GPU bootstrap, build-tool change, protected EXE/install/startup mutation, `C:\TOOL` mutation, push, tag, release, or Task 3 work is included.
 
-Code-quality correction evidence in progress:
+Code-quality correction and final verification evidence:
 
 - Quality review returned `Ready: No` because the modern test source used invalid `B=200, A=128` data, did not prove two distinct legal premultiplied colors through DrawIconEx byte rounding, and did not assert that caller-owned modern and legacy `HICON` destruction succeeded.
 - The strengthened modern fixture now uses two distinct legal premultiplied BGRA source pixels, `{B=64,G=32,R=16,A=128}` and `{B=24,G=144,R=80,A=192}`. It compares all four recovered channels against one CreateIconIndirect/DrawIconEx blend with a `+127 / 255` byte-rounding model and a `+/-1` tolerance, so hard-coded output, changed color, alpha loss, and a second RGB-alpha multiplication are observable.
 - Controlled mutation RED command: WinLibs-first Windows PowerShell 5.1 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\LightLaunchpad.NativeUi.Tests\MaterialRenderer.Tests.ps1`; production was temporarily changed to multiply the recovered black-background RGB by alpha a second time. It exited 1 with exact diagnostic text `Modern icon blue channel changed beyond DrawIconEx blending or was premultiplied again. actual=16 expected=32`. The mutation was restored before GREEN and is absent from the production diff. Temp roots remained 0 -> 0 with empty added/missing sets.
 - Both modern and legacy caller-owned handles now require `DestroyIcon(...) != FALSE` immediately after rasterization, proving the production path neither destroys nor retains the input handle.
-- Final fresh GREEN under the same WinLibs-first Windows PowerShell 5.1 environment reports `MaterialRenderer` 8/8 twice and `AdaptiveEnvironment` 3/3; both test temp-prefix sets remained 0 -> 0 with empty added/missing sets. Task 2 remains `in_progress`; scoped commit, review, and reviewer confirmation are pending.
+- Final fresh GREEN under the same WinLibs-first Windows PowerShell 5.1 environment reports `MaterialRenderer` 8/8 twice, post-commit `MaterialRenderer` 8/8, and `AdaptiveEnvironment` 3/3. Independent final specification and code-quality reviews each reran `MaterialRenderer` 8/8 plus `AdaptiveEnvironment` 3/3; all runs exited 0 and both GUID temp-prefix sets remained 0 -> 0 with added=0 and missing=0. `git diff --check` and commit checks passed; no test process remained.
+- Final specification review: PASS with zero findings and no scope creep. Final code-quality review: Ready Yes with Critical=0, Important=0, and Minor=0. The reviews reconfirmed checked size arithmetic, immutable `shared_ptr<const SceneSnapshot>` ownership, mutex-protected latest-only/null/`Take` semantics, copied pixel lifetime, and caller-owned icon lifetime.
+- Task 2 is ownership/nonvisual infrastructure and does not yet build or run the renderer thread, so renderer frame-time, GPU, and screenshot evidence are not applicable at this checkpoint. The protected real EXE remains PID `29376` at `artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe` with SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run remains its exact quoted path, stable-install absence and `C:\TOOL` SHA remain unchanged, and `LLP_reconstruction/` remains untracked/unstaged.
+- No renderer-thread/GPU bootstrap, build-tool change, protected EXE/install/startup mutation, `C:\TOOL` mutation, push, tag, release, or Task 3 work is included.
+
+Next step:
+
+- Start Task 3 RED for the production build and renderer-thread GPU bootstrap. Keep LLP-013 as the only project task in progress and do not start Task 4 until Task 3 implementation, specification review, quality review, and evidence update close.
 
 ## LLP-013 Task 1 Completion Evidence
 
