@@ -1,5 +1,43 @@
 # Error Log
 
+## [ERR-20260809-010] spotlight-probe-uintptr-conversion
+
+**Logged**: 2026-08-09T18:02:00+08:00
+**Priority**: medium
+**Status**: in_progress
+**Area**: tests
+
+### Summary
+
+The complete NativeUi baseline passed 13 suites, then the Spotlight real-EXE probe failed before its first activation because Windows PowerShell 5.1 cannot directly convert a nonzero `Int32` to `UIntPtr`.
+
+### Error
+
+```text
+Cannot convert the "19541" value of type "System.Int32" to type "System.UIntPtr".
+SpotlightFlowBehavior.Tests.ps1:209
+```
+
+### Context
+
+- The first failing expression is `[UIntPtr]0x4C55` in `SpotlightFlowBehavior.Tests.ps1`.
+- The file also directly casts variable key/character values and nonzero command identifiers to `UIntPtr`.
+- Production NativeUi did not receive the first failing message; this is a test-driver interop conversion issue.
+- The protected runtime path, PID, SHA256, HKCU Run value, stable-install absence, and `C:\TOOL` SHA256 remained unchanged after the stopped baseline.
+- The only matching Spotlight temp root was created on 2026-08-02, contains no reparse points or running executable, and was left untouched.
+
+### Suggested Fix
+
+As in the reviewed Launchpad probe fix, use `UIntPtr::new([uint64]value)` for every nonzero or variable WPARAM and retain `UIntPtr::Zero` for zero; run the complete real-EXE Spotlight flow twice under Windows PowerShell 5.1, obtain independent spec and quality reviews, then restart the complete 16-suite baseline from suite 1.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/SpotlightFlowBehavior.Tests.ps1`
+- See Also: `ERR-20260809-007`
+
+---
+
 ## [ERR-20260809-009] search-index-windows-powershell-string-overload
 
 **Logged**: 2026-08-09T17:05:00+08:00
