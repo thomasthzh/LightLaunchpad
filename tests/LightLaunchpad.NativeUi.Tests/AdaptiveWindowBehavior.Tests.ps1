@@ -209,19 +209,16 @@ function Invoke-LlpAdaptiveCase {
         Assert-True ([LightLaunchpadAdaptiveProbeNative]::GetCursorPos([ref]$llpCursor)) 'Could not read the cursor position before WM_DISPLAYCHANGE.'
         $llpCursorMonitor = [LightLaunchpadAdaptiveProbeNative]::MonitorFromPoint($llpCursor, [LightLaunchpadAdaptiveProbeNative]::MonitorDefaultToNull)
         Assert-True ($llpCursorMonitor -ne [IntPtr]::Zero) 'Could not resolve the cursor monitor before WM_DISPLAYCHANGE.'
-        $llpCursorMonitorInfo = [LightLaunchpadAdaptiveProbeNative+MONITORINFO]::new()
-        $llpCursorMonitorInfo.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type][LightLaunchpadAdaptiveProbeNative+MONITORINFO])
-        Assert-True ([LightLaunchpadAdaptiveProbeNative]::GetMonitorInfoW($llpCursorMonitor, [ref]$llpCursorMonitorInfo)) 'Could not read the cursor monitor work area before WM_DISPLAYCHANGE.'
-        $llpCursorDpiX = [uint32]0
-        $llpCursorDpiY = [uint32]0
-        $llpCursorDpiResult = [LightLaunchpadAdaptiveProbeNative]::GetDpiForMonitor($llpCursorMonitor, [LightLaunchpadAdaptiveProbeNative]::EffectiveDpi, [ref]$llpCursorDpiX, [ref]$llpCursorDpiY)
-        Assert-True ($llpCursorDpiResult -ge 0) 'Could not read the effective DPI for the cursor monitor.'
-        Assert-True ($llpCursorDpiX -gt 0 -and $llpCursorDpiY -gt 0) 'Cursor monitor effective DPI was invalid.'
         Assert-Equal $llpWindow ([LightLaunchpadAdaptiveProbeNative]::GetForegroundWindow()) 'NativeUi lost foreground before WM_DISPLAYCHANGE.'
         [void][LightLaunchpadAdaptiveProbeNative]::SendMessage($llpWindow, 0x007E, [UIntPtr]::Zero, [IntPtr]::Zero)
+        $llpWindowDpi = [LightLaunchpadAdaptiveProbeNative]::GetDpiForWindow($llpWindow)
+        Assert-True ($llpWindowDpi -gt 0) 'NativeUi window DPI was invalid after WM_DISPLAYCHANGE.'
+        $llpCursorMonitorInfo = [LightLaunchpadAdaptiveProbeNative+MONITORINFO]::new()
+        $llpCursorMonitorInfo.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type][LightLaunchpadAdaptiveProbeNative+MONITORINFO])
+        Assert-True ([LightLaunchpadAdaptiveProbeNative]::GetMonitorInfoW($llpCursorMonitor, [ref]$llpCursorMonitorInfo)) 'Could not read the cursor monitor work area after WM_DISPLAYCHANGE.'
         [void][LightLaunchpadAdaptiveProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
         $llpReady = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpReadyPath | ConvertFrom-Json
-        Assert-Equal $llpCursorDpiX ([uint32]$llpReady.effectiveDpi) 'Display-change reposition did not use the cursor monitor effective DPI.'
+        Assert-Equal $llpWindowDpi ([uint32]$llpReady.effectiveDpi) 'Display-change reposition did not match the NativeUi window DPI.'
         Assert-Equal 'cursor' ([string]$llpReady.monitorSource) 'Display-change reposition did not use the cursor monitor fallback.'
 
         $llpDisplayRect = [LightLaunchpadAdaptiveProbeNative+RECT]::new()
@@ -273,7 +270,6 @@ using System;
 using System.Runtime.InteropServices;
 public static class LightLaunchpadAdaptiveProbeNative {
     public const uint MonitorDefaultToNull = 0;
-    public const int EffectiveDpi = 0;
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO { public uint cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
@@ -300,8 +296,8 @@ public static class LightLaunchpadAdaptiveProbeNative {
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
     [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(POINT point, uint flags);
     [DllImport("user32.dll", ExactSpelling = true)] public static extern bool GetMonitorInfoW(IntPtr monitor, ref MONITORINFO info);
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
-    [DllImport("shcore.dll", ExactSpelling = true)] public static extern int GetDpiForMonitor(IntPtr monitor, int dpiType, out uint dpiX, out uint dpiY);
     public static IntPtr SendDpiChanged(IntPtr hwnd, uint dpi, RECT suggested) {
         IntPtr memory = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(RECT)));
         try {
