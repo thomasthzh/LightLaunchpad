@@ -5,6 +5,7 @@
 
 #include "MaterialRenderer.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -116,14 +117,28 @@ enum MaterialCompositionValue : std::size_t
     CompositionContentDesktopReferences,
     CompositionCropCount,
     CompositionRotationNormalizations,
-    CompositionMaterialGraphNodes,
+    CompositionBlurPasses,
+    CompositionTintPasses,
+    CompositionSearchOpticalPasses,
+    CompositionSearchOpticalSamples,
+    CompositionSearchCenterDisplacementMilli,
+    CompositionSearchEdgeMaximumDisplacementMilli,
+    CompositionSearchSourceOutOfBounds,
+    CompositionSearchVerticalBiasMilli,
+    CompositionReducedMotionMaximumDisplacementMilli,
+    CompositionClarityShapePasses,
+    CompositionClarityCenterOpacityMilli,
+    CompositionClarityEdgeOpacityMilli,
+    CompositionLocalContrastGuards,
+    CompositionRimPasses,
+    CompositionShadowPasses,
     CompositionLuminanceWidth,
     CompositionLuminanceHeight,
     CompositionStagingBufferCount,
     CompositionDoNotWaitMaps,
     CompositionMinimumReadbackIntervalMs,
-    CompositionFocusedDisplacements,
-    CompositionFocusedScales,
+    CompositionFocusedDisplacementMilli,
+    CompositionFocusedScaleDeltaMilli,
     CompositionCopiedBgraIcons,
     CompositionHiconReferences,
     CompositionPresentedAfterDesktop,
@@ -732,16 +747,50 @@ void TestPrivateFakeAbiIsExplicitAndBounded()
     Pass("MaterialRenderer_PrivateFakeAbiIsExplicitAndBounded");
 }
 
-void TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit()
+std::array<std::int64_t, MaterialCompositionValueCount> RunCompositionScenario()
 {
     constexpr std::int64_t guard = 0x2233445566778811ll;
-    std::array<std::int64_t, MaterialCompositionValueCount + 1> values = {};
-    values.back() = guard;
+    std::array<std::int64_t, MaterialCompositionValueCount + 1> guarded = {};
+    guarded.back() = guard;
     Require(LLP_MaterialRunFakeCompositionScenario(
-                values.data(), MaterialCompositionValueCount) == 0,
+                guarded.data(), MaterialCompositionValueCount) == 0,
         "The production composition path rejected the recording backend scenario.");
-    Require(values.back() == guard,
+    Require(guarded.back() == guard,
         "The private composition ABI wrote beyond the caller-provided value count.");
+    std::array<std::int64_t, MaterialCompositionValueCount> values = {};
+    std::copy_n(guarded.begin(), values.size(), values.begin());
+    return values;
+}
+
+bool SatisfiesOpticalMaterialContract(
+    const std::array<std::int64_t, MaterialCompositionValueCount>& values)
+{
+    return values[CompositionBlurPasses] == 1
+        && values[CompositionTintPasses] == 1
+        && values[CompositionSearchOpticalPasses] == 1
+        && values[CompositionSearchOpticalSamples] == 5
+        && values[CompositionSearchCenterDisplacementMilli] >= 0
+        && values[CompositionSearchCenterDisplacementMilli] <= 500
+        && values[CompositionSearchEdgeMaximumDisplacementMilli] > 0
+        && values[CompositionSearchEdgeMaximumDisplacementMilli] <= 1500
+        && values[CompositionSearchSourceOutOfBounds] == 0
+        && std::abs(values[CompositionSearchVerticalBiasMilli]) <= 1
+        && values[CompositionReducedMotionMaximumDisplacementMilli] == 0
+        && values[CompositionClarityShapePasses] == 1
+        && values[CompositionClarityCenterOpacityMilli] >= 0
+        && values[CompositionClarityEdgeOpacityMilli]
+            > values[CompositionClarityCenterOpacityMilli]
+        && values[CompositionClarityEdgeOpacityMilli] <= 250
+        && values[CompositionLocalContrastGuards] == 2
+        && values[CompositionRimPasses] == 1
+        && values[CompositionShadowPasses] == 1
+        && values[CompositionFocusedDisplacementMilli] == 0
+        && values[CompositionFocusedScaleDeltaMilli] == 0;
+}
+
+void TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit()
+{
+    const auto values = RunCompositionScenario();
     Require(values[CompositionTargetCount] == 1 && values[CompositionRootCount] == 1,
         "Spotlight composition did not create one target and one root.");
     Require(values[CompositionVisualCount] == 3 && values[CompositionSurfaceCount] == 3,
@@ -763,17 +812,14 @@ void TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit()
     Require(values[CompositionCropCount] == 1
             && values[CompositionRotationNormalizations] == 1,
         "Desktop crop or output rotation was applied more than once.");
-    Require(values[CompositionMaterialGraphNodes] == 5,
-        "The material graph was not the bounded blur/tint/clarity/rim/shadow graph.");
+    Require(SatisfiesOpticalMaterialContract(values),
+        "The shared production orchestration omitted a bounded optical, clarity, guard, or focus command.");
     Require(values[CompositionLuminanceWidth] == 16
             && values[CompositionLuminanceHeight] == 12
             && values[CompositionStagingBufferCount] == 2
             && values[CompositionDoNotWaitMaps] == 1
             && values[CompositionMinimumReadbackIntervalMs] == 100,
         "Luminance analysis was not a nonblocking 16x12 alternating readback.");
-    Require(values[CompositionFocusedDisplacements] == 0
-            && values[CompositionFocusedScales] == 0,
-        "A focused tile displaced or scaled desktop pixels.");
     Require(values[CompositionCopiedBgraIcons] == 1
             && values[CompositionHiconReferences] == 0,
         "Content did not consume the scene's copied BGRA icon bytes.");
@@ -784,6 +830,29 @@ void TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit()
             && values[CompositionPresentedAfterLifecycle] == 3,
         "Presentation was not limited to desktop, scene, or rebuild/freeze dirtiness.");
     Pass("MaterialRenderer_UnifiedCompositionUsesThreeIsolatedLayersAndOneCommit");
+}
+
+void TestCompositionContractRejectsDiscardedAndTransformedCommands()
+{
+    const auto valid = RunCompositionScenario();
+    auto discardedSearch = valid;
+    discardedSearch[CompositionSearchOpticalPasses] = 0;
+    Require(!SatisfiesOpticalMaterialContract(discardedSearch),
+        "The composition test accepted a backend that discarded the search optical response.");
+    auto discardedClarity = valid;
+    discardedClarity[CompositionClarityShapePasses] = 0;
+    Require(!SatisfiesOpticalMaterialContract(discardedClarity),
+        "The composition test accepted a backend that discarded center-to-edge clarity shaping.");
+    auto discardedGuards = valid;
+    discardedGuards[CompositionLocalContrastGuards] = 0;
+    Require(!SatisfiesOpticalMaterialContract(discardedGuards),
+        "The composition test accepted a backend that discarded local contrast guards.");
+    auto transformedFocus = valid;
+    transformedFocus[CompositionFocusedDisplacementMilli] = 750;
+    transformedFocus[CompositionFocusedScaleDeltaMilli] = 100;
+    Require(!SatisfiesOpticalMaterialContract(transformedFocus),
+        "The composition test accepted a focused tile displacement or scale transform.");
+    Pass("MaterialRenderer_CompositionContractRejectsDiscardedAndTransformedCommands");
 }
 
 void TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport()
@@ -1032,6 +1101,7 @@ int main()
         TestRendererImmediateShowHideStress();
         TestPrivateFakeAbiIsExplicitAndBounded();
         TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit();
+        TestCompositionContractRejectsDiscardedAndTransformedCommands();
         TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport();
         TestFirstFrameDeadlineAndTimeoutDoNotRedraw();
         TestFramesReleaseBeforeReacquireRebuildAndHide();
@@ -1044,7 +1114,7 @@ int main()
         TestAcquireDeviceRemovalUsesOneBoundedRebuild();
         TestReleaseGenericFailureFallsBackWithoutRebuild();
         TestHideRequestRemainsAsynchronous();
-        constexpr int expected = 25;
+        constexpr int expected = 26;
         std::cout << passed << "/" << expected << " tests passed\n";
         return passed == expected ? 0 : 1;
     }

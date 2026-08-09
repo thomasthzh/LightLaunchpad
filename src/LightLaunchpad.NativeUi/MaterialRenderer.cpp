@@ -214,6 +214,126 @@ enum class FrameCommand : std::int64_t
     Commit = 6
 };
 
+struct SearchOpticalPoint
+{
+    float destinationXDip = 0.0f;
+    float destinationYDip = 0.0f;
+    SearchSample sample;
+};
+
+struct ContrastGuardCommand
+{
+    llp::geometry::Rect bounds;
+    float radiusPx = 0.0f;
+    float opacity = 0.0f;
+};
+
+struct MaterialFramePlan
+{
+    bool drawBlur = true;
+    bool drawTint = true;
+    bool drawClarityShape = true;
+    bool drawRim = true;
+    bool drawShadow = true;
+    DipRect searchBoundsDip;
+    llp::geometry::Rect searchBoundsPx;
+    std::vector<SearchOpticalPoint> searchOpticalPoints;
+    float clarityCenterOpacity = 0.0f;
+    float clarityEdgeOpacity = 0.0f;
+    std::vector<ContrastGuardCommand> contrastGuards;
+};
+
+struct FocusOverlayCommand
+{
+    llp::geometry::Rect bounds;
+    float displacementXDip = 0.0f;
+    float displacementYDip = 0.0f;
+    float scale = 1.0f;
+};
+
+struct OverlayFramePlan
+{
+    std::vector<FocusOverlayCommand> focusedItems;
+};
+
+bool IsValidRect(llp::geometry::Rect rect)
+{
+    return rect.right > rect.left && rect.bottom > rect.top;
+}
+
+MaterialFramePlan BuildMaterialFramePlan(
+    const SceneSnapshot& scene,
+    const MaterialTone& tone)
+{
+    MaterialFramePlan plan;
+    plan.clarityCenterOpacity = std::clamp(0.04f + tone.tintOpacity * 0.20f, 0.04f, 0.08f);
+    plan.clarityEdgeOpacity = std::clamp(plan.clarityCenterOpacity + 0.08f, 0.12f, 0.20f);
+    const int dpi = std::max(1, scene.metrics.dpi);
+    const float dipPerPixel = 96.0f / static_cast<float>(dpi);
+    const auto& search = scene.metrics.search;
+    if (IsValidRect(search))
+    {
+        plan.searchBoundsPx = search;
+        plan.searchBoundsDip = {
+            search.left * dipPerPixel,
+            search.top * dipPerPixel,
+            search.right * dipPerPixel,
+            search.bottom * dipPerPixel
+        };
+        const float centerX = (plan.searchBoundsDip.left + plan.searchBoundsDip.right) * 0.5f;
+        const float centerY = (plan.searchBoundsDip.top + plan.searchBoundsDip.bottom) * 0.5f;
+        const std::array<std::pair<float, float>, 5> destinations = { {
+            { centerX, centerY },
+            { plan.searchBoundsDip.left, centerY },
+            { plan.searchBoundsDip.right, centerY },
+            { centerX, plan.searchBoundsDip.top },
+            { centerX, plan.searchBoundsDip.bottom }
+        } };
+        for (const auto& destination : destinations)
+        {
+            plan.searchOpticalPoints.push_back({
+                destination.first,
+                destination.second,
+                ComputeSearchSample(
+                    plan.searchBoundsDip,
+                    destination.first,
+                    destination.second,
+                    dpi,
+                    scene.policy.reducedMotion)
+            });
+        }
+    }
+
+    const float guardOpacity = std::clamp(0.12f + tone.tintOpacity * 0.50f, 0.16f, 0.24f);
+    if (IsValidRect(scene.metrics.searchText))
+    {
+        plan.contrastGuards.push_back({
+            scene.metrics.searchText,
+            static_cast<float>(std::max(1, (scene.metrics.searchText.bottom - scene.metrics.searchText.top) / 2)),
+            guardOpacity
+        });
+    }
+    for (const auto& item : scene.items)
+    {
+        if (!item.focused || !IsValidRect(item.bounds)) continue;
+        plan.contrastGuards.push_back({ item.bounds, 18.0f, guardOpacity });
+    }
+    return plan;
+}
+
+OverlayFramePlan BuildOverlayFramePlan(const SceneSnapshot& scene)
+{
+    OverlayFramePlan plan;
+    for (const auto& item : scene.items)
+    {
+        if (item.focused && IsValidRect(item.bounds))
+        {
+            plan.focusedItems.push_back({ item.bounds, 0.0f, 0.0f, 1.0f });
+        }
+    }
+    return plan;
+}
+
 class CompositionBackend
 {
 public:
@@ -228,8 +348,13 @@ public:
         UINT mapFlags,
         std::uint32_t minimumIntervalMs) = 0;
     virtual float RelativeLuminance() const = 0;
-    virtual FailureReason DrawMaterial(const SceneSnapshot& scene, const MaterialTone& tone) = 0;
-    virtual FailureReason DrawOverlay(const SceneSnapshot& scene) = 0;
+    virtual FailureReason DrawMaterial(
+        const SceneSnapshot& scene,
+        const MaterialTone& tone,
+        const MaterialFramePlan& plan) = 0;
+    virtual FailureReason DrawOverlay(
+        const SceneSnapshot& scene,
+        const OverlayFramePlan& plan) = 0;
     virtual FailureReason DrawContent(const SceneSnapshot& scene) = 0;
     virtual FailureReason Commit() = 0;
 };
@@ -273,9 +398,11 @@ FailureReason ComposeUnifiedFrame(
     }
     const MaterialTone tone = ResolveMaterialTone(
         backend.RelativeLuminance(), scene.policy.darkMode);
-    failure = backend.DrawMaterial(scene, tone);
+    const MaterialFramePlan materialPlan = BuildMaterialFramePlan(scene, tone);
+    const OverlayFramePlan overlayPlan = BuildOverlayFramePlan(scene);
+    failure = backend.DrawMaterial(scene, tone, materialPlan);
     if (failure != FailureReason::None) return failure;
-    failure = backend.DrawOverlay(scene);
+    failure = backend.DrawOverlay(scene, overlayPlan);
     if (failure != FailureReason::None) return failure;
     failure = backend.DrawContent(scene);
     if (failure != FailureReason::None) return failure;
@@ -859,7 +986,10 @@ public:
 
     float RelativeLuminance() const override { return relativeLuminance_; }
 
-    FailureReason DrawMaterial(const SceneSnapshot& scene, const MaterialTone& tone) override
+    FailureReason DrawMaterial(
+        const SceneSnapshot& scene,
+        const MaterialTone& tone,
+        const MaterialFramePlan& plan) override
     {
         ComOwner<IDXGISurface> desktopSurface;
         if (!retainedDesktop_.Get() || FAILED(retainedDesktop_.Get()->QueryInterface(
@@ -901,32 +1031,118 @@ public:
             context->PushLayer(parameters, layer.Get());
 
             const D2D1_MATRIX_3X2_F baseTransform = CropTransform(currentCrop_, currentRotation_);
-            context->SetTransform(baseTransform);
-            context->DrawImage(
-                blur.Get(),
-                D2D1::Point2F(0.0f, 0.0f),
-                D2D1::RectF(
-                    static_cast<float>(currentCrop_.left),
-                    static_cast<float>(currentCrop_.top),
-                    static_cast<float>(currentCrop_.right),
-                    static_cast<float>(currentCrop_.bottom)),
-                D2D1_INTERPOLATION_MODE_LINEAR,
-                D2D1_COMPOSITE_MODE_SOURCE_COPY);
+            const D2D1_RECT_F desktopSource = D2D1::RectF(
+                static_cast<float>(currentCrop_.left),
+                static_cast<float>(currentCrop_.top),
+                static_cast<float>(currentCrop_.right),
+                static_cast<float>(currentCrop_.bottom));
+            if (plan.drawBlur)
+            {
+                context->SetTransform(baseTransform);
+                context->DrawImage(
+                    blur.Get(),
+                    D2D1::Point2F(0.0f, 0.0f),
+                    desktopSource,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    D2D1_COMPOSITE_MODE_SOURCE_COPY);
+            }
             context->SetTransform(D2D1::Matrix3x2F::Identity());
+
+            if (plan.searchOpticalPoints.size() == 5 && IsValidRect(plan.searchBoundsPx))
+            {
+                ComOwner<ID2D1RoundedRectangleGeometry> searchBoundary;
+                const float searchRadius = static_cast<float>(
+                    std::max(1, (plan.searchBoundsPx.bottom - plan.searchBoundsPx.top) / 2));
+                factory.Get()->CreateRoundedRectangleGeometry(
+                    D2D1::RoundedRect(D2DRect(plan.searchBoundsPx), searchRadius, searchRadius),
+                    searchBoundary.Put());
+                ComOwner<ID2D1Layer> searchLayer;
+                context->CreateLayer(searchLayer.Put());
+                D2D1_LAYER_PARAMETERS1 searchParameters = D2D1::LayerParameters1();
+                searchParameters.geometricMask = searchBoundary.Get();
+                context->PushLayer(searchParameters, searchLayer.Get());
+                const float edgeBandPx = std::max(1.0f, 13.0f * static_cast<float>(std::max(1, scene.metrics.dpi)) / 96.0f);
+                const std::array<D2D1_RECT_F, 4> edgeBands = { {
+                    D2D1::RectF(
+                        static_cast<float>(plan.searchBoundsPx.left),
+                        static_cast<float>(plan.searchBoundsPx.top),
+                        std::min(static_cast<float>(plan.searchBoundsPx.right), static_cast<float>(plan.searchBoundsPx.left) + edgeBandPx),
+                        static_cast<float>(plan.searchBoundsPx.bottom)),
+                    D2D1::RectF(
+                        std::max(static_cast<float>(plan.searchBoundsPx.left), static_cast<float>(plan.searchBoundsPx.right) - edgeBandPx),
+                        static_cast<float>(plan.searchBoundsPx.top),
+                        static_cast<float>(plan.searchBoundsPx.right),
+                        static_cast<float>(plan.searchBoundsPx.bottom)),
+                    D2D1::RectF(
+                        static_cast<float>(plan.searchBoundsPx.left),
+                        static_cast<float>(plan.searchBoundsPx.top),
+                        static_cast<float>(plan.searchBoundsPx.right),
+                        std::min(static_cast<float>(plan.searchBoundsPx.bottom), static_cast<float>(plan.searchBoundsPx.top) + edgeBandPx)),
+                    D2D1::RectF(
+                        static_cast<float>(plan.searchBoundsPx.left),
+                        std::max(static_cast<float>(plan.searchBoundsPx.top), static_cast<float>(plan.searchBoundsPx.bottom) - edgeBandPx),
+                        static_cast<float>(plan.searchBoundsPx.right),
+                        static_cast<float>(plan.searchBoundsPx.bottom))
+                } };
+                const float pixelsPerDip = static_cast<float>(std::max(1, scene.metrics.dpi)) / 96.0f;
+                for (std::size_t index = 1; index < plan.searchOpticalPoints.size(); ++index)
+                {
+                    const auto& point = plan.searchOpticalPoints[index];
+                    const float deltaX = (point.sample.sourceXDip - point.destinationXDip) * pixelsPerDip;
+                    const float deltaY = (point.sample.sourceYDip - point.destinationYDip) * pixelsPerDip;
+                    context->PushAxisAlignedClip(edgeBands[index - 1], D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    context->SetTransform(baseTransform * D2D1::Matrix3x2F::Translation(-deltaX, -deltaY));
+                    context->DrawImage(
+                        blur.Get(),
+                        D2D1::Point2F(0.0f, 0.0f),
+                        desktopSource,
+                        D2D1_INTERPOLATION_MODE_LINEAR,
+                        D2D1_COMPOSITE_MODE_SOURCE_COPY);
+                    context->PopAxisAlignedClip();
+                }
+                context->SetTransform(D2D1::Matrix3x2F::Identity());
+                context->PopLayer();
+            }
 
             ComOwner<ID2D1SolidColorBrush> tint;
             context->CreateSolidColorBrush(D2DColor(tone.tint, tone.tintOpacity), tint.Put());
-            if (tint.Get()) context->FillRectangle(
+            if (plan.drawTint && tint.Get()) context->FillRectangle(
                 D2D1::RectF(0.0f, 0.0f, static_cast<float>(surfaceWidth_), static_cast<float>(surfaceHeight_)),
                 tint.Get());
-            ComOwner<ID2D1SolidColorBrush> clarity;
-            context->CreateSolidColorBrush(D2DColor(tone.guardedSurface, 0.12f), clarity.Put());
-            if (clarity.Get()) context->FillRectangle(
-                D2D1::RectF(0.0f, 0.0f, static_cast<float>(surfaceWidth_), static_cast<float>(surfaceHeight_)),
-                clarity.Get());
+            if (plan.drawClarityShape)
+            {
+                const std::array<D2D1_GRADIENT_STOP, 2> stops = { {
+                    { 0.0f, D2DColor(tone.guardedSurface, plan.clarityCenterOpacity) },
+                    { 1.0f, D2DColor(tone.guardedSurface, plan.clarityEdgeOpacity) }
+                } };
+                ComOwner<ID2D1GradientStopCollection> gradientStops;
+                context->CreateGradientStopCollection(
+                    stops.data(), static_cast<UINT32>(stops.size()),
+                    D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP, gradientStops.Put());
+                ComOwner<ID2D1RadialGradientBrush> clarity;
+                if (gradientStops.Get()) context->CreateRadialGradientBrush(
+                    D2D1::RadialGradientBrushProperties(
+                        D2D1::Point2F(surfaceWidth_ * 0.5f, surfaceHeight_ * 0.5f),
+                        D2D1::Point2F(0.0f, 0.0f),
+                        std::max(1.0f, surfaceWidth_ * 0.65f),
+                        std::max(1.0f, surfaceHeight_ * 0.65f)),
+                    gradientStops.Get(), clarity.Put());
+                if (clarity.Get()) context->FillRectangle(
+                    D2D1::RectF(0.0f, 0.0f, static_cast<float>(surfaceWidth_), static_cast<float>(surfaceHeight_)),
+                    clarity.Get());
+            }
+            for (const auto& guard : plan.contrastGuards)
+            {
+                ComOwner<ID2D1SolidColorBrush> guardBrush;
+                context->CreateSolidColorBrush(
+                    D2DColor(tone.guardedSurface, guard.opacity), guardBrush.Put());
+                if (guardBrush.Get()) context->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2DRect(guard.bounds), guard.radiusPx, guard.radiusPx),
+                    guardBrush.Get());
+            }
             ComOwner<ID2D1SolidColorBrush> shadow;
             context->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.20f), shadow.Put());
-            if (shadow.Get()) context->DrawRoundedRectangle(
+            if (plan.drawShadow && shadow.Get()) context->DrawRoundedRectangle(
                 D2D1::RoundedRect(
                     D2D1::RectF(2.0f, 3.0f, static_cast<float>(surfaceWidth_ - 2), static_cast<float>(surfaceHeight_ - 1)),
                     radius,
@@ -935,7 +1151,7 @@ public:
                 4.0f);
             ComOwner<ID2D1SolidColorBrush> rim;
             context->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.30f), rim.Put());
-            if (rim.Get()) context->DrawRoundedRectangle(
+            if (plan.drawRim && rim.Get()) context->DrawRoundedRectangle(
                 D2D1::RoundedRect(
                     D2D1::RectF(0.5f, 0.5f, static_cast<float>(surfaceWidth_) - 0.5f, static_cast<float>(surfaceHeight_) - 0.5f),
                     radius,
@@ -946,20 +1162,13 @@ public:
         });
     }
 
-    FailureReason DrawOverlay(const SceneSnapshot& scene) override
+    FailureReason DrawOverlay(
+        const SceneSnapshot& scene,
+        const OverlayFramePlan& plan) override
     {
         return DrawSurface(1, [&](ID2D1DeviceContext* context) {
             const auto& search = scene.metrics.search;
             const float searchRadius = static_cast<float>(std::max(1, (search.bottom - search.top) / 2));
-            const float centerX = (static_cast<float>(search.left) + static_cast<float>(search.right)) * 0.5f;
-            const float centerY = (static_cast<float>(search.top) + static_cast<float>(search.bottom)) * 0.5f;
-            (void)ComputeSearchSample(
-                { static_cast<float>(search.left), static_cast<float>(search.top),
-                    static_cast<float>(search.right), static_cast<float>(search.bottom) },
-                centerX,
-                centerY,
-                std::max(1, scene.metrics.dpi),
-                scene.policy.reducedMotion);
             ComOwner<ID2D1SolidColorBrush> searchFill;
             context->CreateSolidColorBrush(D2D1::ColorF(1.0f, scene.search.active ? 0.16f : 0.10f), searchFill.Put());
             if (searchFill.Get()) context->FillRoundedRectangle(
@@ -968,10 +1177,19 @@ public:
             context->CreateSolidColorBrush(D2D1::ColorF(1.0f, scene.search.active ? 0.55f : 0.28f), edge.Put());
             if (edge.Get()) context->DrawRoundedRectangle(
                 D2D1::RoundedRect(D2DRect(search), searchRadius, searchRadius), edge.Get(), 1.0f);
-            for (const auto& item : scene.items)
+            const float pixelsPerDip = static_cast<float>(std::max(1, scene.metrics.dpi)) / 96.0f;
+            for (const auto& focused : plan.focusedItems)
             {
-                if (!item.focused) continue;
-                const D2D1_ROUNDED_RECT tile = D2D1::RoundedRect(D2DRect(item.bounds), 18.0f, 18.0f);
+                const float centerX = (focused.bounds.left + focused.bounds.right) * 0.5f
+                    + focused.displacementXDip * pixelsPerDip;
+                const float centerY = (focused.bounds.top + focused.bounds.bottom) * 0.5f
+                    + focused.displacementYDip * pixelsPerDip;
+                const float halfWidth = (focused.bounds.right - focused.bounds.left) * 0.5f * focused.scale;
+                const float halfHeight = (focused.bounds.bottom - focused.bounds.top) * 0.5f * focused.scale;
+                const D2D1_ROUNDED_RECT tile = D2D1::RoundedRect(
+                    D2D1::RectF(centerX - halfWidth, centerY - halfHeight,
+                        centerX + halfWidth, centerY + halfHeight),
+                    18.0f, 18.0f);
                 ComOwner<ID2D1SolidColorBrush> focusShadow;
                 context->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.20f), focusShadow.Put());
                 if (focusShadow.Get()) context->DrawRoundedRectangle(tile, focusShadow.Get(), 5.0f);
@@ -2157,14 +2375,28 @@ enum MaterialCompositionValue : std::size_t
     CompositionContentDesktopReferences,
     CompositionCropCount,
     CompositionRotationNormalizations,
-    CompositionMaterialGraphNodes,
+    CompositionBlurPasses,
+    CompositionTintPasses,
+    CompositionSearchOpticalPasses,
+    CompositionSearchOpticalSamples,
+    CompositionSearchCenterDisplacementMilli,
+    CompositionSearchEdgeMaximumDisplacementMilli,
+    CompositionSearchSourceOutOfBounds,
+    CompositionSearchVerticalBiasMilli,
+    CompositionReducedMotionMaximumDisplacementMilli,
+    CompositionClarityShapePasses,
+    CompositionClarityCenterOpacityMilli,
+    CompositionClarityEdgeOpacityMilli,
+    CompositionLocalContrastGuards,
+    CompositionRimPasses,
+    CompositionShadowPasses,
     CompositionLuminanceWidth,
     CompositionLuminanceHeight,
     CompositionStagingBufferCount,
     CompositionDoNotWaitMaps,
     CompositionMinimumReadbackIntervalMs,
-    CompositionFocusedDisplacements,
-    CompositionFocusedScales,
+    CompositionFocusedDisplacementMilli,
+    CompositionFocusedScaleDeltaMilli,
     CompositionCopiedBgraIcons,
     CompositionHiconReferences,
     CompositionPresentedAfterDesktop,
@@ -2435,23 +2667,80 @@ public:
 
     float RelativeLuminance() const override { return 0.45f; }
 
-    FailureReason DrawMaterial(const SceneSnapshot&, const MaterialTone&) override
+    FailureReason DrawMaterial(
+        const SceneSnapshot& scene,
+        const MaterialTone&,
+        const MaterialFramePlan& plan) override
     {
         commands.push_back(FrameCommand::MaterialPass);
-        materialGraphNodes = 5;
+        blurPasses += plan.drawBlur ? 1 : 0;
+        tintPasses += plan.drawTint ? 1 : 0;
+        clarityShapePasses += plan.drawClarityShape ? 1 : 0;
+        rimPasses += plan.drawRim ? 1 : 0;
+        shadowPasses += plan.drawShadow ? 1 : 0;
+        clarityCenterOpacityMilli = static_cast<int>(std::lround(plan.clarityCenterOpacity * 1000.0f));
+        clarityEdgeOpacityMilli = static_cast<int>(std::lround(plan.clarityEdgeOpacity * 1000.0f));
+        localContrastGuards += static_cast<int>(plan.contrastGuards.size());
+        if (!plan.searchOpticalPoints.empty())
+        {
+            ++searchOpticalPasses;
+            searchOpticalSamples += static_cast<int>(plan.searchOpticalPoints.size());
+            searchCenterDisplacementMilli = static_cast<int>(std::lround(
+                plan.searchOpticalPoints.front().sample.displacementDip * 1000.0f));
+            float maximumEdgeDisplacement = 0.0f;
+            for (std::size_t index = 0; index < plan.searchOpticalPoints.size(); ++index)
+            {
+                const auto& point = plan.searchOpticalPoints[index];
+                if (index > 0)
+                {
+                    maximumEdgeDisplacement = std::max(
+                        maximumEdgeDisplacement, point.sample.displacementDip);
+                }
+                if (point.sample.sourceXDip < plan.searchBoundsDip.left
+                    || point.sample.sourceXDip > plan.searchBoundsDip.right
+                    || point.sample.sourceYDip < plan.searchBoundsDip.top
+                    || point.sample.sourceYDip > plan.searchBoundsDip.bottom)
+                {
+                    ++searchSourceOutOfBounds;
+                }
+            }
+            searchEdgeMaximumDisplacementMilli = static_cast<int>(std::lround(
+                maximumEdgeDisplacement * 1000.0f));
+            if (plan.searchOpticalPoints.size() >= 5)
+            {
+                const auto& top = plan.searchOpticalPoints[3];
+                const auto& bottom = plan.searchOpticalPoints[4];
+                searchVerticalBiasMilli = static_cast<int>(std::lround(
+                    ((top.sample.sourceYDip - top.destinationYDip)
+                        + (bottom.sample.sourceYDip - bottom.destinationYDip)) * 1000.0f));
+            }
+            if (scene.policy.reducedMotion)
+            {
+                float maximum = 0.0f;
+                for (const auto& point : plan.searchOpticalPoints)
+                {
+                    maximum = std::max(maximum, point.sample.displacementDip);
+                }
+                reducedMotionMaximumDisplacementMilli = static_cast<int>(std::lround(maximum * 1000.0f));
+            }
+        }
         return FailureReason::None;
     }
 
-    FailureReason DrawOverlay(const SceneSnapshot& scene) override
+    FailureReason DrawOverlay(
+        const SceneSnapshot&,
+        const OverlayFramePlan& plan) override
     {
         commands.push_back(FrameCommand::OverlayPass);
-        for (const auto& item : scene.items)
+        for (const auto& item : plan.focusedItems)
         {
-            if (item.focused)
-            {
-                focusedDisplacements += 0;
-                focusedScales += 0;
-            }
+            focusedDisplacementMilli = std::max(
+                focusedDisplacementMilli,
+                static_cast<int>(std::lround(std::hypot(
+                    item.displacementXDip, item.displacementYDip) * 1000.0f)));
+            focusedScaleDeltaMilli = std::max(
+                focusedScaleDeltaMilli,
+                static_cast<int>(std::lround(std::abs(item.scale - 1.0f) * 1000.0f)));
         }
         return FailureReason::None;
     }
@@ -2484,14 +2773,28 @@ public:
     int contentDesktopReferences = 0;
     int cropCount = 0;
     int rotationNormalizations = 0;
-    int materialGraphNodes = 0;
+    int blurPasses = 0;
+    int tintPasses = 0;
+    int searchOpticalPasses = 0;
+    int searchOpticalSamples = 0;
+    int searchCenterDisplacementMilli = 0;
+    int searchEdgeMaximumDisplacementMilli = 0;
+    int searchSourceOutOfBounds = 0;
+    int searchVerticalBiasMilli = 0;
+    int reducedMotionMaximumDisplacementMilli = 0;
+    int clarityShapePasses = 0;
+    int clarityCenterOpacityMilli = 0;
+    int clarityEdgeOpacityMilli = 0;
+    int localContrastGuards = 0;
+    int rimPasses = 0;
+    int shadowPasses = 0;
     int luminanceWidth = 0;
     int luminanceHeight = 0;
     int stagingBufferCount = 0;
     int doNotWaitMaps = 0;
     int minimumIntervalMs = 0;
-    int focusedDisplacements = 0;
-    int focusedScales = 0;
+    int focusedDisplacementMilli = 0;
+    int focusedScaleDeltaMilli = 0;
     int copiedBgraIcons = 0;
     int hiconReferences = 0;
     int presentedFrames = 0;
@@ -2628,6 +2931,8 @@ extern "C" int LLP_MaterialRunFakeCompositionScenario(
     scene.generation = 1;
     scene.metrics.dpi = 96;
     scene.metrics.cornerRadiusPx = 34;
+    scene.metrics.search = { 40, 40, 360, 100 };
+    scene.metrics.searchText = { 60, 45, 340, 95 };
     scene.policy.darkMode = true;
     auto icon = std::make_shared<IconRaster>();
     icon->width = 1;
@@ -2645,6 +2950,17 @@ extern "C" int LLP_MaterialRunFakeCompositionScenario(
     {
         return 3;
     }
+    SceneSnapshot reducedScene = scene;
+    reducedScene.policy.reducedMotion = true;
+    RecordingCompositionBackend reduced;
+    if (ComposeUnifiedFrame(
+            reduced, request, &reducedScene, output, OutputRotation::Identity,
+            true, true, false, presented) != FailureReason::None || !presented)
+    {
+        return 3;
+    }
+    recorded.reducedMotionMaximumDisplacementMilli =
+        reduced.reducedMotionMaximumDisplacementMilli;
 
     values[CompositionTargetCount] = recorded.targetCount;
     values[CompositionRootCount] = recorded.rootCount;
@@ -2661,14 +2977,28 @@ extern "C" int LLP_MaterialRunFakeCompositionScenario(
     values[CompositionContentDesktopReferences] = recorded.contentDesktopReferences;
     values[CompositionCropCount] = recorded.cropCount;
     values[CompositionRotationNormalizations] = recorded.rotationNormalizations;
-    values[CompositionMaterialGraphNodes] = recorded.materialGraphNodes;
+    values[CompositionBlurPasses] = recorded.blurPasses;
+    values[CompositionTintPasses] = recorded.tintPasses;
+    values[CompositionSearchOpticalPasses] = recorded.searchOpticalPasses;
+    values[CompositionSearchOpticalSamples] = recorded.searchOpticalSamples;
+    values[CompositionSearchCenterDisplacementMilli] = recorded.searchCenterDisplacementMilli;
+    values[CompositionSearchEdgeMaximumDisplacementMilli] = recorded.searchEdgeMaximumDisplacementMilli;
+    values[CompositionSearchSourceOutOfBounds] = recorded.searchSourceOutOfBounds;
+    values[CompositionSearchVerticalBiasMilli] = recorded.searchVerticalBiasMilli;
+    values[CompositionReducedMotionMaximumDisplacementMilli] = recorded.reducedMotionMaximumDisplacementMilli;
+    values[CompositionClarityShapePasses] = recorded.clarityShapePasses;
+    values[CompositionClarityCenterOpacityMilli] = recorded.clarityCenterOpacityMilli;
+    values[CompositionClarityEdgeOpacityMilli] = recorded.clarityEdgeOpacityMilli;
+    values[CompositionLocalContrastGuards] = recorded.localContrastGuards;
+    values[CompositionRimPasses] = recorded.rimPasses;
+    values[CompositionShadowPasses] = recorded.shadowPasses;
     values[CompositionLuminanceWidth] = recorded.luminanceWidth;
     values[CompositionLuminanceHeight] = recorded.luminanceHeight;
     values[CompositionStagingBufferCount] = recorded.stagingBufferCount;
     values[CompositionDoNotWaitMaps] = recorded.doNotWaitMaps;
     values[CompositionMinimumReadbackIntervalMs] = recorded.minimumIntervalMs;
-    values[CompositionFocusedDisplacements] = recorded.focusedDisplacements;
-    values[CompositionFocusedScales] = recorded.focusedScales;
+    values[CompositionFocusedDisplacementMilli] = recorded.focusedDisplacementMilli;
+    values[CompositionFocusedScaleDeltaMilli] = recorded.focusedScaleDeltaMilli;
     values[CompositionCopiedBgraIcons] = recorded.copiedBgraIcons;
     values[CompositionHiconReferences] = recorded.hiconReferences;
 
