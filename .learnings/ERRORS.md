@@ -4,7 +4,7 @@
 
 **Logged**: 2026-08-09T18:02:00+08:00
 **Priority**: medium
-**Status**: in_progress
+**Status**: resolved
 **Area**: tests
 
 ### Summary
@@ -35,6 +35,12 @@ As in the reviewed Launchpad probe fix, use `UIntPtr::new([uint64]value)` for ev
 - Reproducible: yes
 - Related Files: `tests/LightLaunchpad.NativeUi.Tests/SpotlightFlowBehavior.Tests.ps1`
 - See Also: `ERR-20260809-007`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T18:25:00+08:00
+- **Commit/PR**: `325c5d6b1b107acd96964f16e286fa5b1e3ea5b4`
+- **Notes**: Replaced all 11 nonzero or variable WPARAM casts with explicit `UIntPtr` construction and retained both zero constants. Two implementer runs plus independent spec and quality review runs passed the complete real-EXE Spotlight flow under Windows PowerShell 5.1 with P95 16 ms, two launches, seven opens, and an unchanged historical temp-root set.
 
 ---
 
