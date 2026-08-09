@@ -41,6 +41,46 @@ Before any test clicks a legacy or unknown settings Apply/Save path, inventory e
 
 ---
 
+## [ERR-20260809-003] powershell-empty-git-output-trim
+
+**Logged**: 2026-08-09T15:55:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+The worktree-isolation probe called `.Trim()` on an empty Git result, which PowerShell represented as `$null` for a repository without a superproject.
+
+### Error
+
+```text
+You cannot call a method on a null-valued expression.
+```
+
+### Context
+
+- `git rev-parse --show-superproject-working-tree` legitimately emitted no text.
+- The probe attempted `(git rev-parse --show-superproject-working-tree).Trim()`.
+- The failed command was read-only and made no repository or system change.
+
+### Suggested Fix
+
+Collect command output as an array, join it to an empty-safe string, then trim: `(@(git rev-parse --show-superproject-working-tree) -join '').Trim()`.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `.learnings/ERRORS.md`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T15:55:00+08:00
+- **Commit/PR**: next scoped documentation commit
+- **Notes**: A direct `[string]` cast still produced a null-valued expression in this host. The verified correction uses an array plus `-join ''`, which yields an empty string when Git emits no lines.
+
+---
+
 ## [ERR-20260809-002] protected-runtime-pid-assumption
 
 **Logged**: 2026-08-09T15:35:00+08:00
