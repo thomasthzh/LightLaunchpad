@@ -1,5 +1,47 @@
 # Error Log
 
+## [ERR-20260809-012] powershell-empty-temp-set-compare-object
+
+**Logged**: 2026-08-09T19:48:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+The Task 1 spec review's read-only temp-root wrapper passed an empty collection to `Compare-Object`, which Windows PowerShell rejected after the MaterialRenderer suite and its cleanup had already succeeded.
+
+### Error
+
+```text
+Compare-Object does not accept the empty temp-root collection argument.
+```
+
+### Context
+
+- The focused `MaterialRenderer` production test had already passed `5/5` and removed its GUID temp root.
+- Both the before and after matching root sets were empty.
+- The failure was in the review wrapper's evidence comparison, not the test harness or production code.
+- No temp root, product process, installation, startup value, or repository file changed because of the failed read-only comparison.
+
+### Suggested Fix
+
+Compare empty-safe arrays through explicit added/missing set differences and their counts, as used by the complete baseline runner, rather than passing a potentially empty collection directly to `Compare-Object`.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.ps1`
+- See Also: `ERR-20260809-003`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T19:48:00+08:00
+- **Commit/PR**: next scoped learning-log commit
+- **Notes**: The reviewer used an empty-safe follow-up comparison for AdaptiveEnvironment and confirmed both relevant temp-prefix sets remained empty. Future review prompts will require explicit added/missing counts.
+
+---
+
 ## [ERR-20260809-011] text-input-behavior-ps51-source-compatibility
 
 **Logged**: 2026-08-09T18:48:00+08:00
