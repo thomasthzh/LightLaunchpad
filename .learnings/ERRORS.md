@@ -45,7 +45,7 @@ Before any test clicks a legacy or unknown settings Apply/Save path, inventory e
 
 **Logged**: 2026-08-09T16:25:00+08:00
 **Priority**: high
-**Status**: pending
+**Status**: resolved
 **Area**: tests
 
 ### Summary
@@ -65,7 +65,7 @@ Remove-Item : Object reference not set to an instance of an object.
 - The junction target is `ReparseTarget` inside the same GUID test root.
 - The root is inside `%TEMP%`, is an ordinary directory, and was created by this test run.
 - Product checks passed: cached input remained responsive, future history was preserved, import was idempotent, and the reparse point was skipped.
-- No retry or alternative deletion primitive has been used; the exact failed-test root remains in place pending user authorization.
+- No retry occurred before user authorization. After approval, the exact failed-test root and junction were revalidated and removed without traversing the target.
 
 ### Suggested Fix
 
@@ -75,6 +75,12 @@ After explicit approval, replace the junction cleanup with a non-recursive `.NET
 
 - Reproducible: yes
 - Related Files: `tests/LightLaunchpad.NativeUi.Tests/CatalogShellBroker.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T16:35:00+08:00
+- **Commit/PR**: `072763a7e1d4ede49340f4bfffa87d7da5755c37`
+- **Notes**: The test now validates exact import/temp boundaries, directory reparse metadata, Junction type, and the one expected in-root target before nonrecursive `Directory.Delete`. Two focused real-EXE runs passed 3/3 and left matching temp roots at 0.
 
 ---
 
