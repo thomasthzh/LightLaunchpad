@@ -1,5 +1,44 @@
 # Error Log
 
+## [ERR-20260809-011] text-input-behavior-ps51-source-compatibility
+
+**Logged**: 2026-08-09T18:48:00+08:00
+**Priority**: medium
+**Status**: in_progress
+**Area**: tests
+
+### Summary
+
+The complete NativeUi baseline passed 15 suites, then Windows PowerShell 5.1 parsed the only non-ASCII, UTF-8-without-BOM test script as the active ANSI code page and corrupted its Chinese IME literals into invalid syntax.
+
+### Error
+
+```text
+TextInputBehavior.Tests.ps1:274 Missing ')' in method call.
+TextInputBehavior.Tests.ps1:277 The Try statement is missing its Catch or Finally block.
+TextInputBehavior.Tests.ps1:306 The string is missing the terminator: '.
+```
+
+### Context
+
+- `TextInputBehavior.Tests.ps1` starts with bytes `70 61 72 61 6D` (`param`) and has no UTF-8 BOM.
+- It is the only NativeUi PowerShell suite containing non-ASCII source and the only such suite without a BOM.
+- Reading the file explicitly as UTF-8 shows intact `中`, `文`, and `末` IME literals and expected strings; the corruption occurs only in Windows PowerShell 5.1 `-File` decoding.
+- The same file also has three direct nonzero `Int32` to `UIntPtr` casts (`0x24`, `0x2E`, and `1`). Independent Windows PowerShell 5.1 probes confirm direct `Int32` conversion fails while `Char` conversion succeeds, so these would become the next pre-production interop failures after parsing is fixed.
+- The protected runtime identity and hashes, HKCU Run value, stable-install absence, and `C:\TOOL` hash remained unchanged. No matching text-input-behavior temp root existed after the parser stop.
+
+### Suggested Fix
+
+Keep the repository's UTF-8-without-BOM convention by expressing the three Chinese UTF-16 code units with ASCII numeric code points and building expected strings from those characters. Use explicit `UIntPtr::new([uint64]...)` construction for every nonzero or variable WPARAM in the probe while retaining `UIntPtr::Zero`, then run the complete real-EXE TextInputBehavior suite twice under Windows PowerShell 5.1 and obtain independent spec and quality reviews before restarting all 16 suites.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/TextInputBehavior.Tests.ps1`
+- See Also: `ERR-20260809-007`, `ERR-20260809-010`
+
+---
+
 ## [ERR-20260809-010] spotlight-probe-uintptr-conversion
 
 **Logged**: 2026-08-09T18:02:00+08:00
