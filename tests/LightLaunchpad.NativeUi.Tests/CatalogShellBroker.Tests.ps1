@@ -189,11 +189,34 @@ finally {
         }
     }
     if (Test-Path -LiteralPath $llpImportJunction) {
-        $llpJunctionItem = Get-Item -LiteralPath $llpImportJunction -Force
-        if (($llpJunctionItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
-            throw "Refusing to remove non-reparse test path $llpImportJunction."
+        $llpResolvedImportRoot = [System.IO.Path]::GetFullPath($llpImportRoot)
+        $llpResolvedImportJunction = [System.IO.Path]::GetFullPath($llpImportJunction)
+        $llpImportRootBoundary = $llpResolvedImportRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        if (-not $llpResolvedImportJunction.StartsWith($llpImportRootBoundary, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove test path outside import root $llpResolvedImportJunction."
         }
-        Remove-Item -LiteralPath $llpImportJunction -Force
+        $llpJunctionItem = Get-Item -LiteralPath $llpImportJunction -Force
+        if (-not $llpJunctionItem.PSIsContainer -or (($llpJunctionItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0)) {
+            throw "Refusing to remove non-directory reparse test path $llpResolvedImportJunction."
+        }
+        if ($llpJunctionItem.LinkType -ne 'Junction') {
+            throw "Refusing to remove non-junction test path $llpResolvedImportJunction."
+        }
+        $llpJunctionTargets = @($llpJunctionItem.Target)
+        if ($llpJunctionTargets.Count -ne 1) {
+            throw "Refusing to remove junction without exactly one target $llpResolvedImportJunction."
+        }
+        $llpResolvedJunctionTarget = [System.IO.Path]::GetFullPath([string]$llpJunctionTargets[0])
+        $llpResolvedReparseTarget = [System.IO.Path]::GetFullPath($llpReparseTarget)
+        $llpResolvedTempRoot = [System.IO.Path]::GetFullPath($llpTempRoot)
+        $llpTempRootBoundary = $llpResolvedTempRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        if (-not $llpResolvedJunctionTarget.Equals($llpResolvedReparseTarget, [System.StringComparison]::OrdinalIgnoreCase) -or -not $llpResolvedJunctionTarget.StartsWith($llpTempRootBoundary, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove junction with unexpected target $llpResolvedJunctionTarget."
+        }
+        [System.IO.Directory]::Delete($llpResolvedImportJunction, $false)
+        if (Test-Path -LiteralPath $llpResolvedImportJunction) {
+            throw "Junction deletion did not remove test path $llpResolvedImportJunction."
+        }
     }
     $llpResolvedTemp = [System.IO.Path]::GetFullPath($llpTempRoot)
     $llpExpectedTempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
