@@ -1,11 +1,27 @@
 #include "MaterialRenderer.h"
 
+#include <d2d1_1.h>
+#include <d3d11.h>
+#include <dcomp.h>
+#include <dwrite.h>
+#include <dxgi.h>
+#include <objbase.h>
+
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <limits>
 #include <stdexcept>
+#include <thread>
 #include <utility>
+
+// MinGW-w64 imports D2D1CreateDevice from libd2d1 but does not declare it.
+extern "C" HRESULT WINAPI D2D1CreateDevice(
+    IDXGIDevice* dxgiDevice,
+    const D2D1_CREATION_PROPERTIES* creationProperties,
+    ID2D1Device** d2dDevice);
 
 namespace llp::material
 {
@@ -114,7 +130,300 @@ private:
     HGDIOBJ previous_ = nullptr;
 };
 
+template <typename Interface>
+class ComOwner final
+{
+public:
+    ComOwner() = default;
+    ~ComOwner() { Reset(); }
+    ComOwner(const ComOwner&) = delete;
+    ComOwner& operator=(const ComOwner&) = delete;
+
+    ComOwner(ComOwner&& other) noexcept : pointer_(std::exchange(other.pointer_, nullptr)) {}
+    ComOwner& operator=(ComOwner&& other) noexcept
+    {
+        if (this != &other)
+        {
+            Reset();
+            pointer_ = std::exchange(other.pointer_, nullptr);
+        }
+        return *this;
+    }
+
+    Interface* Get() const { return pointer_; }
+    Interface** Put()
+    {
+        Reset();
+        return &pointer_;
+    }
+    void** PutVoid()
+    {
+        return reinterpret_cast<void**>(Put());
+    }
+    void Reset()
+    {
+        if (pointer_)
+        {
+            pointer_->Release();
+            pointer_ = nullptr;
+        }
+    }
+
+private:
+    Interface* pointer_ = nullptr;
+};
+
+struct DeviceResources
+{
+    ComOwner<ID3D11Device> d3dDevice;
+    ComOwner<ID3D11DeviceContext> d3dContext;
+    ComOwner<IDXGIDevice> dxgiDevice;
+    ComOwner<ID2D1Device> d2dDevice;
+    ComOwner<ID2D1DeviceContext> d2dContext;
+    ComOwner<IDWriteFactory> dwriteFactory;
+    ComOwner<IDCompositionDevice> compositionDevice;
+};
+
+FailureReason InitializeDevice(DeviceResources& resources, std::uint32_t* selectedFeatureLevel)
+{
+    DeviceResources candidate;
+    constexpr std::array<D3D_FEATURE_LEVEL, 6> requestedFeatureLevels = {
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1,
+        D3D_FEATURE_LEVEL_10_0,
+        D3D_FEATURE_LEVEL_9_3,
+        D3D_FEATURE_LEVEL_9_2,
+        D3D_FEATURE_LEVEL_9_1
+    };
+    D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_9_1;
+    HRESULT result = D3D11CreateDevice(
+        nullptr,
+        D3D_DRIVER_TYPE_HARDWARE,
+        nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        requestedFeatureLevels.data(),
+        static_cast<UINT>(requestedFeatureLevels.size()),
+        D3D11_SDK_VERSION,
+        candidate.d3dDevice.Put(),
+        &featureLevel,
+        candidate.d3dContext.Put());
+    if (FAILED(result)) return FailureReason::AdapterUnavailable;
+
+    result = candidate.d3dDevice.Get()->QueryInterface(
+        __uuidof(IDXGIDevice), candidate.dxgiDevice.PutVoid());
+    if (FAILED(result)) return FailureReason::AdapterUnavailable;
+
+    result = D2D1CreateDevice(candidate.dxgiDevice.Get(), nullptr, candidate.d2dDevice.Put());
+    if (FAILED(result)) return FailureReason::CompositionUnavailable;
+
+    result = candidate.d2dDevice.Get()->CreateDeviceContext(
+        D2D1_DEVICE_CONTEXT_OPTIONS_NONE, candidate.d2dContext.Put());
+    if (FAILED(result)) return FailureReason::CompositionUnavailable;
+
+    result = DWriteCreateFactory(
+        DWRITE_FACTORY_TYPE_SHARED,
+        __uuidof(IDWriteFactory),
+        reinterpret_cast<IUnknown**>(candidate.dwriteFactory.Put()));
+    if (FAILED(result)) return FailureReason::CompositionUnavailable;
+
+    result = DCompositionCreateDevice(
+        candidate.dxgiDevice.Get(),
+        __uuidof(IDCompositionDevice),
+        candidate.compositionDevice.PutVoid());
+    if (FAILED(result)) return FailureReason::CompositionUnavailable;
+
+    if (selectedFeatureLevel)
+    {
+        *selectedFeatureLevel = static_cast<std::uint32_t>(featureLevel);
+    }
+    resources = std::move(candidate);
+    return FailureReason::None;
 }
+
+}
+
+class MaterialRenderer::Impl final
+{
+public:
+    Impl() : rendererThread_(&Impl::Run, this) {}
+
+    ~Impl()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            shutdown_ = true;
+        }
+        workCondition_.notify_one();
+        if (rendererThread_.joinable()) rendererThread_.join();
+    }
+
+    void Show(ShowRequest request)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            request_ = std::move(request);
+            showRequested_ = true;
+            hideRequested_ = false;
+            rebuildRequested_ = false;
+        }
+        workCondition_.notify_one();
+    }
+
+    void Submit(std::shared_ptr<const SceneSnapshot> scene)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pendingScene_) ++diagnostics_.droppedScenes;
+            pendingScene_ = std::move(scene);
+        }
+        workCondition_.notify_one();
+    }
+
+    void Rebuild(ShowRequest request)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            request_ = std::move(request);
+            rebuildRequested_ = true;
+            showRequested_ = false;
+            hideRequested_ = false;
+        }
+        workCondition_.notify_one();
+    }
+
+    void Hide()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            hideRequested_ = true;
+            showRequested_ = false;
+            rebuildRequested_ = false;
+        }
+        workCondition_.notify_one();
+    }
+
+    void FreezeEvidence()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            freezeRequested_ = true;
+        }
+        workCondition_.notify_one();
+    }
+
+    Diagnostics SnapshotDiagnostics() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return diagnostics_;
+    }
+
+    bool WaitUntilHiddenForTest(std::uint32_t timeoutMs) const
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return hiddenCondition_.wait_for(
+            lock,
+            std::chrono::milliseconds(timeoutMs),
+            [this]() {
+                return diagnostics_.state == LifecycleState::Hidden && !hideRequested_;
+            });
+    }
+
+private:
+    void Run()
+    {
+        const HRESULT apartmentResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const bool apartmentReady = SUCCEEDED(apartmentResult);
+
+        std::unique_lock<std::mutex> lock(mutex_);
+        for (;;)
+        {
+            workCondition_.wait(lock, [this]() {
+                return shutdown_ || showRequested_ || hideRequested_ || rebuildRequested_
+                    || freezeRequested_ || pendingScene_;
+            });
+            if (shutdown_) break;
+
+            if (pendingScene_)
+            {
+                currentScene_ = std::move(pendingScene_);
+            }
+
+            if (hideRequested_)
+            {
+                diagnostics_.state = LifecycleState::Stopping;
+                lock.unlock();
+                deviceResources_.reset();
+                lock.lock();
+                diagnostics_.state = LifecycleState::Hidden;
+                diagnostics_.path = RenderPath::Fallback;
+                diagnostics_.failure = FailureReason::None;
+                diagnostics_.evidenceFrozen = false;
+                hideRequested_ = false;
+                hiddenCondition_.notify_all();
+                continue;
+            }
+
+            const bool rebuild = rebuildRequested_;
+            const bool show = showRequested_;
+            if (show || rebuild)
+            {
+                showRequested_ = false;
+                rebuildRequested_ = false;
+                diagnostics_.state = rebuild ? LifecycleState::Rebuilding : LifecycleState::Starting;
+                if (rebuild) ++diagnostics_.deviceRebuilds;
+
+                lock.unlock();
+                deviceResources_.reset();
+                auto candidate = std::make_unique<DeviceResources>();
+                std::uint32_t featureLevel = 0;
+                const FailureReason initializationFailure = apartmentReady
+                    ? InitializeDevice(*candidate, &featureLevel)
+                    : FailureReason::CompositionUnavailable;
+                if (initializationFailure != FailureReason::None) candidate.reset();
+                lock.lock();
+
+                deviceResources_ = std::move(candidate);
+                diagnostics_.failure = initializationFailure;
+                diagnostics_.path = initializationFailure == FailureReason::None
+                    ? RenderPath::HighFidelity
+                    : RenderPath::Fallback;
+                diagnostics_.state = initializationFailure == FailureReason::None
+                    ? (rebuild ? LifecycleState::Rebuilding : LifecycleState::Starting)
+                    : LifecycleState::Fallback;
+            }
+
+            if (freezeRequested_)
+            {
+                freezeRequested_ = false;
+                if (diagnostics_.state != LifecycleState::Hidden
+                    && diagnostics_.state != LifecycleState::Stopping)
+                {
+                    diagnostics_.evidenceFrozen = true;
+                    diagnostics_.state = LifecycleState::FrozenEvidence;
+                }
+            }
+        }
+
+        lock.unlock();
+        deviceResources_.reset();
+        if (apartmentReady) CoUninitialize();
+    }
+
+    mutable std::mutex mutex_;
+    std::condition_variable workCondition_;
+    mutable std::condition_variable hiddenCondition_;
+    std::thread rendererThread_;
+    bool shutdown_ = false;
+    bool showRequested_ = false;
+    bool hideRequested_ = false;
+    bool rebuildRequested_ = false;
+    bool freezeRequested_ = false;
+    ShowRequest request_;
+    std::shared_ptr<const SceneSnapshot> pendingScene_;
+    std::shared_ptr<const SceneSnapshot> currentScene_;
+    Diagnostics diagnostics_;
+    std::unique_ptr<DeviceResources> deviceResources_;
+};
 
 bool PixelRect::operator==(const PixelRect& other) const
 {
@@ -292,6 +601,69 @@ std::shared_ptr<const SceneSnapshot> LatestSceneSlot::Take()
     auto scene = std::move(pending_);
     pending_.reset();
     return scene;
+}
+
+MaterialRenderer::MaterialRenderer() : impl_(std::make_unique<Impl>()) {}
+
+MaterialRenderer::~MaterialRenderer() = default;
+
+void MaterialRenderer::Show(ShowRequest request)
+{
+    impl_->Show(std::move(request));
+}
+
+void MaterialRenderer::Submit(std::shared_ptr<const SceneSnapshot> scene)
+{
+    impl_->Submit(std::move(scene));
+}
+
+void MaterialRenderer::Rebuild(ShowRequest request)
+{
+    impl_->Rebuild(std::move(request));
+}
+
+void MaterialRenderer::Hide()
+{
+    impl_->Hide();
+}
+
+void MaterialRenderer::FreezeEvidence()
+{
+    impl_->FreezeEvidence();
+}
+
+Diagnostics MaterialRenderer::SnapshotDiagnostics() const
+{
+    return impl_->SnapshotDiagnostics();
+}
+
+bool MaterialRenderer::WaitUntilHiddenForTest(std::uint32_t timeoutMs) const
+{
+    return impl_->WaitUntilHiddenForTest(timeoutMs);
+}
+
+bool RendererDependenciesAvailable(
+    std::uint32_t* selectedFeatureLevel,
+    FailureReason* failure)
+{
+    std::uint32_t probedFeatureLevel = 0;
+    FailureReason probedFailure = FailureReason::CompositionUnavailable;
+    std::thread probeThread([&]() {
+        const HRESULT apartmentResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (SUCCEEDED(apartmentResult))
+        {
+            {
+                DeviceResources resources;
+                probedFailure = InitializeDevice(resources, &probedFeatureLevel);
+            }
+            CoUninitialize();
+        }
+    });
+    probeThread.join();
+
+    if (selectedFeatureLevel) *selectedFeatureLevel = probedFeatureLevel;
+    if (failure) *failure = probedFailure;
+    return probedFailure == FailureReason::None;
 }
 
 std::shared_ptr<const IconRaster> RasterizeIcon(HICON icon, int sizePx)

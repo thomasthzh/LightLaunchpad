@@ -129,6 +129,33 @@ struct SceneSnapshot
     bool auxiliaryFocused = false;
 };
 
+struct ShowRequest
+{
+    HWND window = nullptr;
+    HMONITOR monitor = nullptr;
+    PixelRect windowDesktop;
+    int dpi = 96;
+    llp::adaptive::Policy policy;
+    bool developmentEvidence = false;
+    FailureReason forcedFailure = FailureReason::None;
+    UINT statusMessage = 0;
+};
+
+struct Diagnostics
+{
+    RenderPath path = RenderPath::Fallback;
+    FailureReason failure = FailureReason::None;
+    LifecycleState state = LifecycleState::Hidden;
+    std::uint64_t acquiredFrames = 0;
+    std::uint64_t presentedFrames = 0;
+    std::uint64_t droppedScenes = 0;
+    std::uint64_t deviceRebuilds = 0;
+    std::uint64_t lastFrameIdentity = 0;
+    double firstFrameMs = 0.0;
+    double frameP95Ms = 0.0;
+    bool evidenceFrozen = false;
+};
+
 class LatestSceneSlot
 {
 public:
@@ -140,6 +167,26 @@ private:
     std::shared_ptr<const SceneSnapshot> pending_;
 };
 
+class MaterialRenderer
+{
+public:
+    MaterialRenderer();
+    ~MaterialRenderer();
+    MaterialRenderer(const MaterialRenderer&) = delete;
+    MaterialRenderer& operator=(const MaterialRenderer&) = delete;
+    void Show(ShowRequest request);
+    void Submit(std::shared_ptr<const SceneSnapshot> scene);
+    void Rebuild(ShowRequest request);
+    void Hide();
+    void FreezeEvidence();
+    Diagnostics SnapshotDiagnostics() const;
+    bool WaitUntilHiddenForTest(std::uint32_t timeoutMs) const;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 PixelRect MapWindowCrop(PixelRect outputDesktop, PixelRect windowDesktop, OutputRotation rotation);
 float PixelsToDip(float pixels, int dpi);
 SearchSample ComputeSearchSample(DipRect bounds, float destinationXDip, float destinationYDip, int dpi, bool reducedMotion);
@@ -148,4 +195,9 @@ LifecycleTransition AdvanceLifecycle(LifecycleState state, LifecycleEvent event,
 
 // Host cache design: key `(reinterpret_cast<std::uintptr_t>(icon), sizePx)`, value `weak_ptr<const IconRaster>`, host clears map with existing icon/DPI resource resets.
 std::shared_ptr<const IconRaster> RasterizeIcon(HICON icon, int sizePx);
+
+// Test-only production probe. The host does not call this path.
+bool RendererDependenciesAvailable(
+    std::uint32_t* selectedFeatureLevel = nullptr,
+    FailureReason* failure = nullptr);
 }

@@ -6,6 +6,7 @@
 #include "MaterialRenderer.h"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cmath>
 #include <iostream>
@@ -22,6 +23,7 @@ using llp::material::ComputeSearchSample;
 using llp::material::MapWindowCrop;
 using llp::material::PixelsToDip;
 using llp::material::RasterizeIcon;
+using llp::material::RendererDependenciesAvailable;
 using llp::material::ResolveMaterialTone;
 
 int passed = 0;
@@ -473,6 +475,54 @@ void TestLatestSceneSlotReturnsOnlyNewestCompleteGeneration()
     Require(slot.Take() == nullptr, "Submitting null did not deterministically clear the pending scene.");
     Pass("MaterialRenderer_LatestSceneSlotKeepsOnlyNewestCompleteGeneration");
 }
+
+void TestRendererThreadBootstrapsGpuDependenciesAndReturnsHidden()
+{
+    std::uint32_t featureLevel = 0;
+    llp::material::FailureReason probeFailure = llp::material::FailureReason::ForcedForTest;
+    Require(RendererDependenciesAvailable(&featureLevel, &probeFailure),
+        "D3D11, DXGI, Direct2D, or DirectComposition dependency probe failed.");
+    Require(probeFailure == llp::material::FailureReason::None,
+        "Successful renderer dependency probe retained a failure reason.");
+    Require(featureLevel != 0, "Renderer dependency probe did not record the selected D3D feature level.");
+
+    llp::material::MaterialRenderer renderer;
+    const auto initial = renderer.SnapshotDiagnostics();
+    Require(initial.state == llp::material::LifecycleState::Hidden,
+        "Renderer thread did not begin in the hidden state.");
+    Require(initial.path == llp::material::RenderPath::Fallback,
+        "Hidden renderer did not retain the safe fallback path.");
+    Require(initial.failure == llp::material::FailureReason::None,
+        "Hidden renderer began with a failure reason.");
+
+    renderer.Show({});
+    const auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    llp::material::Diagnostics started;
+    do
+    {
+        started = renderer.SnapshotDiagnostics();
+        if (started.path == llp::material::RenderPath::HighFidelity
+            || (started.state == llp::material::LifecycleState::Fallback
+                && started.failure != llp::material::FailureReason::None))
+        {
+            break;
+        }
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < startDeadline);
+    Require(started.state == llp::material::LifecycleState::Starting,
+        "Renderer thread did not consume the asynchronous show request.");
+    Require(started.path == llp::material::RenderPath::HighFidelity
+            && started.failure == llp::material::FailureReason::None,
+        "Renderer GPU bootstrap did not select the high-fidelity path.");
+
+    renderer.Hide();
+    Require(renderer.WaitUntilHiddenForTest(2000),
+        "Renderer thread did not acknowledge hide without a periodic wake loop.");
+    Require(renderer.SnapshotDiagnostics().state == llp::material::LifecycleState::Hidden,
+        "Renderer diagnostics did not return to Hidden after hide acknowledgement.");
+    std::cout << "INFO MaterialRenderer featureLevel=0x" << std::hex << featureLevel << std::dec << "\n";
+    Pass("MaterialRenderer_RenderThreadBootstrapsDependenciesAndReturnsHidden");
+}
 }
 
 int main()
@@ -487,8 +537,9 @@ int main()
         TestSceneSnapshotsOwnCopiedPremultipliedIconBytes();
         TestLegacyMaskIconDistinguishesOpaqueBlackFromTransparency();
         TestLatestSceneSlotReturnsOnlyNewestCompleteGeneration();
-        std::cout << passed << "/8 tests passed\n";
-        return passed == 8 ? 0 : 1;
+        TestRendererThreadBootstrapsGpuDependenciesAndReturnsHidden();
+        std::cout << passed << "/9 tests passed\n";
+        return passed == 9 ? 0 : 1;
     }
     catch (const std::exception& exception)
     {

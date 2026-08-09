@@ -91,15 +91,49 @@ $identityHeader = @"
 #define LLP_WINDOW_CLASS_NAME_WIDE L"$escapedWindowClass"
 "@
 
-$gpp = (where.exe g++ | Select-Object -First 1)
-if (-not $gpp) {
-    throw "g++ was not found. Install MinGW-w64 or build the native UI with a C++ toolchain."
+function Resolve-NativeToolchain {
+    $llpCompilerCandidates = @(where.exe g++ 2>$null | Select-Object -Unique)
+    if ($llpCompilerCandidates.Count -eq 0) {
+        throw "g++ was not found. Install MinGW-w64 or build the native UI with a C++ toolchain."
+    }
+
+    $llpRequiredImportLibraries = @(
+        'libuiautomationcore.a',
+        'libd2d1.a',
+        'libdwrite.a',
+        'libd3d11.a',
+        'libdxgi.a',
+        'libdcomp.a'
+    )
+    $llpRejections = @()
+    foreach ($llpCompilerCandidate in $llpCompilerCandidates) {
+        $llpCompiler = [System.IO.Path]::GetFullPath([string]$llpCompilerCandidate)
+        $llpWindres = Join-Path (Split-Path -Parent $llpCompiler) 'windres.exe'
+        $llpMissing = @()
+        if (-not (Test-Path -LiteralPath $llpWindres -PathType Leaf)) {
+            $llpMissing += 'windres.exe'
+        }
+        foreach ($llpLibrary in $llpRequiredImportLibraries) {
+            $llpResolvedLibrary = ((& $llpCompiler "-print-file-name=$llpLibrary" 2>$null) -join '').Trim()
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($llpResolvedLibrary) -or -not (Test-Path -LiteralPath $llpResolvedLibrary -PathType Leaf)) {
+                $llpMissing += $llpLibrary
+            }
+        }
+        if ($llpMissing.Count -eq 0) {
+            return [PSCustomObject]@{
+                Gpp = $llpCompiler
+                Windres = [System.IO.Path]::GetFullPath($llpWindres)
+            }
+        }
+        $llpRejections += "$llpCompiler missing $($llpMissing -join ', ')"
+    }
+
+    throw "No MinGW-w64 toolchain on PATH can link the complete NativeUi: $($llpRejections -join '; ')."
 }
 
-$windres = (where.exe windres | Select-Object -First 1)
-if (-not $windres) {
-    throw "windres was not found. Install MinGW-w64 so the native UI can embed the app icon."
-}
+$nativeToolchain = Resolve-NativeToolchain
+$gpp = $nativeToolchain.Gpp
+$windres = $nativeToolchain.Windres
 
 New-Item -ItemType Directory -Force -Path $outputDirectoryFull | Out-Null
 $staleAssetsDirectory = Join-Path $outputDirectoryFull "Assets"
@@ -128,6 +162,7 @@ try {
         src\LightLaunchpad.NativeUi\AdaptiveEnvironment.cpp `
         src\LightLaunchpad.NativeUi\Catalog.cpp `
         src\LightLaunchpad.NativeUi\InteractionState.cpp `
+        src\LightLaunchpad.NativeUi\MaterialRenderer.cpp `
         src\LightLaunchpad.NativeUi\OrganizationState.cpp `
         src\LightLaunchpad.NativeUi\Persistence.cpp `
         src\LightLaunchpad.NativeUi\SceneGeometry.cpp `
@@ -162,6 +197,9 @@ try {
         -ldwmapi `
         -ld2d1 `
         -ldwrite `
+        -ld3d11 `
+        -ldxgi `
+        -ldcomp `
         -limm32 `
         -lole32 `
         -loleaut32 `

@@ -269,6 +269,8 @@ try {
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.Version.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.Version.h')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\AdaptiveEnvironment.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\AdaptiveEnvironment.cpp')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\AdaptiveEnvironment.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\AdaptiveEnvironment.h')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\MaterialRenderer.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\MaterialRenderer.cpp')
+    Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\MaterialRenderer.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\MaterialRenderer.h')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\Persistence.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\Persistence.cpp')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\Persistence.h') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\Persistence.h')
     Copy-Item -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\Catalog.cpp') -Destination (Join-Path $llpCleanSourceRoot 'src\LightLaunchpad.NativeUi\Catalog.cpp')
