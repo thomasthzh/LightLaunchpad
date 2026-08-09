@@ -505,7 +505,6 @@ public:
         diagnostics_.path = RenderPath::Fallback;
         diagnostics_.failure = FailureReason::None;
         diagnostics_.evidenceFrozen = false;
-        firstFrameStarted_ = backend.Counter();
 
         if (IsDevelopmentBuild() && request_.forcedFailure != FailureReason::None
             && request_.forcedFailure != FailureReason::AccessLost)
@@ -527,6 +526,7 @@ public:
         }
         capturing_ = true;
         firstFramePending_ = true;
+        firstFrameStarted_ = backend.Counter();
     }
 
     void Step(CaptureBackend& backend)
@@ -1271,6 +1271,7 @@ public:
     FailureReason Start(const ShowRequest& request) override
     {
         ++startCalls;
+        if (scenario_ == 9) nowMilliseconds += 40;
         const std::array<std::array<HMONITOR, 2>, 2> outputs = { {
             { reinterpret_cast<HMONITOR>(static_cast<UINT_PTR>(0x101)),
                 reinterpret_cast<HMONITOR>(static_cast<UINT_PTR>(0x102)) },
@@ -1295,6 +1296,7 @@ public:
     AcquireResult Acquire(std::uint32_t waitMilliseconds, std::uint64_t& identity) override
     {
         ++acquireCalls;
+        if (waitMilliseconds > 0) ++timedWaitCalls;
         maximumWaitMilliseconds = std::max(maximumWaitMilliseconds, waitMilliseconds);
         if (acquireCalls > 1 && !frameOutstanding && releaseCalls > 0)
         {
@@ -1346,6 +1348,14 @@ public:
             ++redraws;
             return AcquireResult::Frame;
         }
+        if (scenario_ == 9)
+        {
+            nowMilliseconds += 5;
+            frameOutstanding = true;
+            identity = 99;
+            ++redraws;
+            return AcquireResult::Frame;
+        }
         frameOutstanding = true;
         identity = 1;
         ++redraws;
@@ -1378,6 +1388,7 @@ public:
     int startCalls = 0;
     int duplicateCalls = 0;
     int acquireCalls = 0;
+    int timedWaitCalls = 0;
     unsigned int maximumWaitMilliseconds = 0;
     int releaseCalls = 0;
     int redraws = 0;
@@ -1399,7 +1410,7 @@ extern "C" int LLP_MaterialRunFakeLifecycleScenario(
     int scenario,
     MaterialLifecycleTestReport* report)
 {
-    if (!report || scenario < 0 || scenario > 8) return 2;
+    if (!report || scenario < 0 || scenario > 9) return 2;
     FakeCaptureBackend backend(scenario);
     CaptureLifecycle lifecycle;
     ShowRequest request;
@@ -1411,6 +1422,8 @@ extern "C" int LLP_MaterialRunFakeLifecycleScenario(
     if (scenario == 6) request.forcedFailure = FailureReason::AccessLost;
     lifecycle.Show(backend, request);
 
+    int hiddenAcquireCalls = 0;
+    int hiddenTimedWaits = 0;
     if (scenario == 0)
     {
         lifecycle.Step(backend);
@@ -1426,7 +1439,14 @@ extern "C" int LLP_MaterialRunFakeLifecycleScenario(
         lifecycle.Step(backend);
         lifecycle.Step(backend);
         lifecycle.Step(backend);
+        const int acquireCallsBeforeHide = backend.acquireCalls;
+        const int timedWaitsBeforeHide = backend.timedWaitCalls;
         lifecycle.Hide(backend);
+        lifecycle.Step(backend);
+        lifecycle.Step(backend);
+        lifecycle.Step(backend);
+        hiddenAcquireCalls = backend.acquireCalls - acquireCallsBeforeHide;
+        hiddenTimedWaits = backend.timedWaitCalls - timedWaitsBeforeHide;
     }
     else if (scenario == 3)
     {
@@ -1445,6 +1465,10 @@ extern "C" int LLP_MaterialRunFakeLifecycleScenario(
         lifecycle.Freeze(backend);
     }
     else if (scenario == 8)
+    {
+        lifecycle.Step(backend);
+    }
+    else if (scenario == 9)
     {
         lifecycle.Step(backend);
     }
@@ -1468,8 +1492,8 @@ extern "C" int LLP_MaterialRunFakeLifecycleScenario(
     report->releaseBeforeRebuild = backend.releaseBeforeRebuild ? 1 : 0;
     report->releaseBeforeHide = backend.releaseBeforeHide ? 1 : 0;
     report->releaseBeforeFreeze = backend.releaseBeforeFreeze ? 1 : 0;
-    report->hiddenTimedWaits = 0;
-    report->hiddenAcquireCalls = 0;
+    report->hiddenTimedWaits = hiddenTimedWaits;
+    report->hiddenAcquireCalls = hiddenAcquireCalls;
     report->affinityExcluded = backend.affinityExcluded;
     report->affinityCleared = backend.affinityCleared;
     report->partialCropRejected = FullyContains(

@@ -685,6 +685,7 @@ void TestFramesReleaseBeforeReacquireRebuildAndHide()
               << " rebuilds=" << report.rebuilds
               << " duplicateCalls=" << report.duplicateCalls
               << " releases=" << report.releaseCalls
+              << " hiddenAcquireCalls=" << report.hiddenAcquireCalls
               << " hiddenWaits=" << report.hiddenTimedWaits << "\n";
     Pass("MaterialRenderer_ReleasesFramesAndStopsAllHiddenPolling");
 }
@@ -744,6 +745,19 @@ void TestLateFirstFrameIsReleasedAndFallsBack()
     Pass("MaterialRenderer_LateFirstFrameIsReleasedBeforeFallback");
 }
 
+void TestBackendStartupDoesNotConsumeFirstFrameAcquireBudget()
+{
+    const auto report = RunFakeLifecycle(9);
+    Require(report.acquireCalls == 1,
+        "Backend startup time consumed the 32 ms first-frame acquisition window before Acquire ran.");
+    Require(report.acquiredFrames == 1 && report.lastFrameIdentity == 99,
+        "A prompt frame in the post-start acquisition window was not accepted.");
+    Require(report.firstFrameMicroseconds == 5000
+            && report.finalPath == static_cast<int>(llp::material::RenderPath::HighFidelity),
+        "First-frame timing did not begin after successful backend startup.");
+    Pass("MaterialRenderer_BackendStartupPrecedesFirstFrameDeadline");
+}
+
 void TestHideRequestRemainsAsynchronous()
 {
     llp::material::MaterialRenderer renderer;
@@ -783,8 +797,9 @@ int main()
         TestDevelopmentForcedFailuresMapToStableReason();
         TestFreezeReleasesCaptureAndClearsAffinity();
         TestLateFirstFrameIsReleasedAndFallsBack();
+        TestBackendStartupDoesNotConsumeFirstFrameAcquireBudget();
         TestHideRequestRemainsAsynchronous();
-        constexpr int expected = 19;
+        constexpr int expected = 20;
         std::cout << passed << "/" << expected << " tests passed\n";
         return passed == expected ? 0 : 1;
     }

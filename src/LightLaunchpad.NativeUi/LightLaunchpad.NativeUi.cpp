@@ -560,6 +560,7 @@ struct MaterialProbeHostState
 {
     llp::material::MaterialRenderer* renderer = nullptr;
     std::wstring outputPath;
+    std::uint64_t probeGeneration = 0;
 };
 
 CatalogBrokerProbeState g_catalogBrokerProbe;
@@ -2657,7 +2658,9 @@ bool WriteMaterialProbeState(MaterialProbeHostState& state)
 {
     if (!state.renderer || state.outputPath.empty()) return false;
     const auto diagnostics = state.renderer->SnapshotDiagnostics();
+    const std::uint64_t generation = ++state.probeGeneration;
     Json document = {
+        { "probeGeneration", generation },
         { "path", MaterialRenderPathName(diagnostics.path) },
         { "failure", MaterialFailureName(diagnostics.failure) },
         { "state", MaterialStateName(diagnostics.state) },
@@ -9097,6 +9100,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             HideNativeUi();
             state->renderer->Hide();
+        }
+        else if (state && state->renderer && wParam == 2)
+        {
+            WriteMaterialProbeState(*state);
         }
         return 0;
     }

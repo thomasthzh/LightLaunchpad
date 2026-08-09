@@ -149,8 +149,16 @@ public static class LightLaunchpadMaterialProbeNative {
     Assert-Equal 'hidden' ([string]$llpHidden.state) 'Renderer did not report hidden cleanup.'
     $llpHiddenAcquired = [uint64]$llpHidden.acquiredFrames
     $llpHiddenPresented = [uint64]$llpHidden.presentedFrames
+    $llpHiddenGeneration = [uint64]$llpHidden.probeGeneration
+    Assert-True ($llpHiddenGeneration -gt 0) 'Hidden probe JSON did not expose a real snapshot generation.'
     Start-Sleep -Seconds 2
-    $llpHiddenAgain = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpProbePath | ConvertFrom-Json
+    [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpWindow, 0x804D, [UIntPtr]::new([uint64]2), [IntPtr]::Zero)
+    $llpRefreshDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
+        Start-Sleep -Milliseconds 25
+        $llpHiddenAgain = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpProbePath | ConvertFrom-Json
+    } while ([uint64]$llpHiddenAgain.probeGeneration -le $llpHiddenGeneration -and [DateTime]::UtcNow -lt $llpRefreshDeadline)
+    Assert-True ([uint64]$llpHiddenAgain.probeGeneration -gt $llpHiddenGeneration) 'Explicit hidden snapshot did not refresh probe JSON after two idle seconds.'
     Assert-Equal $llpHiddenAcquired ([uint64]$llpHiddenAgain.acquiredFrames) 'Hidden renderer continued acquiring desktop frames.'
     Assert-Equal $llpHiddenPresented ([uint64]$llpHiddenAgain.presentedFrames) 'Hidden renderer continued presenting frames.'
 
@@ -265,7 +273,7 @@ public static class LightLaunchpadMaterialProbeNative {
     $llpHistoricalTempAfter = @(Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Directory -Filter 'lightlaunchpad-*' | Where-Object { $_.FullName -ne $llpTempRoot } | ForEach-Object { $_.FullName } | Sort-Object)
     Assert-Equal ($llpHistoricalTempBefore -join '|') ($llpHistoricalTempAfter -join '|') 'Material lifecycle harness changed historical LightLaunchpad temp roots.'
 
-    Write-Output "METRIC MaterialLifecycle exe='$llpExecutable' sha256=$llpExecutableHash stableSha256=$llpStableHash forcedAcquired=$([uint64]$llpHidden.acquiredFrames) normalPath=$([string]$llpNormalProbe.path) normalFailure=$([string]$llpNormalProbe.failure) normalAcquired=$([uint64]$llpNormalProbe.acquiredFrames) normalRebuilds=$([uint64]$llpNormalProbe.deviceRebuilds) normalLastFrame=$([uint64]$llpNormalProbe.lastFrameIdentity)"
+    Write-Output "METRIC MaterialLifecycle exe='$llpExecutable' sha256=$llpExecutableHash stableSha256=$llpStableHash forcedAcquired=$([uint64]$llpHidden.acquiredFrames) hiddenGeneration=$llpHiddenGeneration refreshedGeneration=$([uint64]$llpHiddenAgain.probeGeneration) normalPath=$([string]$llpNormalProbe.path) normalFailure=$([string]$llpNormalProbe.failure) normalAcquired=$([uint64]$llpNormalProbe.acquiredFrames) normalRebuilds=$([uint64]$llpNormalProbe.deviceRebuilds) normalLastFrame=$([uint64]$llpNormalProbe.lastFrameIdentity)"
     Write-Output "METRIC MaterialIsolation protectedPids=$($llpProcessIdsAfter -join ',') historicalTempRoots=$($llpHistoricalTempAfter.Count) startupUnchanged=true"
     Write-Output 'PASS MaterialRendererBehavior_ForcedFallbackSearchAndHiddenLifecycle'
 }
