@@ -42,13 +42,13 @@ function Wait-LlpCondition {
 function Send-LlpText {
     param([IntPtr]$Window, [string]$Text)
     foreach ($llpCharacter in $Text.ToCharArray()) {
-        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($Window, 0x0102, [UIntPtr]$llpCharacter, [IntPtr]::Zero)
+        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($Window, 0x0102, [UIntPtr]::new([uint64]$llpCharacter), [IntPtr]::Zero)
     }
 }
 
 function Send-LlpKey {
     param([IntPtr]$Window, [UInt16]$Key)
-    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($Window, 0x0100, [UIntPtr]$Key, [IntPtr]::Zero)
+    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($Window, 0x0100, [UIntPtr]::new([uint64]$Key), [IntPtr]::Zero)
 }
 
 function Get-LlpMarkerNames {
@@ -206,7 +206,7 @@ public static class LightLaunchpadSpotlightProbeNative {
     $llpWindow = [LightLaunchpadSpotlightProbeNative]::FindWindowForProcess([uint32]$llpProcess.Id)
     Assert-True ($llpWindow -ne [IntPtr]::Zero) 'Could not discover the hidden real NativeUi window.'
 
-    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]0x4C55, [IntPtr]::Zero)
+    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Assert-True ([LightLaunchpadSpotlightProbeNative]::IsWindowVisible($llpWindow)) 'First Alt+D path did not show Spotlight.'
     $llpElement = [System.Windows.Automation.AutomationElement]::FromHandle($llpWindow)
     $llpValueObject = $null
@@ -221,7 +221,7 @@ public static class LightLaunchpadSpotlightProbeNative {
     Assert-Equal 'Beta.exe' $llpMarkerNames[0] 'Search Enter launched the wrong result.'
     Wait-LlpCondition { -not [LightLaunchpadSpotlightProbeNative]::IsWindowVisible($llpWindow) } 3000 'Spotlight did not hide after the first launch.'
 
-    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]0x4C55, [IntPtr]::Zero)
+    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Assert-Equal '' $llpValue.Current.Value 'Second Alt+D did not reset the search query.'
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
         $llpEvidenceRoot = [System.IO.Path]::GetFullPath($EvidenceDirectory)
@@ -245,7 +245,7 @@ public static class LightLaunchpadSpotlightProbeNative {
 
     $llpLatestReady = Get-LlpReadyState
     $llpCatalogGeneration = [uint64]$llpLatestReady.catalogGeneration
-    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]0x4C55, [IntPtr]::Zero)
+    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Wait-LlpCondition {
         $script:llpRefreshState = Get-LlpReadyState
         $null -ne $script:llpRefreshState -and [uint64]$script:llpRefreshState.catalogGeneration -gt $llpCatalogGeneration
@@ -255,7 +255,7 @@ public static class LightLaunchpadSpotlightProbeNative {
     Send-LlpKey $llpWindow 0x28
     $llpAddedFlowPath = [System.IO.Path]::GetFullPath((Join-Path $llpLaunchpad 'Flow A.exe'))
     Copy-Item -LiteralPath $llpTarget -Destination $llpAddedFlowPath
-    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0111, [UIntPtr]1002, [IntPtr]::Zero)
+    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0111, [UIntPtr]::new([uint64]1002), [IntPtr]::Zero)
     $llpRefreshState = $null
     Wait-LlpCondition {
         $script:llpRefreshState = Get-LlpReadyState
@@ -275,7 +275,7 @@ public static class LightLaunchpadSpotlightProbeNative {
     Assert-True (-not $llpFlowBetaItem.PSIsContainer) 'Focused refresh fixture was not a file.'
     Assert-True (($llpFlowBetaItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) 'Refusing to move a reparse-point refresh fixture.'
     Move-Item -LiteralPath $llpFlowBetaPath -Destination $llpRemovedFlowBetaPath
-    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0111, [UIntPtr]1002, [IntPtr]::Zero)
+    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0111, [UIntPtr]::new([uint64]1002), [IntPtr]::Zero)
     Wait-LlpCondition {
         $script:llpRefreshState = Get-LlpReadyState
         $null -ne $script:llpRefreshState -and [uint64]$script:llpRefreshState.catalogGeneration -gt $llpCatalogGeneration
@@ -289,7 +289,7 @@ public static class LightLaunchpadSpotlightProbeNative {
     Send-LlpKey $llpWindow 0x1B
     Send-LlpKey $llpWindow 0x1B
 
-    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]0x4C55, [IntPtr]::Zero)
+    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Send-LlpText $llpWindow 'Flow'
     Send-LlpKey $llpWindow 0x28
     Send-LlpKey $llpWindow 0x1B
@@ -301,7 +301,7 @@ public static class LightLaunchpadSpotlightProbeNative {
     Send-LlpKey $llpWindow 0x1B
     Assert-True (-not [LightLaunchpadSpotlightProbeNative]::IsWindowVisible($llpWindow)) 'Third Esc did not close empty Spotlight.'
 
-    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]0x4C55, [IntPtr]::Zero)
+    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Send-LlpText $llpWindow 'Flow'
     Send-LlpKey $llpWindow 0x28
     Send-LlpText $llpWindow 'X'
@@ -310,7 +310,7 @@ public static class LightLaunchpadSpotlightProbeNative {
     Send-LlpKey $llpWindow 0x1B
     Send-LlpKey $llpWindow 0x1B
 
-    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]0x4C55, [IntPtr]::Zero)
+    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Send-LlpText $llpWindow 'Flow'
     Send-LlpKey $llpWindow 0x09
     Assert-Equal $false $llpElement.Current.HasKeyboardFocus 'Tab did not move from search to results.'
@@ -324,7 +324,7 @@ public static class LightLaunchpadSpotlightProbeNative {
     Send-LlpKey $llpWindow 0x1B
     Send-LlpKey $llpWindow 0x1B
 
-    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]0x4C55, [IntPtr]::Zero)
+    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Send-LlpText $llpWindow 'Flow'
     Send-LlpKey $llpWindow 0x09
     Send-LlpKey $llpWindow 0x09
