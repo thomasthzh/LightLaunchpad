@@ -229,7 +229,7 @@
   - Compare reference and current screenshots on at least 12 varied desktop backgrounds at matching states and viewport sizes.
   - Pixel checks show no upward ghost, duplicated text/icon, rectangular leak, or out-of-bounds refraction.
   - Normal text contrast is at least 4.5:1 and focus boundaries target at least 3:1.
-- Completion notes: Started immediately after LLP-012 verification. First audit targets: isolate a renderer/scene-snapshot boundary, remove remaining nested screenshot captures, measure the current material against 12 controlled backgrounds, and establish pixel/contrast RED gates before DirectComposition work. Implementation is paused at the required `brainstorming` design gate after three goal turns without an explicit answer to the optional visual-companion choice; resume on `启用` or `不启用`.
+- Completion notes: Design is approved and committed in `0cf5a51`; implementation has not started. The user selected 12 reproducible controlled backgrounds plus the real desktop, continuous live background capture, and restrained cool white-blue material. The approved spec at `docs/superpowers/specs/2026-08-09-llp-013-live-material-renderer-design.md` selects one DXGI Desktop Duplication -> D3D11 -> Direct2D DeviceContext -> DirectComposition path, one required no-displacement fallback, bounded self-capture exclusion, a latest-only immutable scene slot, and development-channel real-EXE evidence mode. Current gate: user review of the written spec, followed only by `writing-plans` before TDD implementation.
 
 ### LLP-014 - Continuous Focus And Nonblocking Motion
 

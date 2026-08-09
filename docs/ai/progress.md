@@ -2,16 +2,44 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-02 12:36:58 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-09 14:58:16 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `b222b1b`
+- HEAD: `0cf5a51`
 - Remote main: `origin/main@33e91c2`
 - Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
 - Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
-- Goal status: blocked awaiting the user's explicit visual-companion choice required by the `brainstorming` design gate; LLP-013 remains the only task in progress.
-- Resume condition: user replies `启用` or `不启用`; then continue the LLP-013 design validation without changing task order.
+- Goal status: active; LLP-013 remains the only task in progress.
+- Current gate: approved design spec committed at `0cf5a51`; awaiting written-spec review before invoking `writing-plans`. Production implementation has not started.
+
+## LLP-013 Design Checkpoint
+
+Status at 2026-08-09 14:58 +08:00: design approved; implementation not started.
+
+Changed files in scope:
+
+- `docs/superpowers/specs/2026-08-09-llp-013-live-material-renderer-design.md` - approved live-material architecture, lifecycle, single fallback, adaptive policy, performance budgets, and production-test evidence design.
+- `.gitignore` - excludes persistent `.superpowers/` visual-companion session artifacts.
+
+Approved decisions and evidence:
+
+- Browser events and terminal confirmation agree on `1C + 2A`: continuously updating live desktop background with restrained cool white-blue material.
+- The user approved R1: one DXGI Desktop Duplication, D3D11, Direct2D DeviceContext, and DirectComposition path. Windows.Graphics.Capture and system Desktop Acrylic are explicitly rejected.
+- `WDA_EXCLUDEFROMCAPTURE` is limited to the visible high-fidelity session to prevent recursive self-capture. The approved consequence is that Spotlight normally does not appear in public screenshots or screen sharing while live capture is active.
+- The spec keeps one latest-only immutable scene slot and one PRD-required no-displacement fallback. It adds no polling while hidden, alternate capture backend, generalized graphics framework, package runtime, or speculative recovery chain.
+- Visual acceptance uses 12 reproducible controlled backgrounds as the primary set plus the current real desktop. A development-only freeze/stop-capture evidence mode allows real-EXE onscreen screenshots without recursive feedback; stable builds reject the switch.
+
+Verification and scope:
+
+- Spec self-review passed seven required-content checks with zero placeholders; `git diff --cached --check` passed before commit and the staged scope contained only the spec and `.gitignore`.
+- Design commit: `0cf5a5114d77d65ba4c30f16eb83c654fac36063` (`docs: approve LLP-013 live material design`).
+- No production C++, NativeUi build, installation, startup entry, `C:\TOOL`, push, tag, or release change occurred in this checkpoint.
+- `LLP_reconstruction/` remains untracked and unstaged.
+
+Next step:
+
+- User reviews the committed written spec. After approval, invoke only `writing-plans`, write the implementation plan, and then begin LLP-013 with production C++ RED tests.
 
 ## LLP-012 Execution Evidence
 
