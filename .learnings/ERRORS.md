@@ -41,6 +41,41 @@ Before any test clicks a legacy or unknown settings Apply/Save path, inventory e
 
 ---
 
+## [ERR-20260809-007] launchpad-probe-uintptr-conversion
+
+**Logged**: 2026-08-09T16:50:00+08:00
+**Priority**: medium
+**Status**: in_progress
+**Area**: tests
+
+### Summary
+
+The Launchpad real-EXE probe used direct PowerShell casts from `Int32` to `UIntPtr`, which failed before the first activation message reached production.
+
+### Error
+
+```text
+Cannot convert the "19541" value of type "System.Int32" to type "System.UIntPtr".
+```
+
+### Context
+
+- The first failure is `[UIntPtr]0x4C55` in `LaunchpadFlowBehavior.Tests.ps1`.
+- The same file contains direct casts for key flags, key codes, commands, and later activation messages.
+- Other passing real-EXE suites use `UIntPtr::new([uint64]value)` explicitly.
+- Production NativeUi did not receive the failing message; this is a test-driver interop conversion issue.
+
+### Suggested Fix
+
+Use `UIntPtr::new([uint64]value)` consistently for every nonzero/variable WPARAM in the Launchpad probe, retain `UIntPtr::Zero` for zero, then run the full real-EXE Launchpad flow twice.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/LaunchpadFlowBehavior.Tests.ps1`
+
+---
+
 ## [ERR-20260809-006] powershell-junction-remove-null-reference
 
 **Logged**: 2026-08-09T16:25:00+08:00
