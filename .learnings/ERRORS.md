@@ -45,7 +45,7 @@ Before any test clicks a legacy or unknown settings Apply/Save path, inventory e
 
 **Logged**: 2026-08-09T16:50:00+08:00
 **Priority**: medium
-**Status**: in_progress
+**Status**: resolved
 **Area**: tests
 
 ### Summary
@@ -73,6 +73,12 @@ Use `UIntPtr::new([uint64]value)` consistently for every nonzero/variable WPARAM
 
 - Reproducible: yes
 - Related Files: `tests/LightLaunchpad.NativeUi.Tests/LaunchpadFlowBehavior.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T17:10:00+08:00
+- **Commit/PR**: `b1ecaf281f8f7eefeccf5973010b47c971b4077d`
+- **Notes**: All eight nonzero/variable WPARAM conversions now use the explicit UIntPtr constructor; three zero values remain `UIntPtr::Zero`. Two independent real-EXE flows passed with identical launch/edit/favorite metrics and added no temp roots. PowerShell 5.1 and 7.6 constructor checks passed.
 
 ---
 
