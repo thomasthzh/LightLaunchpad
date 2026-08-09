@@ -9,20 +9,19 @@
 
 #if __has_include("LightLaunchpad.BuildIdentity.generated.h")
 #include "LightLaunchpad.BuildIdentity.generated.h"
-#elif !defined(LLP_MATERIAL_TESTING)
-// The standalone production-C++ test links this same source without a generated build identity.
-#define LLP_MATERIAL_TESTING 1
 #endif
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cmath>
 #include <condition_variable>
 #include <limits>
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #ifndef WDA_EXCLUDEFROMCAPTURE
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
@@ -275,7 +274,47 @@ bool FullyContains(PixelRect outer, PixelRect inner)
         && inner.right <= outer.right && inner.bottom <= outer.bottom;
 }
 
+struct OutputCatalogEntry
+{
+    UINT adapterIndex = 0;
+    UINT outputIndex = 0;
+    HMONITOR monitor = nullptr;
+    PixelRect desktop;
+};
+
+struct OutputSelection
+{
+    UINT adapterIndex = 0;
+    UINT outputIndex = 0;
+    PixelRect desktop;
+};
+
+enum class OutputSelectionResult { Selected, MonitorNotFound, WindowNotContained };
+
+OutputSelectionResult SelectCaptureOutput(
+    const std::vector<OutputCatalogEntry>& catalog,
+    HMONITOR monitor,
+    PixelRect windowDesktop,
+    OutputSelection& selection)
+{
+    bool monitorFound = false;
+    for (const auto& candidate : catalog)
+    {
+        if (candidate.monitor != monitor) continue;
+        monitorFound = true;
+        if (!FullyContains(candidate.desktop, windowDesktop)) continue;
+        selection.adapterIndex = candidate.adapterIndex;
+        selection.outputIndex = candidate.outputIndex;
+        selection.desktop = candidate.desktop;
+        return OutputSelectionResult::Selected;
+    }
+    return monitorFound
+        ? OutputSelectionResult::WindowNotContained
+        : OutputSelectionResult::MonitorNotFound;
+}
+
 enum class AcquireResult { Frame, Timeout, AccessLost, DeviceRemoved, Failed };
+enum class ReleaseResult { Released, AccessLost, DeviceRemoved, Failed };
 
 class CaptureBackend
 {
@@ -285,7 +324,7 @@ public:
     virtual void ClearCaptureExclusion() = 0;
     virtual FailureReason Start(const ShowRequest& request) = 0;
     virtual AcquireResult Acquire(std::uint32_t waitMilliseconds, std::uint64_t& identity) = 0;
-    virtual void ReleaseFrame() = 0;
+    virtual ReleaseResult ReleaseFrame() = 0;
     virtual void Stop() = 0;
     virtual std::int64_t Counter() const = 0;
     virtual std::int64_t Frequency() const = 0;
@@ -343,9 +382,7 @@ public:
             return FailureReason::AdapterUnavailable;
         }
 
-        ComOwner<IDXGIAdapter1> selectedAdapter;
-        ComOwner<IDXGIOutput> selectedOutput;
-        DXGI_OUTPUT_DESC selectedDescription = {};
+        std::vector<OutputCatalogEntry> catalog;
         for (UINT adapterIndex = 0;; ++adapterIndex)
         {
             ComOwner<IDXGIAdapter1> adapter;
@@ -359,31 +396,46 @@ public:
                 if (outputResult == DXGI_ERROR_NOT_FOUND) break;
                 if (FAILED(outputResult)) return FailureReason::AdapterUnavailable;
                 DXGI_OUTPUT_DESC description = {};
-                if (SUCCEEDED(output.Get()->GetDesc(&description))
-                    && description.Monitor == request.monitor)
+                if (SUCCEEDED(output.Get()->GetDesc(&description)))
                 {
-                    selectedAdapter = std::move(adapter);
-                    selectedOutput = std::move(output);
-                    selectedDescription = description;
-                    break;
+                    catalog.push_back({
+                        adapterIndex,
+                        outputIndex,
+                        description.Monitor,
+                        {
+                            description.DesktopCoordinates.left,
+                            description.DesktopCoordinates.top,
+                            description.DesktopCoordinates.right,
+                            description.DesktopCoordinates.bottom
+                        }
+                    });
                 }
             }
-            if (selectedOutput.Get()) break;
         }
-        if (!selectedAdapter.Get() || !selectedOutput.Get())
+
+        OutputSelection selection;
+        const OutputSelectionResult selectionResult = SelectCaptureOutput(
+            catalog, request.monitor, request.windowDesktop, selection);
+        if (selectionResult == OutputSelectionResult::MonitorNotFound)
         {
             return FailureReason::AdapterUnavailable;
         }
-
-        const PixelRect outputDesktop = {
-            selectedDescription.DesktopCoordinates.left,
-            selectedDescription.DesktopCoordinates.top,
-            selectedDescription.DesktopCoordinates.right,
-            selectedDescription.DesktopCoordinates.bottom
-        };
-        if (!FullyContains(outputDesktop, request.windowDesktop))
+        if (selectionResult == OutputSelectionResult::WindowNotContained)
         {
             return FailureReason::DuplicationUnavailable;
+        }
+
+        ComOwner<IDXGIAdapter1> selectedAdapter;
+        if (FAILED(factory.Get()->EnumAdapters1(
+                selection.adapterIndex, selectedAdapter.Put())))
+        {
+            return FailureReason::AdapterUnavailable;
+        }
+        ComOwner<IDXGIOutput> selectedOutput;
+        if (FAILED(selectedAdapter.Get()->EnumOutputs(
+                selection.outputIndex, selectedOutput.Put())))
+        {
+            return FailureReason::AdapterUnavailable;
         }
 
         DeviceResources candidateResources;
@@ -433,15 +485,28 @@ public:
         return AcquireResult::Frame;
     }
 
-    void ReleaseFrame() override
+    ReleaseResult ReleaseFrame() override
     {
-        if (frameAcquired_ && duplication_.Get()) duplication_.Get()->ReleaseFrame();
+        if (!frameAcquired_) return ReleaseResult::Released;
+        if (!duplication_.Get())
+        {
+            frameAcquired_ = false;
+            return ReleaseResult::Failed;
+        }
+        const HRESULT result = duplication_.Get()->ReleaseFrame();
         frameAcquired_ = false;
+        if (SUCCEEDED(result)) return ReleaseResult::Released;
+        if (result == DXGI_ERROR_ACCESS_LOST) return ReleaseResult::AccessLost;
+        if (result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET)
+        {
+            return ReleaseResult::DeviceRemoved;
+        }
+        return ReleaseResult::Failed;
     }
 
     void Stop() override
     {
-        ReleaseFrame();
+        (void)ReleaseFrame();
         duplication_.Reset();
         output1_.Reset();
         output_.Reset();
@@ -532,7 +597,17 @@ public:
     void Step(CaptureBackend& backend)
     {
         if (!capturing_) return;
-        ReleaseHeldFrame(backend);
+        const ReleaseResult releaseResult = ReleaseHeldFrame(backend);
+        if (releaseResult != ReleaseResult::Released)
+        {
+            const FailureReason releaseFailure = releaseResult == ReleaseResult::AccessLost
+                ? FailureReason::AccessLost
+                : (releaseResult == ReleaseResult::DeviceRemoved
+                    ? FailureReason::DeviceRemoved
+                    : FailureReason::DuplicationUnavailable);
+            RecoverOrFallback(backend, releaseFailure, releaseFailure);
+            return;
+        }
         const std::int64_t now = backend.Counter();
         const std::int64_t frequency = std::max<std::int64_t>(1, backend.Frequency());
         std::uint32_t waitMilliseconds = 16;
@@ -612,25 +687,7 @@ public:
             ? FailureReason::ForcedForTest
             : recoveryFailure;
         ReleaseHeldFrame(backend);
-        if ((recoveryFailure == FailureReason::AccessLost
-                || recoveryFailure == FailureReason::DeviceRemoved)
-            && !rebuildUsed_)
-        {
-            rebuildUsed_ = true;
-            ++diagnostics_.deviceRebuilds;
-            diagnostics_.state = LifecycleState::Rebuilding;
-            backend.Stop();
-            const FailureReason rebuildFailure = backend.Start(request_);
-            if (rebuildFailure == FailureReason::None)
-            {
-                firstFramePending_ = true;
-                firstFrameStarted_ = backend.Counter();
-                return;
-            }
-            EnterFallback(backend, rebuildFailure);
-            return;
-        }
-        EnterFallback(backend, publishedFailure);
+        RecoverOrFallback(backend, recoveryFailure, publishedFailure);
     }
 
     void Hide(CaptureBackend& backend)
@@ -661,16 +718,43 @@ public:
     const Diagnostics& CurrentDiagnostics() const { return diagnostics_; }
 
 private:
-    void ReleaseHeldFrame(CaptureBackend& backend)
+    ReleaseResult ReleaseHeldFrame(CaptureBackend& backend)
     {
-        if (!frameHeld_) return;
-        backend.ReleaseFrame();
+        if (!frameHeld_) return ReleaseResult::Released;
+        const ReleaseResult result = backend.ReleaseFrame();
         frameHeld_ = false;
+        return result;
+    }
+
+    void RecoverOrFallback(
+        CaptureBackend& backend,
+        FailureReason recoveryFailure,
+        FailureReason publishedFailure)
+    {
+        if ((recoveryFailure == FailureReason::AccessLost
+                || recoveryFailure == FailureReason::DeviceRemoved)
+            && !rebuildUsed_)
+        {
+            rebuildUsed_ = true;
+            ++diagnostics_.deviceRebuilds;
+            diagnostics_.state = LifecycleState::Rebuilding;
+            backend.Stop();
+            const FailureReason rebuildFailure = backend.Start(request_);
+            if (rebuildFailure == FailureReason::None)
+            {
+                firstFramePending_ = true;
+                firstFrameStarted_ = backend.Counter();
+                return;
+            }
+            EnterFallback(backend, rebuildFailure);
+            return;
+        }
+        EnterFallback(backend, publishedFailure);
     }
 
     void CleanupVisible(CaptureBackend& backend)
     {
-        ReleaseHeldFrame(backend);
+        (void)ReleaseHeldFrame(backend);
         backend.Stop();
         backend.ClearCaptureExclusion();
         capturing_ = false;
@@ -1223,32 +1307,36 @@ std::shared_ptr<const IconRaster> RasterizeIcon(HICON icon, int sizePx)
 }
 
 #if defined(LLP_MATERIAL_TESTING)
-struct MaterialLifecycleTestReport
+enum MaterialLifecycleValue : std::size_t
 {
-    int selectedAdapter = -1;
-    int selectedOutput = -1;
-    int duplicateCalls = 0;
-    int acquireCalls = 0;
-    unsigned int maximumWaitMilliseconds = 0;
-    int releaseCalls = 0;
-    int redraws = 0;
-    int rebuilds = 0;
-    std::uint64_t acquiredFrames = 0;
-    std::uint64_t lastFrameIdentity = 0;
-    int finalState = 0;
-    int finalPath = 0;
-    int finalFailure = 0;
-    long long firstFrameMicroseconds = 0;
-    int releaseBeforeReacquire = 0;
-    int releaseBeforeRebuild = 0;
-    int releaseBeforeHide = 0;
-    int releaseBeforeFreeze = 0;
-    int hiddenTimedWaits = 0;
-    int hiddenAcquireCalls = 0;
-    int affinityExcluded = 0;
-    int affinityCleared = 0;
-    int partialCropRejected = 0;
+    SelectedAdapter,
+    SelectedOutput,
+    DuplicateCalls,
+    AcquireCalls,
+    MaximumWaitMilliseconds,
+    ReleaseCalls,
+    Redraws,
+    Rebuilds,
+    AcquiredFrames,
+    LastFrameIdentity,
+    FinalState,
+    FinalPath,
+    FinalFailure,
+    FirstFrameMicroseconds,
+    ReleaseBeforeReacquire,
+    ReleaseBeforeRebuild,
+    ReleaseBeforeHide,
+    ReleaseBeforeFreeze,
+    HiddenTimedWaits,
+    HiddenAcquireCalls,
+    AffinityExcluded,
+    AffinityCleared,
+    PartialCropRejected,
+    SelectionOperationCalls,
+    MaterialLifecycleValueCount
 };
+
+static_assert(sizeof(std::int64_t) == 8, "The private fake ABI requires 64-bit values.");
 
 namespace
 {
@@ -1272,23 +1360,29 @@ public:
     {
         ++startCalls;
         if (scenario_ == 9) nowMilliseconds += 40;
-        const std::array<std::array<HMONITOR, 2>, 2> outputs = { {
-            { reinterpret_cast<HMONITOR>(static_cast<UINT_PTR>(0x101)),
-                reinterpret_cast<HMONITOR>(static_cast<UINT_PTR>(0x102)) },
-            { reinterpret_cast<HMONITOR>(static_cast<UINT_PTR>(0x201)), nullptr }
-        } };
-        for (int adapterIndex = 0; adapterIndex < static_cast<int>(outputs.size()); ++adapterIndex)
+        const std::vector<OutputCatalogEntry> catalog = {
+            { 0, 0, reinterpret_cast<HMONITOR>(static_cast<UINT_PTR>(0x101)),
+                { 0, 0, 1920, 1080 } },
+            { 0, 1, request.monitor, { -1920, -100, -1600, 500 } },
+            { 1, 0, reinterpret_cast<HMONITOR>(static_cast<UINT_PTR>(0x102)),
+                { -3840, -100, -1920, 980 } },
+            { 1, 1, request.monitor, { -1920, -100, 0, 980 } }
+        };
+        OutputSelection selection;
+        ++selectionOperationCalls;
+        const OutputSelectionResult selectionResult = SelectCaptureOutput(
+            catalog, request.monitor, request.windowDesktop, selection);
+        if (selectionResult == OutputSelectionResult::MonitorNotFound)
         {
-            for (int outputIndex = 0; outputIndex < static_cast<int>(outputs[adapterIndex].size()); ++outputIndex)
-            {
-                if (outputs[adapterIndex][outputIndex] == request.monitor)
-                {
-                    selectedAdapter = adapterIndex;
-                    selectedOutput = outputIndex;
-                }
-            }
+            return FailureReason::AdapterUnavailable;
         }
-        if (selectedAdapter < 0) return FailureReason::AdapterUnavailable;
+        if (selectionResult == OutputSelectionResult::WindowNotContained)
+        {
+            return FailureReason::DuplicationUnavailable;
+        }
+        selectedAdapter = static_cast<int>(selection.adapterIndex);
+        selectedOutput = static_cast<int>(selection.outputIndex);
+        partialCropRejected = selectedAdapter == 1 && selectedOutput == 1;
         ++duplicateCalls;
         return FailureReason::None;
     }
@@ -1356,28 +1450,61 @@ public:
             ++redraws;
             return AcquireResult::Frame;
         }
+        if (scenario_ == 10)
+        {
+            if (startCalls == 1 && acquireCalls == 1)
+            {
+                frameOutstanding = true;
+                identity = 101;
+                ++redraws;
+                return AcquireResult::Frame;
+            }
+            frameOutstanding = true;
+            identity = 102;
+            ++redraws;
+            return AcquireResult::Frame;
+        }
+        if (scenario_ == 11)
+        {
+            if (startCalls == 1) return AcquireResult::DeviceRemoved;
+            frameOutstanding = true;
+            identity = 111;
+            ++redraws;
+            return AcquireResult::Frame;
+        }
+        if (scenario_ == 12)
+        {
+            frameOutstanding = true;
+            identity = 120;
+            ++redraws;
+            return AcquireResult::Frame;
+        }
         frameOutstanding = true;
         identity = 1;
         ++redraws;
         return AcquireResult::Frame;
     }
 
-    void ReleaseFrame() override
+    ReleaseResult ReleaseFrame() override
     {
-        if (!frameOutstanding) return;
+        if (!frameOutstanding) return ReleaseResult::Released;
         ++releaseCalls;
         if (scenario_ == 2 && startCalls == 2) releaseBeforeHide = true;
         if (scenario_ == 7) releaseBeforeFreeze = true;
         frameOutstanding = false;
+        if (scenario_ == 10 && startCalls == 1) return ReleaseResult::AccessLost;
+        if (scenario_ == 12) return ReleaseResult::Failed;
+        return ReleaseResult::Released;
     }
 
     void Stop() override
     {
-        if ((scenario_ == 2 || scenario_ == 3) && startCalls == 1 && !frameOutstanding)
+        if ((scenario_ == 2 || scenario_ == 3 || scenario_ == 10 || scenario_ == 11)
+            && startCalls == 1 && !frameOutstanding)
         {
             releaseBeforeRebuild = true;
         }
-        ReleaseFrame();
+        (void)ReleaseFrame();
     }
 
     std::int64_t Counter() const override { return nowMilliseconds; }
@@ -1394,6 +1521,8 @@ public:
     int redraws = 0;
     int affinityExcluded = 0;
     int affinityCleared = 0;
+    int selectionOperationCalls = 0;
+    bool partialCropRejected = false;
     bool releaseBeforeReacquire = false;
     bool releaseBeforeRebuild = false;
     bool releaseBeforeHide = false;
@@ -1408,9 +1537,12 @@ private:
 
 extern "C" int LLP_MaterialRunFakeLifecycleScenario(
     int scenario,
-    MaterialLifecycleTestReport* report)
+    std::int64_t* values,
+    std::size_t valueCount)
 {
-    if (!report || scenario < 0 || scenario > 9) return 2;
+    if (!values || valueCount != MaterialLifecycleValueCount
+        || scenario < 0 || scenario > 12) return 2;
+    std::fill(values, values + valueCount, 0);
     FakeCaptureBackend backend(scenario);
     CaptureLifecycle lifecycle;
     ShowRequest request;
@@ -1472,32 +1604,48 @@ extern "C" int LLP_MaterialRunFakeLifecycleScenario(
     {
         lifecycle.Step(backend);
     }
+    else if (scenario == 10)
+    {
+        lifecycle.Step(backend);
+        lifecycle.Step(backend);
+        lifecycle.Step(backend);
+    }
+    else if (scenario == 11)
+    {
+        lifecycle.Step(backend);
+        lifecycle.Step(backend);
+    }
+    else if (scenario == 12)
+    {
+        lifecycle.Step(backend);
+        lifecycle.Step(backend);
+    }
 
     const Diagnostics diagnostics = lifecycle.CurrentDiagnostics();
-    report->selectedAdapter = backend.selectedAdapter;
-    report->selectedOutput = backend.selectedOutput;
-    report->duplicateCalls = backend.duplicateCalls;
-    report->acquireCalls = backend.acquireCalls;
-    report->maximumWaitMilliseconds = backend.maximumWaitMilliseconds;
-    report->releaseCalls = backend.releaseCalls;
-    report->redraws = backend.redraws;
-    report->rebuilds = static_cast<int>(diagnostics.deviceRebuilds);
-    report->acquiredFrames = diagnostics.acquiredFrames;
-    report->lastFrameIdentity = diagnostics.lastFrameIdentity;
-    report->finalState = static_cast<int>(diagnostics.state);
-    report->finalPath = static_cast<int>(diagnostics.path);
-    report->finalFailure = static_cast<int>(diagnostics.failure);
-    report->firstFrameMicroseconds = static_cast<long long>(diagnostics.firstFrameMs * 1000.0);
-    report->releaseBeforeReacquire = backend.releaseBeforeReacquire ? 1 : 0;
-    report->releaseBeforeRebuild = backend.releaseBeforeRebuild ? 1 : 0;
-    report->releaseBeforeHide = backend.releaseBeforeHide ? 1 : 0;
-    report->releaseBeforeFreeze = backend.releaseBeforeFreeze ? 1 : 0;
-    report->hiddenTimedWaits = hiddenTimedWaits;
-    report->hiddenAcquireCalls = hiddenAcquireCalls;
-    report->affinityExcluded = backend.affinityExcluded;
-    report->affinityCleared = backend.affinityCleared;
-    report->partialCropRejected = FullyContains(
-        { -1920, -100, 0, 980 }, { -2000, 20, -1400, 420 }) ? 0 : 1;
+    values[SelectedAdapter] = backend.selectedAdapter;
+    values[SelectedOutput] = backend.selectedOutput;
+    values[DuplicateCalls] = backend.duplicateCalls;
+    values[AcquireCalls] = backend.acquireCalls;
+    values[MaximumWaitMilliseconds] = backend.maximumWaitMilliseconds;
+    values[ReleaseCalls] = backend.releaseCalls;
+    values[Redraws] = backend.redraws;
+    values[Rebuilds] = static_cast<std::int64_t>(diagnostics.deviceRebuilds);
+    values[AcquiredFrames] = static_cast<std::int64_t>(diagnostics.acquiredFrames);
+    values[LastFrameIdentity] = static_cast<std::int64_t>(diagnostics.lastFrameIdentity);
+    values[FinalState] = static_cast<int>(diagnostics.state);
+    values[FinalPath] = static_cast<int>(diagnostics.path);
+    values[FinalFailure] = static_cast<int>(diagnostics.failure);
+    values[FirstFrameMicroseconds] = static_cast<long long>(diagnostics.firstFrameMs * 1000.0);
+    values[ReleaseBeforeReacquire] = backend.releaseBeforeReacquire ? 1 : 0;
+    values[ReleaseBeforeRebuild] = backend.releaseBeforeRebuild ? 1 : 0;
+    values[ReleaseBeforeHide] = backend.releaseBeforeHide ? 1 : 0;
+    values[ReleaseBeforeFreeze] = backend.releaseBeforeFreeze ? 1 : 0;
+    values[HiddenTimedWaits] = hiddenTimedWaits;
+    values[HiddenAcquireCalls] = hiddenAcquireCalls;
+    values[AffinityExcluded] = backend.affinityExcluded;
+    values[AffinityCleared] = backend.affinityCleared;
+    values[PartialCropRejected] = backend.partialCropRejected ? 1 : 0;
+    values[SelectionOperationCalls] = backend.selectionOperationCalls;
     return 0;
 }
 #endif

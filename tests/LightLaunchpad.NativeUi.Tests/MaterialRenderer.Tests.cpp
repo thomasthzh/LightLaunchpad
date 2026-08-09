@@ -7,6 +7,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cmath>
 #include <iostream>
@@ -41,11 +42,13 @@ struct MaterialLifecycleTestReport
     int affinityExcluded = 0;
     int affinityCleared = 0;
     int partialCropRejected = 0;
+    int selectionOperationCalls = 0;
 };
 
 extern "C" int LLP_MaterialRunFakeLifecycleScenario(
     int scenario,
-    MaterialLifecycleTestReport* report);
+    std::int64_t* values,
+    std::size_t valueCount);
 
 namespace
 {
@@ -58,6 +61,37 @@ using llp::material::RendererDependenciesAvailable;
 using llp::material::ResolveMaterialTone;
 
 int passed = 0;
+
+enum MaterialLifecycleValue : std::size_t
+{
+    SelectedAdapter,
+    SelectedOutput,
+    DuplicateCalls,
+    AcquireCalls,
+    MaximumWaitMilliseconds,
+    ReleaseCalls,
+    Redraws,
+    Rebuilds,
+    AcquiredFrames,
+    LastFrameIdentity,
+    FinalState,
+    FinalPath,
+    FinalFailure,
+    FirstFrameMicroseconds,
+    ReleaseBeforeReacquire,
+    ReleaseBeforeRebuild,
+    ReleaseBeforeHide,
+    ReleaseBeforeFreeze,
+    HiddenTimedWaits,
+    HiddenAcquireCalls,
+    AffinityExcluded,
+    AffinityCleared,
+    PartialCropRejected,
+    SelectionOperationCalls,
+    MaterialLifecycleValueCount
+};
+
+static_assert(sizeof(std::int64_t) == 8, "The private fake ABI requires 64-bit values.");
 
 struct ExpectedModernPixel
 {
@@ -603,10 +637,58 @@ void TestRendererImmediateShowHideStress()
 
 MaterialLifecycleTestReport RunFakeLifecycle(int scenario)
 {
-    MaterialLifecycleTestReport report;
-    Require(LLP_MaterialRunFakeLifecycleScenario(scenario, &report) == 0,
+    constexpr std::int64_t guard = 0x1122334455667788ll;
+    std::array<std::int64_t, MaterialLifecycleValueCount + 1> values = {};
+    values.back() = guard;
+    Require(LLP_MaterialRunFakeLifecycleScenario(
+                scenario, values.data(), MaterialLifecycleValueCount) == 0,
         "The private fake capture backend rejected a lifecycle scenario.");
+    Require(values.back() == guard,
+        "The private fake capture ABI wrote beyond the caller-provided value count.");
+    MaterialLifecycleTestReport report;
+    report.selectedAdapter = static_cast<int>(values[SelectedAdapter]);
+    report.selectedOutput = static_cast<int>(values[SelectedOutput]);
+    report.duplicateCalls = static_cast<int>(values[DuplicateCalls]);
+    report.acquireCalls = static_cast<int>(values[AcquireCalls]);
+    report.maximumWaitMilliseconds = static_cast<unsigned int>(values[MaximumWaitMilliseconds]);
+    report.releaseCalls = static_cast<int>(values[ReleaseCalls]);
+    report.redraws = static_cast<int>(values[Redraws]);
+    report.rebuilds = static_cast<int>(values[Rebuilds]);
+    report.acquiredFrames = static_cast<std::uint64_t>(values[AcquiredFrames]);
+    report.lastFrameIdentity = static_cast<std::uint64_t>(values[LastFrameIdentity]);
+    report.finalState = static_cast<int>(values[FinalState]);
+    report.finalPath = static_cast<int>(values[FinalPath]);
+    report.finalFailure = static_cast<int>(values[FinalFailure]);
+    report.firstFrameMicroseconds = values[FirstFrameMicroseconds];
+    report.releaseBeforeReacquire = static_cast<int>(values[ReleaseBeforeReacquire]);
+    report.releaseBeforeRebuild = static_cast<int>(values[ReleaseBeforeRebuild]);
+    report.releaseBeforeHide = static_cast<int>(values[ReleaseBeforeHide]);
+    report.releaseBeforeFreeze = static_cast<int>(values[ReleaseBeforeFreeze]);
+    report.hiddenTimedWaits = static_cast<int>(values[HiddenTimedWaits]);
+    report.hiddenAcquireCalls = static_cast<int>(values[HiddenAcquireCalls]);
+    report.affinityExcluded = static_cast<int>(values[AffinityExcluded]);
+    report.affinityCleared = static_cast<int>(values[AffinityCleared]);
+    report.partialCropRejected = static_cast<int>(values[PartialCropRejected]);
+    report.selectionOperationCalls = static_cast<int>(values[SelectionOperationCalls]);
     return report;
+}
+
+void TestPrivateFakeAbiIsExplicitAndBounded()
+{
+    std::array<std::int64_t, MaterialLifecycleValueCount + 1> values = {};
+    Require(LLP_MaterialRunFakeLifecycleScenario(
+                0, nullptr, MaterialLifecycleValueCount) == 2,
+        "The private fake ABI accepted a null output buffer.");
+    Require(LLP_MaterialRunFakeLifecycleScenario(
+                0, values.data(), MaterialLifecycleValueCount - 1) == 2,
+        "The private fake ABI accepted a short output buffer.");
+    Require(LLP_MaterialRunFakeLifecycleScenario(
+                0, values.data(), MaterialLifecycleValueCount + 1) == 2,
+        "The private fake ABI accepted a mismatched output count.");
+    Require(LLP_MaterialRunFakeLifecycleScenario(
+                -1, values.data(), MaterialLifecycleValueCount) == 2,
+        "The private fake ABI accepted an unknown scenario.");
+    Pass("MaterialRenderer_PrivateFakeAbiIsExplicitAndBounded");
 }
 
 void TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport()
@@ -627,17 +709,80 @@ void TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport()
         "270-degree output rotation changed desktop alignment.");
 
     const auto report = RunFakeLifecycle(0);
-    Require(report.selectedAdapter == 1 && report.selectedOutput == 0,
-        "Output enumeration did not bind the exact target HMONITOR on its adapter.");
+    Require(report.selectedAdapter == 1 && report.selectedOutput == 1,
+        "Shared output selection did not skip wrong and partial candidates for the later exact output.");
     Require(report.duplicateCalls == 1,
         "DuplicateOutput was not called exactly once for the visible activation.");
     Require(report.partialCropRejected == 1,
         "Capture accepted a partially clamped window instead of requiring full containment.");
+    Require(report.selectionOperationCalls == 1,
+        "The fake backend bypassed the production output selection operation.");
     std::cout << "METRIC MaterialCaptureOutput adapter=" << report.selectedAdapter
               << " output=" << report.selectedOutput
               << " duplicateCalls=" << report.duplicateCalls
               << " partialRejected=" << report.partialCropRejected << "\n";
     Pass("MaterialRenderer_OutputSelectionRotationsAndContainmentAreExact");
+}
+
+
+void TestReleaseAccessLossRecoversBeforeAnotherAcquire()
+{
+    const auto report = RunFakeLifecycle(10);
+    Require(report.rebuilds == 1 && report.duplicateCalls == 2,
+        "ReleaseFrame access loss did not consume exactly one bounded duplication rebuild.");
+    Require(report.acquireCalls == 2 && report.acquiredFrames == 2
+            && report.lastFrameIdentity == 102,
+        "ReleaseFrame access loss waited for an extra Acquire or lost the recovered frame.");
+    Require(report.releaseCalls == 1 && report.releaseBeforeRebuild == 1
+            && report.releaseBeforeReacquire == 1,
+        "ReleaseFrame access loss did not release ownership before rebuild and reacquire.");
+    Require(report.finalState == static_cast<int>(llp::material::LifecycleState::Live)
+            && report.finalPath == static_cast<int>(llp::material::RenderPath::HighFidelity)
+            && report.finalFailure == static_cast<int>(llp::material::FailureReason::None),
+        "ReleaseFrame access-loss recovery did not return to a stable live state.");
+    std::cout << "METRIC MaterialReleaseAccessLost acquireCalls=" << report.acquireCalls
+              << " releases=" << report.releaseCalls
+              << " rebuilds=" << report.rebuilds
+              << " duplicateCalls=" << report.duplicateCalls << "\n";
+    Pass("MaterialRenderer_ReleaseAccessLossRecoversBeforeAcquire");
+}
+
+void TestAcquireDeviceRemovalUsesOneBoundedRebuild()
+{
+    const auto report = RunFakeLifecycle(11);
+    Require(report.rebuilds == 1 && report.duplicateCalls == 2,
+        "AcquireNextFrame device removal did not consume exactly one bounded rebuild.");
+    Require(report.acquireCalls == 2 && report.acquiredFrames == 1
+            && report.lastFrameIdentity == 111,
+        "AcquireNextFrame device-removal recovery did not publish the recovered frame.");
+    Require(report.releaseBeforeRebuild == 1,
+        "Device-removal recovery did not establish released ownership before rebuild.");
+    Require(report.finalState == static_cast<int>(llp::material::LifecycleState::Live)
+            && report.finalFailure == static_cast<int>(llp::material::FailureReason::None),
+        "Device-removal recovery did not return to a stable live state.");
+    std::cout << "METRIC MaterialAcquireDeviceRemoved acquireCalls=" << report.acquireCalls
+              << " rebuilds=" << report.rebuilds
+              << " duplicateCalls=" << report.duplicateCalls << "\n";
+    Pass("MaterialRenderer_AcquireDeviceRemovalUsesOneRebuild");
+}
+
+void TestReleaseGenericFailureFallsBackWithoutRebuild()
+{
+    const auto report = RunFakeLifecycle(12);
+    Require(report.acquireCalls == 1 && report.releaseCalls == 1,
+        "A generic ReleaseFrame failure continued into another acquisition.");
+    Require(report.rebuilds == 0 && report.duplicateCalls == 1,
+        "A generic ReleaseFrame failure incorrectly consumed the rebuild budget.");
+    Require(report.finalState == static_cast<int>(llp::material::LifecycleState::Fallback)
+            && report.finalPath == static_cast<int>(llp::material::RenderPath::Fallback)
+            && report.finalFailure == static_cast<int>(llp::material::FailureReason::DuplicationUnavailable),
+        "A generic ReleaseFrame failure did not publish stable duplication fallback.");
+    Require(report.affinityCleared >= 1,
+        "Generic ReleaseFrame fallback retained capture exclusion affinity.");
+    std::cout << "METRIC MaterialReleaseGeneric acquireCalls=" << report.acquireCalls
+              << " rebuilds=" << report.rebuilds
+              << " failure=" << report.finalFailure << "\n";
+    Pass("MaterialRenderer_ReleaseGenericFailureFallsBack");
 }
 
 void TestFirstFrameDeadlineAndTimeoutDoNotRedraw()
@@ -790,6 +935,7 @@ int main()
         TestRendererThreadBootstrapsGpuDependenciesAndReturnsHidden();
         TestRendererConstructionAndImmediateDestructionStress();
         TestRendererImmediateShowHideStress();
+        TestPrivateFakeAbiIsExplicitAndBounded();
         TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport();
         TestFirstFrameDeadlineAndTimeoutDoNotRedraw();
         TestFramesReleaseBeforeReacquireRebuildAndHide();
@@ -798,8 +944,11 @@ int main()
         TestFreezeReleasesCaptureAndClearsAffinity();
         TestLateFirstFrameIsReleasedAndFallsBack();
         TestBackendStartupDoesNotConsumeFirstFrameAcquireBudget();
+        TestReleaseAccessLossRecoversBeforeAnotherAcquire();
+        TestAcquireDeviceRemovalUsesOneBoundedRebuild();
+        TestReleaseGenericFailureFallsBackWithoutRebuild();
         TestHideRequestRemainsAsynchronous();
-        constexpr int expected = 20;
+        constexpr int expected = 24;
         std::cout << passed << "/" << expected << " tests passed\n";
         return passed == expected ? 0 : 1;
     }

@@ -51,11 +51,32 @@ try {
     Add-Type -AssemblyName UIAutomationTypes
     Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 public static class LightLaunchpadMaterialProbeNative {
     public delegate bool EnumWindowsCallback(IntPtr hwnd, IntPtr state);
+    private delegate void WinEventDelegate(IntPtr hook, uint eventType, IntPtr hwnd, int objectId, int childId, uint threadId, uint time);
+    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int x; public int y; }
+    [StructLayout(LayoutKind.Sequential)] private struct MSG {
+        public IntPtr hwnd;
+        public uint message;
+        public UIntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public POINT point;
+        public uint privateValue;
+    }
+    private static WinEventDelegate windowEventCallback;
+    private static IntPtr windowEventHook;
+    private static readonly ConcurrentDictionary<uint, int> windowEvents = new ConcurrentDictionary<uint, int>();
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr state);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll", SetLastError=true)] private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr module, WinEventDelegate callback, uint processId, uint threadId, uint flags);
+    [DllImport("user32.dll")] private static extern bool UnhookWinEvent(IntPtr hook);
+    [DllImport("user32.dll")] private static extern bool PeekMessage(out MSG message, IntPtr hwnd, uint minimum, uint maximum, uint remove);
+    [DllImport("user32.dll")] private static extern bool TranslateMessage(ref MSG message);
+    [DllImport("user32.dll")] private static extern IntPtr DispatchMessage(ref MSG message);
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
     public static IntPtr FindWindowForProcess(uint expectedProcessId) {
         IntPtr result = IntPtr.Zero;
@@ -66,6 +87,38 @@ public static class LightLaunchpadMaterialProbeNative {
             return true;
         }, IntPtr.Zero);
         return result;
+    }
+    private static void OnWindowEvent(IntPtr hook, uint eventType, IntPtr hwnd, int objectId, int childId, uint threadId, uint time) {
+        if ((eventType != 0x8000 && eventType != 0x8002) || hwnd == IntPtr.Zero || objectId != 0 || childId != 0) return;
+        if (GetAncestor(hwnd, 2) != hwnd) return;
+        uint processId;
+        GetWindowThreadProcessId(hwnd, out processId);
+        if (processId != 0) windowEvents.AddOrUpdate(processId, 1, (key, count) => count + 1);
+    }
+    public static void StartWindowEventMonitor() {
+        if (windowEventHook != IntPtr.Zero) throw new InvalidOperationException("Window event monitor is already active.");
+        windowEvents.Clear();
+        windowEventCallback = OnWindowEvent;
+        windowEventHook = SetWinEventHook(0x8000, 0x8002, IntPtr.Zero, windowEventCallback, 0, 0, 0);
+        if (windowEventHook == IntPtr.Zero) throw new InvalidOperationException("SetWinEventHook failed.");
+    }
+    public static void PumpWindowEvents() {
+        MSG message;
+        while (PeekMessage(out message, IntPtr.Zero, 0, 0, 1)) {
+            TranslateMessage(ref message);
+            DispatchMessage(ref message);
+        }
+    }
+    public static int WindowEventCount(uint processId) {
+        int count;
+        return windowEvents.TryGetValue(processId, out count) ? count : 0;
+    }
+    public static void StopWindowEventMonitor() {
+        if (windowEventHook != IntPtr.Zero) {
+            UnhookWinEvent(windowEventHook);
+            windowEventHook = IntPtr.Zero;
+        }
+        windowEventCallback = null;
     }
 }
 '@
@@ -93,6 +146,11 @@ public static class LightLaunchpadMaterialProbeNative {
     & (Join-Path $llpRepoRoot 'tools\build-native-ui.ps1') -OutputDirectory $llpOutputDirectory -ProductVersion '1.11.0' -BuildCommit $llpBuildCommit -BuildChannel Development | Out-Null
     $llpExecutable = Join-Path $llpOutputDirectory 'LightLaunchpad.NativeUi.exe'
     $llpExecutableHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $llpExecutable).Hash
+    $llpObjdump = (where.exe objdump | Select-Object -First 1)
+    Assert-True (-not [string]::IsNullOrWhiteSpace($llpObjdump)) 'objdump was not found for production fake-symbol verification.'
+    $llpDevelopmentSymbols = ((& $llpObjdump -t $llpExecutable 2>&1) -join [Environment]::NewLine)
+    Assert-Equal 0 $LASTEXITCODE 'objdump could not inspect the development production executable.'
+    Assert-True (-not $llpDevelopmentSymbols.Contains('LLP_MaterialRunFakeLifecycleScenario')) 'Development production executable contained the private fake lifecycle runner.'
 
     $llpPriorAppData = $env:APPDATA
     $llpPriorLocalAppData = $env:LOCALAPPDATA
@@ -240,28 +298,52 @@ public static class LightLaunchpadMaterialProbeNative {
     & (Join-Path $llpStableSource 'tools\build-native-ui.ps1') -OutputDirectory $llpStableOutput -ProductVersion '1.11.0' -BuildCommit $llpBuildCommit -BuildChannel Stable | Out-Null
     $llpStableExecutable = Join-Path $llpStableOutput 'LightLaunchpad.NativeUi.exe'
     $llpStableHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $llpStableExecutable).Hash
+    $llpStableSymbols = ((& $llpObjdump -t $llpStableExecutable 2>&1) -join [Environment]::NewLine)
+    Assert-Equal 0 $LASTEXITCODE 'objdump could not inspect the stable production executable.'
+    Assert-True (-not $llpStableSymbols.Contains('LLP_MaterialRunFakeLifecycleScenario')) 'Stable production executable contained the private fake lifecycle runner.'
+    $llpStableWindowEvents = 0
     foreach ($llpStableArguments in @(
         @('--material-probe-file', (Join-Path $llpTempRoot 'stable-probe.json')),
         @('--material-force-failure', 'duplication')
     )) {
-        $llpPriorAppData = $env:APPDATA
-        $llpPriorLocalAppData = $env:LOCALAPPDATA
-        $llpPriorUserProfile = $env:USERPROFILE
+        $llpStableProcess = $null
+        [LightLaunchpadMaterialProbeNative]::StartWindowEventMonitor()
         try {
-            $env:APPDATA = $llpAppData
-            $env:LOCALAPPDATA = $llpLocalAppData
-            $env:USERPROFILE = $llpUserProfile
-            $llpStableProcess = Start-Process -FilePath $llpStableExecutable -ArgumentList ([string[]]$llpStableArguments) -PassThru -WindowStyle Hidden
+            $llpPriorAppData = $env:APPDATA
+            $llpPriorLocalAppData = $env:LOCALAPPDATA
+            $llpPriorUserProfile = $env:USERPROFILE
+            try {
+                $env:APPDATA = $llpAppData
+                $env:LOCALAPPDATA = $llpLocalAppData
+                $env:USERPROFILE = $llpUserProfile
+                $llpStableProcess = Start-Process -FilePath $llpStableExecutable -ArgumentList ([string[]]$llpStableArguments) -PassThru -WindowStyle Hidden
+            }
+            finally {
+                $env:APPDATA = $llpPriorAppData
+                $env:LOCALAPPDATA = $llpPriorLocalAppData
+                $env:USERPROFILE = $llpPriorUserProfile
+            }
+            $llpCapturedProcesses += $llpStableProcess
+            $llpStableDeadline = [DateTime]::UtcNow.AddSeconds(5)
+            do {
+                [LightLaunchpadMaterialProbeNative]::PumpWindowEvents()
+                Start-Sleep -Milliseconds 10
+                $llpStableProcess.Refresh()
+            } while (-not $llpStableProcess.HasExited -and [DateTime]::UtcNow -lt $llpStableDeadline)
+            for ($llpPump = 0; $llpPump -lt 8; $llpPump++) {
+                [LightLaunchpadMaterialProbeNative]::PumpWindowEvents()
+                Start-Sleep -Milliseconds 10
+            }
+            Assert-True $llpStableProcess.HasExited 'Stable material test switch did not exit before app startup.'
+            Assert-Equal 2 $llpStableProcess.ExitCode 'Stable material test switch was not rejected with exit 2.'
+            $llpStableProcessWindowEvents = [LightLaunchpadMaterialProbeNative]::WindowEventCount([uint32]$llpStableProcess.Id)
+            $llpStableWindowEvents += $llpStableProcessWindowEvents
+            Assert-Equal 0 $llpStableProcessWindowEvents 'Stable material switch emitted a top-level window create/show event before rejection.'
+            Assert-Equal ([IntPtr]::Zero) ([LightLaunchpadMaterialProbeNative]::FindWindowForProcess([uint32]$llpStableProcess.Id)) 'Stable material switch left a window after rejection.'
         }
         finally {
-            $env:APPDATA = $llpPriorAppData
-            $env:LOCALAPPDATA = $llpPriorLocalAppData
-            $env:USERPROFILE = $llpPriorUserProfile
+            [LightLaunchpadMaterialProbeNative]::StopWindowEventMonitor()
         }
-        $llpCapturedProcesses += $llpStableProcess
-        Assert-True ($llpStableProcess.WaitForExit(5000)) 'Stable material test switch did not exit before app startup.'
-        Assert-Equal 2 $llpStableProcess.ExitCode 'Stable material test switch was not rejected with exit 2.'
-        Assert-Equal ([IntPtr]::Zero) ([LightLaunchpadMaterialProbeNative]::FindWindowForProcess([uint32]$llpStableProcess.Id)) 'Stable material switch created a window before rejection.'
     }
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $llpTempRoot 'stable-probe.json'))) 'Stable material switch created a probe file before rejection.'
 
@@ -274,7 +356,7 @@ public static class LightLaunchpadMaterialProbeNative {
     Assert-Equal ($llpHistoricalTempBefore -join '|') ($llpHistoricalTempAfter -join '|') 'Material lifecycle harness changed historical LightLaunchpad temp roots.'
 
     Write-Output "METRIC MaterialLifecycle exe='$llpExecutable' sha256=$llpExecutableHash stableSha256=$llpStableHash forcedAcquired=$([uint64]$llpHidden.acquiredFrames) hiddenGeneration=$llpHiddenGeneration refreshedGeneration=$([uint64]$llpHiddenAgain.probeGeneration) normalPath=$([string]$llpNormalProbe.path) normalFailure=$([string]$llpNormalProbe.failure) normalAcquired=$([uint64]$llpNormalProbe.acquiredFrames) normalRebuilds=$([uint64]$llpNormalProbe.deviceRebuilds) normalLastFrame=$([uint64]$llpNormalProbe.lastFrameIdentity)"
-    Write-Output "METRIC MaterialIsolation protectedPids=$($llpProcessIdsAfter -join ',') historicalTempRoots=$($llpHistoricalTempAfter.Count) startupUnchanged=true"
+    Write-Output "METRIC MaterialIsolation protectedPids=$($llpProcessIdsAfter -join ',') historicalTempRoots=$($llpHistoricalTempAfter.Count) stableWindowEvents=$llpStableWindowEvents productionFakeSymbol=false startupUnchanged=true"
     Write-Output 'PASS MaterialRendererBehavior_ForcedFallbackSearchAndHiddenLifecycle'
 }
 finally {
