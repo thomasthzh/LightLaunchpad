@@ -1,5 +1,81 @@
 # Error Log
 
+## [ERR-20260809-009] search-index-windows-powershell-string-overload
+
+**Logged**: 2026-08-09T17:05:00+08:00
+**Priority**: medium
+**Status**: in_progress
+**Area**: tests
+
+### Summary
+
+The NativeUi baseline stopped in `SearchIndex.Tests.ps1` because Windows PowerShell 5.1 cannot bind the two-argument `String.Contains(string, StringComparison)` overload.
+
+### Error
+
+```text
+Cannot find an overload for "Contains" and the argument count: "2".
+```
+
+### Context
+
+- The full baseline runner uses Windows PowerShell 5.1.
+- `SearchIndex.Tests.ps1` line 28 calls `$llpHeader.Contains($llpEvidence, [System.StringComparison]::Ordinal)`.
+- The same unchanged test works under PowerShell 7, so the failure is test-runner compatibility rather than production search behavior.
+- Earlier NativeUi suites, including the repaired Launchpad flow, had passed before this stop.
+
+### Suggested Fix
+
+Use the Windows PowerShell 5.1-compatible `IndexOf(string, StringComparison) -ge 0` form while preserving ordinal provenance matching, then run the focused suite twice under Windows PowerShell 5.1 before repeating the complete baseline.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/SearchIndex.Tests.ps1`
+- See Also: `ERR-20260809-005`
+
+---
+
+## [ERR-20260809-008] search-index-test-path-assumption
+
+**Logged**: 2026-08-09T17:04:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+A read-only inspection assumed the SearchIndex test lived under `tests/NativeUi`, but the repository stores it under `tests/LightLaunchpad.NativeUi.Tests`.
+
+### Error
+
+```text
+Cannot find path 'tests/NativeUi/SearchIndex.Tests.ps1' because it does not exist.
+```
+
+### Context
+
+- The command combined Git status checks with a direct `Get-Content` on the assumed path.
+- Git state queries completed; only the file read failed.
+- No repository, product process, installation, startup item, or temporary data changed.
+
+### Suggested Fix
+
+Resolve unfamiliar repository paths with `rg --files` before opening them. The verified path is `tests/LightLaunchpad.NativeUi.Tests/SearchIndex.Tests.ps1`.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/SearchIndex.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T17:04:00+08:00
+- **Commit/PR**: next scoped learning-log commit
+- **Notes**: Located the file with `rg --files | rg 'SearchIndex\\.Tests\\.ps1$'` and resumed inspection at the verified path.
+
+---
+
 ## [ERR-20260802-001] native-settings-red-test-startup-isolation
 
 **Logged**: 2026-08-02T04:59:27+08:00
