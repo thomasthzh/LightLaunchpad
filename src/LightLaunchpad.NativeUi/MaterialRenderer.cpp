@@ -1,22 +1,54 @@
 #include "MaterialRenderer.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 
 namespace llp::material
 {
 namespace
 {
+bool SameColor(llp::adaptive::Color first, llp::adaptive::Color second)
+{
+    return first.red == second.red && first.green == second.green && first.blue == second.blue;
+}
+
+template <std::size_t candidateCount>
 llp::adaptive::Color ChooseContrastColor(
-    llp::adaptive::Color preferred,
-    llp::adaptive::Color alternate,
-    llp::adaptive::Color lastResort,
+    const std::array<llp::adaptive::Color, candidateCount>& candidates,
     llp::adaptive::Color surface,
     double minimumRatio)
 {
-    if (llp::adaptive::ContrastRatio(preferred, surface) >= minimumRatio) return preferred;
-    if (llp::adaptive::ContrastRatio(alternate, surface) >= minimumRatio) return alternate;
-    return lastResort;
+    for (std::size_t index = 0; index < candidates.size(); ++index)
+    {
+        bool alreadyChecked = false;
+        for (std::size_t prior = 0; prior < index; ++prior)
+        {
+            if (SameColor(candidates[index], candidates[prior]))
+            {
+                alreadyChecked = true;
+                break;
+            }
+        }
+        if (!alreadyChecked && llp::adaptive::ContrastRatio(candidates[index], surface) >= minimumRatio)
+        {
+            return candidates[index];
+        }
+    }
+
+    const llp::adaptive::Color black = { 0, 0, 0 };
+    const llp::adaptive::Color white = { 255, 255, 255 };
+    const double blackRatio = llp::adaptive::ContrastRatio(black, surface);
+    const double whiteRatio = llp::adaptive::ContrastRatio(white, surface);
+    const auto fallback = blackRatio >= whiteRatio ? black : white;
+    const double fallbackRatio = std::max(blackRatio, whiteRatio);
+    if (fallbackRatio < minimumRatio)
+    {
+        throw std::logic_error("No material color satisfies the required contrast ratio.");
+    }
+    return fallback;
 }
 }
 
@@ -52,8 +84,11 @@ PixelRect MapWindowCrop(PixelRect outputDesktop, PixelRect windowDesktop, Output
 
 float PixelsToDip(float pixels, int dpi)
 {
+    if (!std::isfinite(pixels)) return 0.0f;
     const int effectiveDpi = dpi > 0 ? dpi : 96;
-    return pixels * 96.0f / static_cast<float>(effectiveDpi);
+    const double converted = static_cast<double>(pixels) * 96.0 / static_cast<double>(effectiveDpi);
+    const double largestFloat = static_cast<double>(std::numeric_limits<float>::max());
+    return static_cast<float>(std::clamp(converted, -largestFloat, largestFloat));
 }
 
 SearchSample ComputeSearchSample(
@@ -63,41 +98,53 @@ SearchSample ComputeSearchSample(
     int dpi,
     bool reducedMotion)
 {
-    const float left = std::min(bounds.left, bounds.right);
-    const float right = std::max(bounds.left, bounds.right);
-    const float top = std::min(bounds.top, bounds.bottom);
-    const float bottom = std::max(bounds.top, bounds.bottom);
-    const float destinationX = std::clamp(destinationXDip, left, right);
-    const float destinationY = std::clamp(destinationYDip, top, bottom);
-    if (reducedMotion || left == right || top == bottom)
+    if (!std::isfinite(bounds.left) || !std::isfinite(bounds.top)
+        || !std::isfinite(bounds.right) || !std::isfinite(bounds.bottom)
+        || bounds.right <= bounds.left || bounds.bottom <= bounds.top)
     {
-        return { destinationX, destinationY, 0.0f };
+        return {};
     }
 
-    const float centerX = (left + right) * 0.5f;
-    const float centerY = (top + bottom) * 0.5f;
-    const float vectorX = centerX - destinationX;
-    const float vectorY = centerY - destinationY;
-    const float vectorLength = std::sqrt(vectorX * vectorX + vectorY * vectorY);
-    if (vectorLength == 0.0f) return { destinationX, destinationY, 0.0f };
+    const double left = bounds.left;
+    const double right = bounds.right;
+    const double top = bounds.top;
+    const double bottom = bounds.bottom;
+    const double centerX = (left + right) * 0.5;
+    const double centerY = (top + bottom) * 0.5;
+    const double destinationX = std::isfinite(destinationXDip)
+        ? std::clamp(static_cast<double>(destinationXDip), left, right)
+        : centerX;
+    const double destinationY = std::isfinite(destinationYDip)
+        ? std::clamp(static_cast<double>(destinationYDip), top, bottom)
+        : centerY;
+    if (reducedMotion)
+    {
+        return { static_cast<float>(destinationX), static_cast<float>(destinationY), 0.0f };
+    }
 
-    const float edgeDistance = std::min({
+    const double vectorX = centerX - destinationX;
+    const double vectorY = centerY - destinationY;
+    const double vectorLength = std::hypot(vectorX, vectorY);
+    if (vectorLength == 0.0) return { static_cast<float>(destinationX), static_cast<float>(destinationY), 0.0f };
+
+    const double edgeDistance = std::min({
         destinationX - left,
         right - destinationX,
         destinationY - top,
         bottom - destinationY
     });
-    const float onePixelDip = PixelsToDip(1.0f, dpi);
-    const float edgeBandDip = 12.0f + onePixelDip;
-    const float edgeAmount = std::clamp(1.0f - edgeDistance / edgeBandDip, 0.0f, 1.0f);
-    const float smoothAmount = edgeAmount * edgeAmount * (3.0f - 2.0f * edgeAmount);
-    const float requestedDisplacement = 1.5f * smoothAmount;
-    const float sourceX = std::clamp(destinationX + vectorX / vectorLength * requestedDisplacement, left, right);
-    const float sourceY = std::clamp(destinationY + vectorY / vectorLength * requestedDisplacement, top, bottom);
-    const float appliedX = sourceX - destinationX;
-    const float appliedY = sourceY - destinationY;
-    const float appliedDisplacement = std::sqrt(appliedX * appliedX + appliedY * appliedY);
-    return { sourceX, sourceY, std::min(requestedDisplacement, appliedDisplacement) };
+    const double edgeBandDip = 12.0 + PixelsToDip(1.0f, dpi);
+    const double edgeAmount = std::clamp(1.0 - edgeDistance / edgeBandDip, 0.0, 1.0);
+    const double smoothAmount = edgeAmount * edgeAmount * (3.0 - 2.0 * edgeAmount);
+    const double requestedDisplacement = 1.5 * smoothAmount;
+    const double sourceX = std::clamp(destinationX + vectorX / vectorLength * requestedDisplacement, left, right);
+    const double sourceY = std::clamp(destinationY + vectorY / vectorLength * requestedDisplacement, top, bottom);
+    const double appliedDisplacement = std::hypot(sourceX - destinationX, sourceY - destinationY);
+    return {
+        static_cast<float>(sourceX),
+        static_cast<float>(sourceY),
+        static_cast<float>(std::min(requestedDisplacement, appliedDisplacement))
+    };
 }
 
 MaterialTone ResolveMaterialTone(float relativeLuminance, bool darkMode)
@@ -105,15 +152,23 @@ MaterialTone ResolveMaterialTone(float relativeLuminance, bool darkMode)
     llp::adaptive::Environment environment;
     environment.darkMode = darkMode;
     const auto policy = llp::adaptive::ResolvePolicy(environment);
-    const float luminance = std::clamp(relativeLuminance, 0.0f, 1.0f);
+    const float luminance = std::isfinite(relativeLuminance)
+        ? std::clamp(relativeLuminance, 0.0f, 1.0f)
+        : 0.5f;
 
     MaterialTone tone;
     tone.tint = darkMode
         ? llp::adaptive::Color{ 224, 239, 252 }
         : llp::adaptive::Color{ 232, 244, 255 };
     tone.guardedSurface = policy.surface;
-    tone.text = ChooseContrastColor(policy.text, policy.focusText, policy.text, tone.guardedSurface, 4.5);
-    tone.focus = ChooseContrastColor(policy.focus, policy.boundary, tone.text, tone.guardedSurface, 3.0);
+    tone.text = ChooseContrastColor(
+        std::array<llp::adaptive::Color, 4>{ policy.text, policy.focusText, policy.boundary, policy.focus },
+        tone.guardedSurface,
+        4.5);
+    tone.focus = ChooseContrastColor(
+        std::array<llp::adaptive::Color, 4>{ policy.focus, policy.boundary, policy.focusText, policy.text },
+        tone.guardedSurface,
+        3.0);
     tone.tintOpacity = 0.10f + (1.0f - luminance) * 0.05f + (darkMode ? 0.01f : 0.0f);
     tone.blurRadiusDip = 18.0f + (1.0f - std::abs(luminance - 0.5f) * 2.0f) * 4.0f;
     return tone;

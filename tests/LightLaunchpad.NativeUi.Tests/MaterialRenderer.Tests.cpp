@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace
@@ -47,13 +48,38 @@ void TestWindowCropUsesOutputRelativePhysicalCoordinates()
     Require(MapWindowCrop({ 100, 200, 1100, 900 }, { -500, -400, 50, 100 }, llp::material::OutputRotation::Identity)
                 == llp::material::PixelRect{},
         "Disjoint window produced a non-empty crop.");
+    Require(MapWindowCrop({ -1920, -100, 0, 980 }, { -1800, 0, -1200, 600 }, llp::material::OutputRotation::Identity)
+                == llp::material::PixelRect{ 120, 100, 720, 700 },
+        "Negative desktop origin changed output-relative coordinates.");
+    Require(MapWindowCrop({ -100, -100, 900, 600 }, { -200, -200, 200, 200 }, llp::material::OutputRotation::Rotate90)
+                == llp::material::PixelRect{ 0, 700, 300, 1000 },
+        "Rotate90 did not preserve a left/top partial intersection.");
+    Require(MapWindowCrop({ -100, -100, 900, 600 }, { -200, -200, 200, 200 }, llp::material::OutputRotation::Rotate270)
+                == llp::material::PixelRect{ 400, 0, 700, 300 },
+        "Rotate270 did not preserve a left/top partial intersection.");
+    Require(MapWindowCrop({ 0, 0, 0, 1080 }, { 0, 0, 100, 100 }, llp::material::OutputRotation::Identity)
+                == llp::material::PixelRect{},
+        "Degenerate output produced a crop.");
+    Require(MapWindowCrop({ 0, 0, 1920, 1080 }, { 100, 100, 100, 200 }, llp::material::OutputRotation::Identity)
+                == llp::material::PixelRect{},
+        "Degenerate window produced a crop.");
     Pass("MaterialRenderer_CropClampsAndMapsEveryRotation");
 }
 
 void TestPixelAndSearchCoordinatesStayInDipSpace()
 {
+    const float infinity = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float largest = std::numeric_limits<float>::max();
+
+    RequireNear(PixelsToDip(96.0f, 96), 96.0f, 0.001f, "96 DPI conversion changed DIP identity.");
     RequireNear(PixelsToDip(144.0f, 144), 96.0f, 0.001f, "Pixel-to-DIP conversion ignored monitor DPI.");
+    RequireNear(PixelsToDip(192.0f, 192), 96.0f, 0.001f, "192 DPI conversion ignored monitor DPI.");
     RequireNear(PixelsToDip(48.0f, 0), 48.0f, 0.001f, "Invalid DPI did not use the 96 DPI baseline.");
+    RequireNear(PixelsToDip(48.0f, -192), 48.0f, 0.001f, "Negative DPI did not use the 96 DPI baseline.");
+    Require(PixelsToDip(nan, 96) == 0.0f, "Non-finite pixels did not return zero.");
+    Require(PixelsToDip(infinity, 96) == 0.0f, "Infinite pixels did not return zero.");
+    Require(std::isfinite(PixelsToDip(largest, 1)), "Finite pixel conversion overflowed to infinity.");
 
     for (const int dpi : { 96, 144, 192 })
     {
@@ -63,7 +89,10 @@ void TestPixelAndSearchCoordinatesStayInDipSpace()
         RequireNear(center.displacementDip, 0.0f, 0.001f, "Search center gained displacement.");
 
         const auto edge = ComputeSearchSample({ 0.0f, 0.0f, 300.0f, 50.0f }, 1.0f, 1.0f, dpi, false);
-        Require(edge.displacementDip <= 1.5f, "Search edge exceeded 1.5 DIP.");
+        Require(edge.displacementDip > 1.0f && edge.displacementDip <= 1.5f,
+            "Search edge response was absent or exceeded 1.5 DIP.");
+        Require(edge.sourceXDip > 1.0f && edge.sourceYDip > 1.0f,
+            "Search edge sample did not move inward.");
         Require(edge.sourceXDip >= 0.0f && edge.sourceXDip <= 300.0f
                 && edge.sourceYDip >= 0.0f && edge.sourceYDip <= 50.0f,
             "Search sample escaped its control.");
@@ -79,11 +108,45 @@ void TestPixelAndSearchCoordinatesStayInDipSpace()
     RequireNear(reduced.sourceXDip, 11.0f, 0.001f, "Reduced motion displaced the horizontal search sample.");
     RequireNear(reduced.sourceYDip, 21.0f, 0.001f, "Reduced motion displaced the vertical search sample.");
     RequireNear(reduced.displacementDip, 0.0f, 0.001f, "Reduced motion reported displacement.");
+
+    const auto invalidBounds = ComputeSearchSample({ nan, 0.0f, 300.0f, 50.0f }, 10.0f, 10.0f, 96, false);
+    Require(invalidBounds.sourceXDip == 0.0f && invalidBounds.sourceYDip == 0.0f
+            && invalidBounds.displacementDip == 0.0f,
+        "Non-finite search bounds did not return the deterministic zero sample.");
+    const auto infiniteBounds = ComputeSearchSample({ 0.0f, 0.0f, infinity, 50.0f }, 10.0f, 10.0f, 96, false);
+    Require(infiniteBounds.sourceXDip == 0.0f && infiniteBounds.sourceYDip == 0.0f
+            && infiniteBounds.displacementDip == 0.0f,
+        "Infinite search bounds did not return the deterministic zero sample.");
+    const auto reversedBounds = ComputeSearchSample({ 300.0f, 0.0f, 0.0f, 50.0f }, 10.0f, 10.0f, 96, false);
+    Require(reversedBounds.sourceXDip == 0.0f && reversedBounds.sourceYDip == 0.0f
+            && reversedBounds.displacementDip == 0.0f,
+        "Reversed search bounds did not return the deterministic zero sample.");
+    const auto degenerateBounds = ComputeSearchSample({ 0.0f, 20.0f, 300.0f, 20.0f }, 10.0f, 20.0f, 96, false);
+    Require(degenerateBounds.sourceXDip == 0.0f && degenerateBounds.sourceYDip == 0.0f
+            && degenerateBounds.displacementDip == 0.0f,
+        "Degenerate search bounds did not return the deterministic zero sample.");
+
+    const auto invalidDestination = ComputeSearchSample(
+        { 10.0f, 20.0f, 310.0f, 70.0f }, nan, infinity, 144, false);
+    Require(std::isfinite(invalidDestination.sourceXDip) && std::isfinite(invalidDestination.sourceYDip)
+            && std::isfinite(invalidDestination.displacementDip),
+        "Non-finite destination produced a non-finite search sample.");
+    Require(invalidDestination.sourceXDip >= 10.0f && invalidDestination.sourceXDip <= 310.0f
+            && invalidDestination.sourceYDip >= 20.0f && invalidDestination.sourceYDip <= 70.0f,
+        "Normalized destination escaped valid search bounds.");
+
+    const auto hugeBounds = ComputeSearchSample(
+        { largest * 0.5f, largest * 0.5f, largest, largest }, nan, nan, 96, false);
+    Require(std::isfinite(hugeBounds.sourceXDip) && std::isfinite(hugeBounds.sourceYDip)
+            && std::isfinite(hugeBounds.displacementDip),
+        "Large finite search bounds overflowed the sample.");
     Pass("MaterialRenderer_SearchSamplingIsBoundedAcrossDpi");
 }
 
 void TestMaterialToneKeepsPolicyContrastAndBoundedCoolTint()
 {
+    const float infinity = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
     const auto lightTone = ResolveMaterialTone(0.92f, false);
     const auto darkTone = ResolveMaterialTone(0.05f, true);
     Require(llp::adaptive::ContrastRatio(lightTone.text, lightTone.guardedSurface) >= 4.5,
@@ -102,6 +165,34 @@ void TestMaterialToneKeepsPolicyContrastAndBoundedCoolTint()
             "Material tint opacity escaped its bounded range.");
         Require(tone.blurRadiusDip >= 16.0f && tone.blurRadiusDip <= 24.0f,
             "Material blur radius escaped its bounded range.");
+    }
+
+    for (const bool darkMode : { false, true })
+    {
+        for (const float luminance : { 0.0f, 0.05f, 0.1f, 0.25f, 0.5f, 0.75f, 0.92f, 1.0f })
+        {
+            const auto tone = ResolveMaterialTone(luminance, darkMode);
+            Require(llp::adaptive::ContrastRatio(tone.text, tone.guardedSurface) >= 4.5,
+                "Dense luminance text color was not finally verified at 4.5:1.");
+            Require(llp::adaptive::ContrastRatio(tone.focus, tone.guardedSurface) >= 3.0,
+                "Dense luminance focus color was not finally verified at 3:1.");
+            Require(std::isfinite(tone.tintOpacity) && std::isfinite(tone.blurRadiusDip),
+                "Finite luminance produced non-finite material values.");
+        }
+
+        const auto neutral = ResolveMaterialTone(0.5f, darkMode);
+        for (const float luminance : { nan, infinity, -infinity })
+        {
+            const auto tone = ResolveMaterialTone(luminance, darkMode);
+            RequireNear(tone.tintOpacity, neutral.tintOpacity, 0.001f,
+                "Non-finite luminance did not use neutral tint strength.");
+            RequireNear(tone.blurRadiusDip, neutral.blurRadiusDip, 0.001f,
+                "Non-finite luminance did not use neutral blur strength.");
+            Require(llp::adaptive::ContrastRatio(tone.text, tone.guardedSurface) >= 4.5,
+                "Non-finite luminance text color was not finally verified.");
+            Require(llp::adaptive::ContrastRatio(tone.focus, tone.guardedSurface) >= 3.0,
+                "Non-finite luminance focus color was not finally verified.");
+        }
     }
     Pass("MaterialRenderer_ToneUsesAdaptiveContrastAndBoundedTint");
 }
