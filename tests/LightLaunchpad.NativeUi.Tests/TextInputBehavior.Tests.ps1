@@ -212,10 +212,10 @@ public static class LightLaunchpadTextProbeNative {
     Assert-Equal 1 $llpSelection.Count 'UI Automation did not expose one text selection.'
     Assert-Equal 'alpha' $llpSelection[0].GetText(-1) 'UI Automation selection range mismatch.'
 
-    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr][char]'X', [IntPtr]::Zero)
+    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr]::new([uint64][char]'X'), [IntPtr]::Zero)
     Assert-Equal 'X beta' $llpValue.Current.Value 'WM_CHAR did not replace the UI Automation selection.'
-    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0100, [UIntPtr]0x24, [IntPtr]::Zero)
-    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0100, [UIntPtr]0x2E, [IntPtr]::Zero)
+    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0100, [UIntPtr]::new([uint64]0x24), [IntPtr]::Zero)
+    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0100, [UIntPtr]::new([uint64]0x2E), [IntPtr]::Zero)
     Assert-Equal ' beta' $llpValue.Current.Value 'Home/Delete did not edit at the caret.'
 
     $llpValue.SetValue('mouse')
@@ -226,12 +226,12 @@ public static class LightLaunchpadTextProbeNative {
     $llpEndPoint = [IntPtr](($llpTextRight - 1) -bor ([int]$llpSearchMiddleY -shl 16))
     [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0201, [UIntPtr]::Zero, $llpStartPoint)
     [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0202, [UIntPtr]::Zero, $llpStartPoint)
-    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr][char]'S', [IntPtr]::Zero)
+    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr]::new([uint64][char]'S'), [IntPtr]::Zero)
     Assert-Equal 'Smouse' $llpValue.Current.Value 'Mouse positioning did not move the caret to the start of text.'
     [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0201, [UIntPtr]::Zero, $llpStartPoint)
-    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0200, [UIntPtr]1, $llpEndPoint)
+    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0200, [UIntPtr]::new([uint64]1), $llpEndPoint)
     [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0202, [UIntPtr]::Zero, $llpEndPoint)
-    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr][char]'D', [IntPtr]::Zero)
+    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr]::new([uint64][char]'D'), [IntPtr]::Zero)
     Assert-Equal 'D' $llpValue.Current.Value 'Mouse drag selection did not replace the selected text.'
 
     $llpOriginalClipboard = [System.Windows.Forms.Clipboard]::GetDataObject()
@@ -252,36 +252,42 @@ public static class LightLaunchpadTextProbeNative {
     Send-LlpControlKey $llpWindow ([UInt16][char]'Y')
     Assert-Equal 'cut me' $llpValue.Current.Value 'Ctrl+Y did not redo the clipboard edit.'
     Send-LlpControlKey $llpWindow ([UInt16][char]'A')
-    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr][char]'Q', [IntPtr]::Zero)
+    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr]::new([uint64][char]'Q'), [IntPtr]::Zero)
     Assert-Equal 'Q' $llpValue.Current.Value 'Ctrl+A did not select all text for replacement.'
     Send-LlpControlKey $llpWindow ([UInt16][char]'Z')
     Assert-Equal 'cut me' $llpValue.Current.Value 'The select-all replacement was not undoable.'
 
     $llpValue.SetValue('ab')
     Set-LlpTextSelection $llpText 0 0
-    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr][char]'S', [IntPtr]::Zero)
+    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr]::new([uint64][char]'S'), [IntPtr]::Zero)
     Set-LlpTextSelection $llpText 2 2
-    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr][char]'M', [IntPtr]::Zero)
+    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr]::new([uint64][char]'M'), [IntPtr]::Zero)
     Set-LlpTextSelection $llpText 4 4
-    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr][char]'E', [IntPtr]::Zero)
+    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0102, [UIntPtr]::new([uint64][char]'E'), [IntPtr]::Zero)
     Assert-Equal 'SaMbE' $llpValue.Current.Value 'English input did not insert at start, middle, and end.'
 
+    $llpImeStartCharacter = [char]0x4E2D
+    $llpImeMiddleCharacter = [char]0x6587
+    $llpImeEndCharacter = [char]0x672B
+    $llpExpectedImeStartText = '{0}ab' -f $llpImeStartCharacter
+    $llpExpectedImeMiddleText = '{0}a{1}b' -f $llpImeStartCharacter, $llpImeMiddleCharacter
+    $llpExpectedImeEndText = '{0}a{1}b{2}' -f $llpImeStartCharacter, $llpImeMiddleCharacter, $llpImeEndCharacter
     $llpValue.SetValue('ab')
     Set-LlpTextSelection $llpText 0 0
     [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x010D, [UIntPtr]::Zero, [IntPtr]::Zero)
-    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0286, [UIntPtr][char]'中', [IntPtr]::Zero)
+    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0286, [UIntPtr]::new([uint64]$llpImeStartCharacter), [IntPtr]::Zero)
     [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x010E, [UIntPtr]::Zero, [IntPtr]::Zero)
-    Assert-Equal '中ab' $llpValue.Current.Value 'Chinese IME input did not insert once at the start.'
+    Assert-Equal $llpExpectedImeStartText $llpValue.Current.Value 'Chinese IME input did not insert once at the start.'
     Set-LlpTextSelection $llpText 2 2
     [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x010D, [UIntPtr]::Zero, [IntPtr]::Zero)
-    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0286, [UIntPtr][char]'文', [IntPtr]::Zero)
+    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0286, [UIntPtr]::new([uint64]$llpImeMiddleCharacter), [IntPtr]::Zero)
     [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x010E, [UIntPtr]::Zero, [IntPtr]::Zero)
-    Assert-Equal '中a文b' $llpValue.Current.Value 'Chinese IME input did not insert once in the middle.'
+    Assert-Equal $llpExpectedImeMiddleText $llpValue.Current.Value 'Chinese IME input did not insert once in the middle.'
     Set-LlpTextSelection $llpText 4 4
     [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x010D, [UIntPtr]::Zero, [IntPtr]::Zero)
-    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0286, [UIntPtr][char]'末', [IntPtr]::Zero)
+    [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x0286, [UIntPtr]::new([uint64]$llpImeEndCharacter), [IntPtr]::Zero)
     [void][LightLaunchpadTextProbeNative]::SendMessage($llpWindow, 0x010E, [UIntPtr]::Zero, [IntPtr]::Zero)
-    Assert-Equal '中a文b末' $llpValue.Current.Value 'Chinese IME input did not insert once at the end.'
+    Assert-Equal $llpExpectedImeEndText $llpValue.Current.Value 'Chinese IME input did not insert once at the end.'
 
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
         $llpEvidenceRoot = [System.IO.Path]::GetFullPath($EvidenceDirectory)
@@ -296,7 +302,7 @@ public static class LightLaunchpadTextProbeNative {
     if (-not $llpProcess.WaitForExit(8000)) { throw 'The text-input probe did not exit within eight seconds.' }
     Assert-Equal 0 $llpProcess.ExitCode 'Text-input probe exit code mismatch.'
     $llpProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpProbePath | ConvertFrom-Json
-    Assert-Equal '中a文b末' ([string]$llpProbe.text) 'Probe output lost the final committed text.'
+    Assert-Equal $llpExpectedImeEndText ([string]$llpProbe.text) 'Probe output lost the final committed text.'
     Assert-Equal $false ([bool]$llpProbe.composing) 'Probe exited with a stale IME composition.'
     Assert-Equal $true ([bool]$llpProbe.candidatePositionApplied) 'NativeUi did not apply the IME composition/candidate position.'
     Assert-True ([int]$llpProbe.candidateX -gt 0 -and [int]$llpProbe.candidateY -gt 0) 'IME candidate position was not placed at a visible caret coordinate.'
