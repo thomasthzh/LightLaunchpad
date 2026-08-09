@@ -2,16 +2,44 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-09 14:58:16 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-09 15:49:02 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `0cf5a51`
+- HEAD: `3d70d18`
 - Remote main: `origin/main@33e91c2`
 - Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
 - Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
 - Goal status: active; LLP-013 remains the only task in progress.
-- Current gate: approved design spec committed at `0cf5a51`; awaiting written-spec review before invoking `writing-plans`. Production implementation has not started.
+- Current gate: approved design spec `0cf5a51` and exact implementation plan `3d70d18` are committed; awaiting the required execution-mode choice before Task 1 RED. Production implementation has not started.
+
+## LLP-013 Implementation Plan Checkpoint
+
+Status at 2026-08-09 15:49 +08:00: implementation plan complete; production implementation not started.
+
+Changed files in scope:
+
+- `docs/superpowers/plans/2026-08-09-llp-013-live-material-renderer.md` - exact 10-task, 87-step RED/GREEN plan covering pure coordinate/material/lifecycle policy, immutable scenes, renderer-thread ownership, DDA capture, D3D11/D2D/DComp composition, host/fallback integration, recovery/adaptive behavior, 12-background pixel evidence, performance, full regression, and durable task transition.
+- `.learnings/ERRORS.md` - records and resolves the stale-PID safety-check assumption; protected runtime identity is now verified by normalized exact path, process count, hash, and startup command while PID remains observational.
+- `docs/ai/{tasks,progress}.md` - records this plan checkpoint without changing the sole `in_progress` task.
+
+Plan verification and technical baseline:
+
+- Required-content self-review passed 18/18 checks; the plan has 10 task sections, 87 checkbox steps, 72 balanced code fences, and zero unfinished markers.
+- Every approved design section maps to an implementation/test task: ownership, three-layer composition, bounded material/displacement, live capture, one fallback, one rebuild, adaptive routing, diagnostics/performance, development-only freeze evidence, and 12 controlled backgrounds plus the real desktop.
+- MinGW-w64 reports `x86_64-w64-mingw32`, exposes `dcomp.h`, and resolves `d3d11`, `dxgi`, and `dcomp` link libraries. The plan therefore retains the single approved R1 route without an alternate backend.
+- The plan names exact source/test/tool files, compiler/link commands, RED/GREEN expectations, commit boundaries, full NativeUi/Core/App gates, product-design audit, pixel/contrast thresholds, and post-commit real-EXE identity checks.
+- `git diff --cached --check` passed; staged scope was exactly the plan and error-learning file. Plan commit: `3d70d18a8b317b4811ba63adcce2a6663f716e85` (`docs: plan LLP-013 live material implementation`).
+
+Safety baseline and correction:
+
+- The prior PID `22560` was no longer present. Read-only enumeration found PID `29376`, created 2026-08-04 23:42:39, running the exact protected `artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe` path. No process was started, stopped, or replaced.
+- Protected EXE SHA256 remains `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run remains the exact quoted protected path; `%LocalAppData%\Programs\LightLaunchpad\LightLaunchpad.NativeUi.exe` remains absent; `C:\TOOL` EXE SHA256 remains `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`.
+- `LLP_reconstruction/` remains untracked/unstaged and ignored `LightLaunchpad.NativeUi.o` was not adopted. No production C++, EXE build, stable install, startup, `C:\TOOL`, push, tag, or release mutation occurred.
+
+Next step:
+
+- Choose Subagent-Driven Execution (recommended by `writing-plans`) or Inline Execution. Then start Task 1 with the missing `MaterialRenderer` production C++ RED test; LLP-013 remains the only project task in progress.
 
 ## LLP-013 Design Checkpoint
 
