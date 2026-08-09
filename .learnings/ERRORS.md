@@ -40,3 +40,45 @@ Before any test clicks a legacy or unknown settings Apply/Save path, inventory e
 - **Notes**: Restored the exact recorded Run string only after revalidating the protected EXE SHA256. Added a development-only, prefix-constrained test registry subkey; assertions now require the real Run baseline before launch, compare it after rollback, and verify zero test-key residue. The real-EXE transaction suite passes all three cases.
 
 ---
+
+## [ERR-20260809-002] protected-runtime-pid-assumption
+
+**Logged**: 2026-08-09T15:35:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+A safety baseline incorrectly treated the previously observed NativeUi PID as a stable identity even though the protected executable had legitimately restarted under a new PID.
+
+### Error
+
+```text
+Protected PID 22560 is not running.
+```
+
+### Context
+
+- The check queried only PID 22560 before validating the executable path.
+- Read-only process enumeration found PID 29376 running the exact protected path; its creation time was 2026-08-04 23:42:39.
+- The protected EXE SHA256, exact HKCU Run command, and `C:\TOOL` EXE SHA256 remained unchanged.
+- No process was started, stopped, or replaced during diagnosis.
+
+### Suggested Fix
+
+Resolve protected runtime identity by normalized absolute executable path, require the expected process count, then validate the on-disk hash and startup command. Record PID and creation time as observations, not durable identity fields.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `docs/superpowers/plans/2026-08-09-llp-013-live-material-renderer.md`
+- See Also: `ERR-20260802-001`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T15:35:00+08:00
+- **Commit/PR**: LLP-013 implementation-plan commit
+- **Notes**: Replaced both plan safety checks with exact-path enumeration that requires one process while treating PID as observational.
+
+---
