@@ -1,5 +1,165 @@
 # Error Log
 
+## [ERR-20260809-016] parallel-real-exe-review-singleton-collision
+
+**Logged**: 2026-08-09T20:56:02+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+Two independent Task 3 reviewers started `ExecutableIdentity.Tests.ps1` concurrently even though the harness shares a fixed development singleton and observes global temp-prefix sets, invalidating both runs as final evidence.
+
+### Error
+
+```text
+Two review harnesses overlapped on the fixed development singleton and produced cross-run temp/process observations.
+```
+
+### Context
+
+- The real-EXE outputs were otherwise isolated, and the protected PID 29376 was never involved.
+- Neither reviewer terminated a process or deleted the other run's files; both harnesses completed their own `finally` cleanup naturally.
+- Every overlapping result was discarded. Specification and quality reviewers then reran `ExecutableIdentity` separately with process/temp baselines at zero.
+
+### Suggested Fix
+
+Treat real-EXE harnesses with fixed mutex/singleton names or global temp-prefix assertions as mutually exclusive. Parallelize static review and isolated unit suites only; require an explicit all-processes-zero handoff before the next reviewer starts such a harness.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/ExecutableIdentity.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T20:56:02+08:00
+- **Commit/PR**: Task 3 completion-evidence documentation commit
+- **Notes**: Final serial runs both passed 6/6 with identity temp 0 -> 0 and nonprotected NativeUi process 0 -> 0.
+
+---
+
+## [ERR-20260809-015] nested-exec-session-id-discarded
+
+**Logged**: 2026-08-09T20:07:42+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+A long test launched through `functions.exec` kept running after the JavaScript cell completed, but the wrapper emitted only `r.output` and discarded the nested command's `session_id`, temporarily hiding the remaining output and exit code.
+
+### Error
+
+```text
+Only the first two PASS lines were returned while the child PowerShell process continued its clean-source build.
+```
+
+### Context
+
+- Read-only process inspection confirmed the original Windows PowerShell test process was still active and not waiting for input.
+- No duplicate test was started until the original process exited.
+- The issue was the orchestration wrapper, not `ExecutableIdentity.Tests.ps1` or the new compiler selection.
+
+### Suggested Fix
+
+For long nested `exec_command` calls, emit the full returned object (including `session_id`) rather than only `output`, then poll that unified session with `write_stdin` until an explicit `exit_code` is returned.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/ExecutableIdentity.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T20:07:42+08:00
+- **Commit/PR**: Task 3 completion-evidence documentation commit
+- **Notes**: The fresh rerun preserved session `95313` and collected all five PASS lines plus exit 0.
+
+---
+
+## [ERR-20260809-014] pwsh-gui-call-operator-exit-code
+
+**Logged**: 2026-08-09T20:01:01+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+PowerShell 7's call operator launched the GUI-subsystem NativeUi diagnostics EXE successfully but left `$LASTEXITCODE` empty, causing the verification wrapper to report a false failure.
+
+### Error
+
+```text
+Diagnostics EXE exited .
+```
+
+### Context
+
+- The exact built EXE exited and wrote a valid diagnostics JSON file.
+- Read-only inspection found zero matching artifact processes afterward.
+- The empty `$LASTEXITCODE` was wrapper behavior, not a NativeUi process failure.
+
+### Suggested Fix
+
+Use `Start-Process -PassThru -Wait -WindowStyle Hidden` and read `Process.ExitCode` when verifying a Windows GUI-subsystem EXE.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `artifacts/native-ui-llp013-bootstrap/LightLaunchpad.NativeUi.exe`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T20:01:01+08:00
+- **Commit/PR**: Task 3 completion-evidence documentation commit
+- **Notes**: The next verification uses `Start-Process` and validates the generated diagnostics independently.
+
+---
+
+## [ERR-20260809-013] dynamic-temp-cleanup-command-rejected
+
+**Logged**: 2026-08-09T20:00:24+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+A combined real-EXE diagnostics command was rejected before launch because it embedded dynamic recursive temporary-directory cleanup in the command string.
+
+### Error
+
+```text
+CreateProcess ... rejected: blocked by policy
+```
+
+### Context
+
+- The command intended to create a GUID runtime profile, launch the isolated NativeUi diagnostics process, validate identity, and recursively remove only that profile.
+- The tool rejected the command before execution; the EXE was not started and no directory was created or removed.
+- The Task 3 production build itself had already succeeded and was unaffected.
+
+### Suggested Fix
+
+For a one-shot diagnostic run, use a fixed profile directory inside the ignored build artifact and retain it. Keep cleanup out of the validation command unless a separate, fully resolved target has already been inspected.
+
+### Metadata
+
+- Reproducible: unknown
+- Related Files: `artifacts/native-ui-llp013-bootstrap/LightLaunchpad.NativeUi.exe`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T20:00:24+08:00
+- **Commit/PR**: Task 3 completion-evidence documentation commit
+- **Notes**: Switched to a retained artifact-local isolated profile; no destructive cleanup is required.
+
+---
+
 ## [ERR-20260809-012] powershell-empty-temp-set-compare-object
 
 **Logged**: 2026-08-09T19:04:00+08:00
