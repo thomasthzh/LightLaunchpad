@@ -2,16 +2,36 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-09 15:49:02 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-09 18:46:44 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `3d70d18`
+- HEAD: `d54f106`
 - Remote main: `origin/main@33e91c2`
 - Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
 - Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
 - Goal status: active; LLP-013 remains the only task in progress.
-- Current gate: approved design spec `0cf5a51` and exact implementation plan `3d70d18` are committed; awaiting the required execution-mode choice before Task 1 RED. Production implementation has not started.
+- Current gate: LLP-013 Task 1 pure material policies are committed at `d54f106`; specification and code-quality review remain pending before Task 1 can close.
+
+## LLP-013 Task 1 Implementation Evidence
+
+Status at 2026-08-09 18:46 +08:00: implementation committed; LLP-013 remains `in_progress`, and Task 1 review is not yet closed.
+
+Changed files in scope:
+
+- `src/LightLaunchpad.NativeUi/MaterialRenderer.{h,cpp}` - pure output-crop rotation, physical-pixel/DIP conversion, bounded search sampling, adaptive material tone, and one-rebuild lifecycle policies without Win32/GPU ownership.
+- `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.{cpp,ps1}` - direct production C++ policy checks and the isolated static WinLibs-linked runner.
+
+TDD and verification evidence:
+
+- RED ran under Windows PowerShell 5.1 with `C:\Users\thoma\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin` prepended to `PATH`: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\LightLaunchpad.NativeUi.Tests\MaterialRenderer.Tests.ps1`. It exited 1 with exact diagnostics `fatal error: MaterialRenderer.h: No such file or directory` and `fatal error: src\LightLaunchpad.NativeUi\MaterialRenderer.cpp: No such file or directory`; `lightlaunchpad-material-renderer-tests-*` roots remained 0 -> 0.
+- The plan's identity-crop example was corrected in `03df6b8` so the required partial crop clamps to the selected output bottom (`700`, not the out-of-bounds `840`). Pure implementation and tests were committed in `d54f106` (`test: lock LLP-013 material policies`).
+- Fresh GREEN runs reported `MaterialRenderer` 5/5 and `AdaptiveEnvironment` 3/3 under the same WinLibs-first Windows PowerShell 5.1 environment. Material and adaptive temporary roots both remained 0 -> 0; `git diff --cached --check` passed before the implementation commit.
+- Task 1 is pure, nonvisual policy work, so screenshot and runtime-performance evidence are not applicable at this checkpoint; real-renderer visual/performance gates remain assigned to later LLP-013 tasks.
+
+Next step:
+
+- Complete Task 1 specification and code-quality review. Do not start Task 2 or mark LLP-013 complete until both reviews close.
 
 ## LLP-013 Implementation Plan Checkpoint
 
