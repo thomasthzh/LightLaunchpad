@@ -1,9 +1,18 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include "MaterialRenderer.h"
 
+#include <cstdint>
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 namespace
 {
@@ -11,6 +20,7 @@ using llp::material::AdvanceLifecycle;
 using llp::material::ComputeSearchSample;
 using llp::material::MapWindowCrop;
 using llp::material::PixelsToDip;
+using llp::material::RasterizeIcon;
 using llp::material::ResolveMaterialTone;
 
 int passed = 0;
@@ -29,6 +39,48 @@ void Pass(const char* name)
 {
     ++passed;
     std::cout << "PASS " << name << "\n";
+}
+
+HICON CreateOwnedTestIcon()
+{
+    constexpr int size = 16;
+    BITMAPINFO bitmapInfo = {};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = size;
+    bitmapInfo.bmiHeader.biHeight = -size;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    void* rawBits = nullptr;
+    HBITMAP colorBitmap = CreateDIBSection(nullptr, &bitmapInfo, DIB_RGB_COLORS, &rawBits, nullptr, 0);
+    Require(colorBitmap != nullptr && rawBits != nullptr, "Could not create the owned test icon color bitmap.");
+    auto* pixels = static_cast<std::uint8_t*>(rawBits);
+    for (int index = 0; index < size * size; ++index)
+    {
+        pixels[index * 4 + 0] = 200;
+        pixels[index * 4 + 1] = 96;
+        pixels[index * 4 + 2] = 48;
+        pixels[index * 4 + 3] = 128;
+    }
+
+    std::vector<std::uint8_t> maskBits(static_cast<std::size_t>(size * size) / 8, 0);
+    HBITMAP maskBitmap = CreateBitmap(size, size, 1, 1, maskBits.data());
+    if (!maskBitmap)
+    {
+        DeleteObject(colorBitmap);
+        throw std::runtime_error("Could not create the owned test icon mask bitmap.");
+    }
+
+    ICONINFO iconInfo = {};
+    iconInfo.fIcon = TRUE;
+    iconInfo.hbmColor = colorBitmap;
+    iconInfo.hbmMask = maskBitmap;
+    HICON icon = CreateIconIndirect(&iconInfo);
+    DeleteObject(maskBitmap);
+    DeleteObject(colorBitmap);
+    Require(icon != nullptr, "Could not create the owned test HICON.");
+    return icon;
 }
 
 void TestWindowCropUsesOutputRelativePhysicalCoordinates()
@@ -239,6 +291,91 @@ void TestLifecycleHandlesReadyFreezeAndHideEvents()
         "Successful rebuild did not return to Live.");
     Pass("MaterialRenderer_LifecycleHandlesReadyFreezeAndHide");
 }
+
+void TestSceneSnapshotsOwnCopiedPremultipliedIconBytes()
+{
+    HICON sourceIcon = CreateOwnedTestIcon();
+    Require(RasterizeIcon(nullptr, 16) == nullptr, "RasterizeIcon accepted a null HICON.");
+    Require(RasterizeIcon(sourceIcon, 0) == nullptr, "RasterizeIcon accepted a zero target size.");
+    Require(RasterizeIcon(sourceIcon, -1) == nullptr, "RasterizeIcon accepted a negative target size.");
+    Require(RasterizeIcon(sourceIcon, 1025) == nullptr, "RasterizeIcon accepted an unbounded target size.");
+    auto icon = RasterizeIcon(sourceIcon, 16);
+    Require(icon != nullptr, "RasterizeIcon rejected a valid owned HICON.");
+    Require(icon->width == 16 && icon->height == 16, "Rasterized icon dimensions changed.");
+    Require(icon->stride >= icon->width * 4, "Rasterized icon stride was too small.");
+    Require(icon->premultipliedBgra.size()
+            == static_cast<std::size_t>(icon->stride) * static_cast<std::size_t>(icon->height),
+        "Rasterized icon byte count did not match stride times height.");
+    Require(!icon->premultipliedBgra.empty(), "Rasterized icon did not own BGRA bytes.");
+    for (std::size_t offset = 0; offset + 3 < icon->premultipliedBgra.size(); offset += 4)
+    {
+        const auto alpha = icon->premultipliedBgra[offset + 3];
+        if (alpha != 0)
+        {
+            Require(icon->premultipliedBgra[offset + 0] <= alpha
+                    && icon->premultipliedBgra[offset + 1] <= alpha
+                    && icon->premultipliedBgra[offset + 2] <= alpha,
+                "Rasterized icon contained non-premultiplied color channels.");
+        }
+    }
+
+    const auto expectedBytes = icon->premultipliedBgra;
+    auto firstScene = std::make_shared<llp::material::SceneSnapshot>();
+    firstScene->generation = 1;
+    firstScene->items.push_back({ { 1, 2, 17, 18 }, L"First", L"Producer", icon, true, false });
+    auto newestScene = std::make_shared<llp::material::SceneSnapshot>();
+    newestScene->generation = 2;
+    newestScene->items.push_back({ { 3, 4, 19, 20 }, L"Newest", L"Owned", icon, false, true });
+
+    llp::material::LatestSceneSlot slot;
+    slot.Submit(firstScene);
+    icon.reset();
+    DestroyIcon(sourceIcon);
+    sourceIcon = nullptr;
+    slot.Submit(newestScene);
+    firstScene.reset();
+    newestScene.reset();
+
+    const auto taken = slot.Take();
+    Require(taken != nullptr && taken->generation == 2, "Replacing an unrendered scene lost the newest scene.");
+    Require(taken->items.size() == 1 && taken->items[0].icon != nullptr,
+        "Newest immutable scene did not retain its shared icon raster.");
+    Require(taken->items[0].icon->premultipliedBgra == expectedBytes,
+        "Icon bytes changed after producer references and input HICON were released.");
+    Pass("MaterialRenderer_SceneOwnsCopiedPremultipliedIconBytes");
+}
+
+void TestLatestSceneSlotReturnsOnlyNewestCompleteGeneration()
+{
+    llp::material::LatestSceneSlot slot;
+    std::thread producer([&slot]() {
+        for (std::uint64_t generation = 1; generation <= 3; ++generation)
+        {
+            auto scene = std::make_shared<llp::material::SceneSnapshot>();
+            scene->generation = generation;
+            scene->search.displayText = L"generation-" + std::to_wstring(generation);
+            scene->items.push_back({ { static_cast<int>(generation), 0,
+                                          static_cast<int>(generation + 10), 10 },
+                scene->search.displayText, L"complete", nullptr, generation == 3, false });
+            slot.Submit(std::move(scene));
+        }
+    });
+    producer.join();
+
+    const auto newest = slot.Take();
+    Require(newest != nullptr && newest->generation == 3, "Latest scene slot did not replace generations 1 and 2.");
+    Require(newest->search.displayText == L"generation-3"
+            && newest->items.size() == 1 && newest->items[0].focused,
+        "Latest scene slot returned torn scene ownership.");
+    Require(slot.Take() == nullptr, "Taking a scene did not atomically clear the slot.");
+
+    auto pending = std::make_shared<llp::material::SceneSnapshot>();
+    pending->generation = 4;
+    slot.Submit(std::move(pending));
+    slot.Submit(nullptr);
+    Require(slot.Take() == nullptr, "Submitting null did not deterministically clear the pending scene.");
+    Pass("MaterialRenderer_LatestSceneSlotKeepsOnlyNewestCompleteGeneration");
+}
 }
 
 int main()
@@ -250,8 +387,10 @@ int main()
         TestMaterialToneKeepsPolicyContrastAndBoundedCoolTint();
         TestLifecycleStartsFallsBackAndConsumesOneRebuild();
         TestLifecycleHandlesReadyFreezeAndHideEvents();
-        std::cout << passed << "/5 tests passed\n";
-        return passed == 5 ? 0 : 1;
+        TestSceneSnapshotsOwnCopiedPremultipliedIconBytes();
+        TestLatestSceneSlotReturnsOnlyNewestCompleteGeneration();
+        std::cout << passed << "/7 tests passed\n";
+        return passed == 7 ? 0 : 1;
     }
     catch (const std::exception& exception)
     {

@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace llp::material
 {
@@ -49,6 +51,73 @@ llp::adaptive::Color ChooseContrastColor(
         throw std::logic_error("No material color satisfies the required contrast ratio.");
     }
     return fallback;
+}
+
+class WindowDc final
+{
+public:
+    WindowDc() : handle_(GetDC(nullptr)) {}
+    ~WindowDc()
+    {
+        if (handle_) ReleaseDC(nullptr, handle_);
+    }
+
+    HDC Get() const { return handle_; }
+
+private:
+    HDC handle_ = nullptr;
+};
+
+class MemoryDc final
+{
+public:
+    explicit MemoryDc(HDC compatibleWith) : handle_(CreateCompatibleDC(compatibleWith)) {}
+    ~MemoryDc()
+    {
+        if (handle_) DeleteDC(handle_);
+    }
+
+    HDC Get() const { return handle_; }
+
+private:
+    HDC handle_ = nullptr;
+};
+
+class OwnedBitmap final
+{
+public:
+    explicit OwnedBitmap(HBITMAP handle) : handle_(handle) {}
+    ~OwnedBitmap()
+    {
+        if (handle_) DeleteObject(handle_);
+    }
+
+    HBITMAP Get() const { return handle_; }
+
+private:
+    HBITMAP handle_ = nullptr;
+};
+
+class BitmapSelection final
+{
+public:
+    BitmapSelection(HDC dc, HBITMAP bitmap)
+        : dc_(dc), previous_(SelectObject(dc, bitmap)) {}
+    ~BitmapSelection()
+    {
+        if (previous_) SelectObject(dc_, previous_);
+    }
+
+    bool Valid() const { return previous_ != nullptr; }
+
+private:
+    HDC dc_ = nullptr;
+    HGDIOBJ previous_ = nullptr;
+};
+
+std::uint8_t Premultiply(std::uint8_t channel, std::uint8_t alpha)
+{
+    return static_cast<std::uint8_t>((static_cast<unsigned int>(channel) * alpha + 127u) / 255u);
 }
 }
 
@@ -214,5 +283,74 @@ LifecycleTransition AdvanceLifecycle(LifecycleState state, LifecycleEvent event,
             : LifecycleTransition{ LifecycleState::Rebuilding, true };
     }
     return { state, false };
+}
+
+void LatestSceneSlot::Submit(std::shared_ptr<const SceneSnapshot> scene)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_ = std::move(scene);
+}
+
+std::shared_ptr<const SceneSnapshot> LatestSceneSlot::Take()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto scene = std::move(pending_);
+    pending_.reset();
+    return scene;
+}
+
+std::shared_ptr<const IconRaster> RasterizeIcon(HICON icon, int sizePx)
+{
+    constexpr int maximumIconSizePx = 1024;
+    if (!icon || sizePx <= 0 || sizePx > maximumIconSizePx) return nullptr;
+
+    WindowDc screenDc;
+    if (!screenDc.Get()) return nullptr;
+    MemoryDc iconDc(screenDc.Get());
+    if (!iconDc.Get()) return nullptr;
+
+    BITMAPINFO bitmapInfo = {};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = sizePx;
+    bitmapInfo.bmiHeader.biHeight = -sizePx;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    void* rawBits = nullptr;
+    OwnedBitmap bitmap(CreateDIBSection(
+        screenDc.Get(), &bitmapInfo, DIB_RGB_COLORS, &rawBits, nullptr, 0));
+    if (!bitmap.Get() || !rawBits) return nullptr;
+    BitmapSelection selectedBitmap(iconDc.Get(), bitmap.Get());
+    if (!selectedBitmap.Valid()) return nullptr;
+
+    const int stride = sizePx * 4;
+    const auto byteCount = static_cast<std::size_t>(stride) * static_cast<std::size_t>(sizePx);
+    std::memset(rawBits, 0, byteCount);
+    if (!DrawIconEx(iconDc.Get(), 0, 0, icon, sizePx, sizePx, 0, nullptr, DI_NORMAL)) return nullptr;
+
+    auto raster = std::make_shared<IconRaster>();
+    raster->width = sizePx;
+    raster->height = sizePx;
+    raster->stride = stride;
+    const auto* sourceBytes = static_cast<const std::uint8_t*>(rawBits);
+    raster->premultipliedBgra.assign(sourceBytes, sourceBytes + byteCount);
+
+    for (std::size_t offset = 0; offset + 3 < byteCount; offset += 4)
+    {
+        auto* pixel = raster->premultipliedBgra.data() + offset;
+        const auto alpha = pixel[3];
+        if (alpha == 0)
+        {
+            if (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0) pixel[3] = 255;
+        }
+        else if (pixel[0] > alpha || pixel[1] > alpha || pixel[2] > alpha)
+        {
+            pixel[0] = Premultiply(pixel[0], alpha);
+            pixel[1] = Premultiply(pixel[1], alpha);
+            pixel[2] = Premultiply(pixel[2], alpha);
+        }
+    }
+    return raster;
 }
 }
