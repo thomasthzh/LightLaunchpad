@@ -792,7 +792,7 @@ public:
             || FAILED(luminanceTarget_.Get()->QueryInterface(
                 __uuidof(IDXGISurface), targetSurface.PutVoid()))) return;
         D2D1_BITMAP_PROPERTIES1 sourceProperties = D2D1::BitmapProperties1(
-            D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            D2D1_BITMAP_OPTIONS_NONE,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
         D2D1_BITMAP_PROPERTIES1 targetProperties = D2D1::BitmapProperties1(
             D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
@@ -869,7 +869,7 @@ public:
         }
         return DrawSurface(0, [&](ID2D1DeviceContext* context) {
             D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
-                D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                D2D1_BITMAP_OPTIONS_NONE,
                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
             ComOwner<ID2D1Bitmap1> desktopBitmap;
             if (FAILED(context->CreateBitmapFromDxgiSurface(
