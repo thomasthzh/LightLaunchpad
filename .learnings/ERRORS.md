@@ -4,7 +4,7 @@
 
 **Logged**: 2026-08-09T17:05:00+08:00
 **Priority**: medium
-**Status**: in_progress
+**Status**: resolved
 **Area**: tests
 
 ### Summary
@@ -33,6 +33,12 @@ Use the Windows PowerShell 5.1-compatible `IndexOf(string, StringComparison) -ge
 - Reproducible: yes
 - Related Files: `tests/LightLaunchpad.NativeUi.Tests/SearchIndex.Tests.ps1`
 - See Also: `ERR-20260809-005`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T17:20:00+08:00
+- **Commit/PR**: `e63484d7cc40da3bc56f9b5c5d5213657fc5d043`
+- **Notes**: Replaced the unsupported overload with ordinal `IndexOf(...) -lt 0`. Two implementer runs plus independent spec and quality review runs passed under Windows PowerShell 5.1; each native run was 7/7 and left the pre-existing temp-root set unchanged.
 
 ---
 
