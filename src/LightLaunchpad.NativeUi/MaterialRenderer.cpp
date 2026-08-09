@@ -245,7 +245,10 @@ FailureReason InitializeDevice(DeviceResources& resources, std::uint32_t* select
 class MaterialRenderer::Impl final
 {
 public:
-    Impl() : rendererThread_(&Impl::Run, this) {}
+    Impl()
+    {
+        rendererThread_ = std::thread(&Impl::Run, this);
+    }
 
     ~Impl()
     {

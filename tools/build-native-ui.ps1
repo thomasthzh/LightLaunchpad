@@ -115,7 +115,14 @@ function Resolve-NativeToolchain {
         }
         foreach ($llpLibrary in $llpRequiredImportLibraries) {
             $llpResolvedLibrary = ((& $llpCompiler "-print-file-name=$llpLibrary" 2>$null) -join '').Trim()
-            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($llpResolvedLibrary) -or -not (Test-Path -LiteralPath $llpResolvedLibrary -PathType Leaf)) {
+            $llpReturnedRequestedName = [string]::Equals(
+                $llpResolvedLibrary,
+                $llpLibrary,
+                [System.StringComparison]::Ordinal)
+            $llpResolvedLibraryIsAbsolute =
+                -not [string]::IsNullOrWhiteSpace($llpResolvedLibrary) -and
+                [System.IO.Path]::IsPathRooted($llpResolvedLibrary)
+            if ($LASTEXITCODE -ne 0 -or $llpReturnedRequestedName -or -not $llpResolvedLibraryIsAbsolute -or -not (Test-Path -LiteralPath $llpResolvedLibrary -PathType Leaf)) {
                 $llpMissing += $llpLibrary
             }
         }

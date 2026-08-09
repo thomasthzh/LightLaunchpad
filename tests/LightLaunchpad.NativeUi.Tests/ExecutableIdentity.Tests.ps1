@@ -199,6 +199,50 @@ $llpUiProcess = $null
 try {
     New-Item -ItemType Directory -Force -Path $llpOutputDirectory | Out-Null
 
+    $llpSpoofWorkingDirectory = Join-Path $llpTempRoot ("toolchain-spoof-cwd-" + [System.Guid]::NewGuid().ToString('N'))
+    $llpSpoofOutputDirectory = Join-Path $llpTempRoot 'toolchain-spoof-output'
+    New-Item -ItemType Directory -Path $llpSpoofWorkingDirectory | Out-Null
+    [System.IO.File]::WriteAllText(
+        (Join-Path $llpSpoofWorkingDirectory 'libuiautomationcore.a'),
+        'not-an-import-library',
+        [System.Text.UTF8Encoding]::new($false))
+    $llpStrawberryBin = 'C:\Strawberry\c\bin'
+    if (-not (Test-Path -LiteralPath (Join-Path $llpStrawberryBin 'g++.exe') -PathType Leaf)) {
+        throw "The incomplete Strawberry compiler fixture is unavailable at $llpStrawberryBin."
+    }
+    $llpGitDirectory = Split-Path -Parent (Get-Command git.exe -ErrorAction Stop).Source
+    $llpSystem32 = Join-Path $env:SystemRoot 'System32'
+    $llpPriorPath = $env:PATH
+    $llpPriorLocation = Get-Location
+    $llpIncompleteToolchainRejected = $false
+    try {
+        $env:PATH = @($llpStrawberryBin, $llpGitDirectory, $llpSystem32) -join ';'
+        Set-Location -LiteralPath $llpSpoofWorkingDirectory
+        try {
+            & (Join-Path $llpRepoRoot 'tools\build-native-ui.ps1') `
+                -OutputDirectory $llpSpoofOutputDirectory `
+                -ProductVersion '1.11.0' `
+                -BuildCommit 'toolchainprobe' `
+                -BuildChannel Development | Out-Null
+        }
+        catch {
+            $llpIncompleteToolchainRejected =
+                $_.Exception.Message.IndexOf('No MinGW-w64 toolchain on PATH can link the complete NativeUi', [System.StringComparison]::Ordinal) -ge 0 -and
+                $_.Exception.Message.IndexOf('libuiautomationcore.a', [System.StringComparison]::Ordinal) -ge 0
+        }
+    }
+    finally {
+        Set-Location -LiteralPath $llpPriorLocation
+        $env:PATH = $llpPriorPath
+    }
+    if (-not $llpIncompleteToolchainRejected) {
+        throw 'NativeUi build did not reject the incomplete Strawberry toolchain before compile/link.'
+    }
+    if (Test-Path -LiteralPath (Join-Path $llpSpoofOutputDirectory 'LightLaunchpad.NativeUi.exe') -PathType Leaf) {
+        throw 'Incomplete toolchain probe unexpectedly produced a NativeUi EXE.'
+    }
+    Write-Output 'PASS ExecutableIdentity_RejectsRelativeCompilerLibrarySpoofBeforeBuild'
+
     & (Join-Path $llpRepoRoot 'tools\build-native-ui.ps1') `
         -OutputDirectory $llpOutputDirectory `
         -ProductVersion '1.11.0' `
@@ -435,7 +479,12 @@ finally {
     }
     $llpResolvedTemp = [System.IO.Path]::GetFullPath($llpTempRoot)
     $llpExpectedTempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
-    if ($llpResolvedTemp.StartsWith($llpExpectedTempRoot, [System.StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $llpResolvedTemp)) {
+    $llpExpectedTempPrefix = $llpExpectedTempRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+    if ($llpResolvedTemp.StartsWith($llpExpectedTempPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $llpResolvedTemp)) {
+        $llpTempItem = Get-Item -LiteralPath $llpResolvedTemp -Force
+        if (($llpTempItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Refusing to clean reparse-point identity test output $llpResolvedTemp."
+        }
         Remove-Item -LiteralPath $llpResolvedTemp -Recurse -Force
     }
     if (Test-Path -LiteralPath $llpDirtyMarker -PathType Leaf) {

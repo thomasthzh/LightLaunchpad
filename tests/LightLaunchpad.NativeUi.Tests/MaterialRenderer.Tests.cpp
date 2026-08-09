@@ -523,6 +523,40 @@ void TestRendererThreadBootstrapsGpuDependenciesAndReturnsHidden()
     std::cout << "INFO MaterialRenderer featureLevel=0x" << std::hex << featureLevel << std::dec << "\n";
     Pass("MaterialRenderer_RenderThreadBootstrapsDependenciesAndReturnsHidden");
 }
+
+void TestRendererConstructionAndImmediateDestructionStress()
+{
+    constexpr int iterations = 1000;
+    const auto started = std::chrono::steady_clock::now();
+    for (int iteration = 0; iteration < iterations; ++iteration)
+    {
+        llp::material::MaterialRenderer renderer;
+    }
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    std::cout << "METRIC MaterialRenderer constructDestroyIterations=" << iterations
+              << " elapsedMs=" << elapsedMs << "\n";
+    Pass("MaterialRenderer_ConstructImmediateDestroyStressIsStable");
+}
+
+void TestRendererImmediateShowHideStress()
+{
+    constexpr int iterations = 500;
+    const auto started = std::chrono::steady_clock::now();
+    for (int iteration = 0; iteration < iterations; ++iteration)
+    {
+        llp::material::MaterialRenderer renderer;
+        renderer.Show({});
+        renderer.Hide();
+        Require(renderer.WaitUntilHiddenForTest(2000),
+            "Immediate Show/Hide stress did not reach Hidden.");
+    }
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    std::cout << "METRIC MaterialRenderer immediateShowHideIterations=" << iterations
+              << " elapsedMs=" << elapsedMs << "\n";
+    Pass("MaterialRenderer_ImmediateShowHideStressIsStable");
+}
 }
 
 int main()
@@ -538,8 +572,10 @@ int main()
         TestLegacyMaskIconDistinguishesOpaqueBlackFromTransparency();
         TestLatestSceneSlotReturnsOnlyNewestCompleteGeneration();
         TestRendererThreadBootstrapsGpuDependenciesAndReturnsHidden();
-        std::cout << passed << "/9 tests passed\n";
-        return passed == 9 ? 0 : 1;
+        TestRendererConstructionAndImmediateDestructionStress();
+        TestRendererImmediateShowHideStress();
+        std::cout << passed << "/11 tests passed\n";
+        return passed == 11 ? 0 : 1;
     }
     catch (const std::exception& exception)
     {

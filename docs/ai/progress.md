@@ -2,27 +2,27 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-09 20:06:46 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-09 20:39:45 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `9755aa6a36d833faf54ace0b06e432d817fe444f`
+- HEAD: `38308d6a732bb1858ea36f6b81c70d8c1eae6f46`
 - Remote main: `origin/main@33e91c2`
 - Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
 - Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
 - Goal status: active; LLP-013 remains the only task in progress.
-- Current gate: LLP-013 Task 3 renderer-thread GPU bootstrap implementation and local verification are in progress; scoped commit and independent specification/code-quality reviews are still pending, so Task 4 has not started.
+- Current gate: LLP-013 Task 3 quality review returned Ready No with one Critical constructor/thread lifetime defect and one Minor toolchain spoof defect. Both corrections and local gates are complete; scoped fix commit and independent re-reviews remain pending, so Task 4 has not started.
 
 ## LLP-013 Task 3 In-Progress Evidence
 
-Status at 2026-08-09 20:06 +08:00: Task 3 implementation is locally verified but remains in progress pending its scoped commit plus independent specification and code-quality review. LLP-013 remains the sole project-level `in_progress` task; Task 4 has not started.
+Status at 2026-08-09 20:39 +08:00: initial implementation commit `38308d6a732bb1858ea36f6b81c70d8c1eae6f46` is under quality correction. The correction is locally verified but remains in progress pending its scoped fix commit plus independent specification/code-quality re-review. LLP-013 remains the sole project-level `in_progress` task; Task 4 has not started.
 
 Changed files in the scoped implementation:
 
 - `src/LightLaunchpad.NativeUi/MaterialRenderer.{h,cpp}` - exact pimpl facade, asynchronous renderer-thread command boundary, immutable pending/current scene ownership, hidden condition, test-only production dependency probe, and renderer-thread-only D3D11/DXGI/D2D1/DWrite/DirectComposition bootstrap ownership.
-- `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp` - four-stage dependency/feature-level probe and facade Show/Hide/diagnostics thread behavior.
-- `tools/build-native-ui.ps1` - complete-NativeUi MinGW capability selection, production `MaterialRenderer.cpp` compilation, and D3D11/DXGI/DirectComposition link inputs immediately after D2D/DWrite.
-- `tests/LightLaunchpad.NativeUi.Tests/{AppHost,ExecutableIdentity}.Tests.ps1` - clean-source fixtures now copy `MaterialRenderer.{h,cpp}` so their stable/development builds exercise the production list.
+- `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp` - four-stage dependency/feature-level probe, facade Show/Hide/diagnostics behavior, 1,000-iteration immediate destruction stress, and 500-iteration immediate Show/Hide stress.
+- `tools/build-native-ui.ps1` - complete-NativeUi MinGW capability selection hardened against relative `-print-file-name` spoofing, production `MaterialRenderer.cpp` compilation, and D3D11/DXGI/DirectComposition link inputs immediately after D2D/DWrite.
+- `tests/LightLaunchpad.NativeUi.Tests/{AppHost,ExecutableIdentity}.Tests.ps1` - clean-source fixtures copy `MaterialRenderer.{h,cpp}`; ExecutableIdentity adds a real isolated-CWD/incomplete-PATH compiler-spoof rejection and reparse-safe exact temp cleanup.
 - `docs/ai/progress.md` - this in-progress RED/GREEN, build, identity, and protection evidence. `docs/ai/tasks.md` is intentionally unchanged until review closes Task 3.
 
 TDD RED and diagnostic corrections:
@@ -38,28 +38,35 @@ TDD RED and diagnostic corrections:
 
 GPU/thread and toolchain evidence:
 
-- Fresh default-PATH Windows PowerShell 5.1 module GREEN is 9/9, exit 0; neighboring `AdaptiveEnvironment.Tests.ps1` is 3/3, exit 0. Both temp-prefix sets were 0 -> 0 with added=0 and missing=0. The production probe creates and releases a `D3D11_CREATE_DEVICE_BGRA_SUPPORT` device, queries `IDXGIDevice`, creates `ID2D1Device` plus `ID2D1DeviceContext`, creates `IDWriteFactory`, then creates `IDCompositionDevice`; selected feature level is `0xb000` (`D3D_FEATURE_LEVEL_11_0`). A real facade instance consumes asynchronous Show, selects `HighFidelity`, acknowledges Hide, and returns `Hidden` within the 2-second test bound.
+- Fresh default-PATH Windows PowerShell 5.1 module GREEN is 11/11 twice, exit 0; neighboring `AdaptiveEnvironment.Tests.ps1` is 3/3, exit 0. Both temp-prefix sets were 0 -> 0 with added=0 and missing=0. The two post-fix stress runs completed 1,000 immediate construction/destruction cycles in `71 ms` and `80 ms`, plus 500 immediate Show/Hide/Hidden cycles in `44 ms` and `60 ms`. The production probe creates and releases a `D3D11_CREATE_DEVICE_BGRA_SUPPORT` device, queries `IDXGIDevice`, creates `ID2D1Device` plus `ID2D1DeviceContext`, creates `IDWriteFactory`, then creates `IDCompositionDevice`; selected feature level is `0xb000` (`D3D_FEATURE_LEVEL_11_0`). A real facade instance consumes asynchronous Show, selects `HighFidelity`, acknowledges Hide, and returns `Hidden` within the 2-second test bound.
 - `MaterialRenderer::Impl` starts exactly one renderer thread in construction and joins it only in destruction. COM and retained GPU COM owners are created/released on that thread; the test probe uses its own joined probe thread. Hidden work uses the exact predicate `shutdown || showRequested || hideRequested || rebuildRequested || freezeRequested || pendingScene` with no timeout or polling wake. Partial initialization is held by local RAII owners whose reverse declaration order releases DirectComposition, DWrite, D2D context/device, DXGI, and D3D context/device on first failure.
 - Default PATH is Strawberry-first. `C:\Strawberry\c\bin\g++.exe` reports MinGW-w64 `13.2.0` and lacks `libuiautomationcore.a`; the complete toolchain at `C:\Users\thoma\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin\g++.exe` reports `16.1.0` and resolves UI Automation plus D2D/DWrite/D3D11/DXGI/DComp import libraries. The build script now probes those actual capabilities and pairs `windres.exe` with the selected compiler, so callers do not need to reorder PATH manually and an incomplete toolchain produces one direct diagnostic.
 
 Real build, EXE, and neighboring regression evidence:
 
 - Exact build command under default Strawberry-first PATH: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\build-native-ui.ps1 -OutputDirectory artifacts\native-ui-llp013-bootstrap -ProductVersion 1.11.0 -BuildChannel Development`; exit 0. The output directory did not exist before Task 3 and was created as an isolated development artifact. The selected compiler was absolute WinLibs `g++.exe` 16.1.0.
-- Real EXE: `C:\Users\thoma\Desktop\启动台\artifacts\native-ui-llp013-bootstrap\LightLaunchpad.NativeUi.exe`; size `1,748,992` bytes; SHA256 `8461AED20DAA7FAA266C5E417549E94D5EE1EA7C09FF9CBD56BD714EA65595AF`; FileVersion `1.11.0.0`; ProductVersion `1.11.0-dev+9755aa6a36d8.dirty`.
-- The EXE ran through `Start-Process -Wait -PassThru -WindowStyle Hidden --diagnostics-file ...` with an artifact-local isolated `APPDATA`, `LOCALAPPDATA`, and `USERPROFILE`; PID `58056` exited 0 and matching artifact process count remained 0 before/after. Diagnostics report version `1.11.0-dev+9755aa6a36d8.dirty`, commit `9755aa6a36d8`, channel `development`, and renderer `not initialized`, proving Task 3 did not wire or show the renderer. The retained isolated profile is under the newly created ignored artifact; no test cleanup targets a user or historical directory.
-- Fresh `ExecutableIdentity.Tests.ps1` completed all five reported gates with exit 0: embedded version/PerMonitorV2, runtime diagnostics, stable/development singleton separation from a clean-source fixture, real settings About diagnostics, and dirty-stable/package identity behavior.
-- Fresh `AppHost.Tests.ps1` without Explorer restart completed all four reported gates with exit 0. Metrics were shellReady `16 ms`, probe exit `266 ms`, settings window `176 ms`, log `1,273` bytes; the historical `lightlaunchpad-apphost-tests-*` set was unchanged 1 -> 1 with added=0 and missing=0.
+- Real EXE after the quality correction: `C:\Users\thoma\Desktop\启动台\artifacts\native-ui-llp013-bootstrap\LightLaunchpad.NativeUi.exe`; size `1,749,504` bytes; SHA256 `8D241E96282A6A1D720862591DD4164A8B52E48F053D4098353496344EAB963D`; FileVersion `1.11.0.0`; ProductVersion `1.11.0-dev+38308d6a732b.dirty`.
+- The EXE ran through `Start-Process -Wait -PassThru -WindowStyle Hidden --diagnostics-file ...` with artifact-local isolated `APPDATA`, `LOCALAPPDATA`, and `USERPROFILE`; PID `59012` exited 0 and matching artifact process count remained 0 before/after. Diagnostics report version `1.11.0-dev+38308d6a732b.dirty`, commit `38308d6a732b`, channel `development`, and renderer `not initialized`, proving Task 3 did not wire or show the renderer. The retained isolated profile is under the ignored artifact; no test cleanup targets a user or historical directory.
+- Fresh final `ExecutableIdentity.Tests.ps1` completed six reported gates with exit 0: isolated-CWD relative-library spoof rejection before compile/link, embedded version/PerMonitorV2, runtime diagnostics, stable/development singleton separation from a clean-source fixture, real settings About diagnostics, and dirty-stable/package identity behavior. `lightlaunchpad-identity-tests-*` was 0 before and 0 after; the harness validates its exact temp boundary and rejects a reparse-point root before recursive cleanup.
+- Fresh `AppHost.Tests.ps1` without Explorer restart completed all four reported gates with exit 0. Metrics were shellReady `15 ms`, probe exit `260 ms`, settings window `159 ms`, log `1,273` bytes; the historical `lightlaunchpad-apphost-tests-*` set was unchanged 1 -> 1 with added=0 and missing=0.
 - Task 3 is bootstrap/nonvisual infrastructure: capture, composition target, frame presentation, UI-thread host Show wiring, renderer frame-time, live-refresh, and screenshots belong to Tasks 4-10 and are not claimed here. Screenshot and renderer performance evidence are N/A at this checkpoint.
+
+Quality-review correction evidence:
+
+- Initial quality review returned Ready No. Critical: `rendererThread_` was started in `Impl`'s member initializer while the thread member is declared before the request flags, request/scene state, diagnostics, and device resources; `Run()` could read members whose lifetimes had not begun, which is C++ undefined behavior and a real data race. The language-level finding is the structural RED. The added executable stress happened to pass on the defective build (1,000 immediate destruct cycles in `75 ms`, 500 immediate Show/Hide cycles in `50 ms`), which does not negate the lifetime violation.
+- The minimal production correction leaves `rendererThread_` default-constructed with all other members, then assigns `std::thread(&Impl::Run, this)` inside the constructor body. Entering the body proves every member lifetime has begun before `Run` can execute. If temporary thread construction throws, normal constructor unwinding destroys the already-constructed non-joinable thread member plus all prior members; move assignment itself is nonthrowing.
+- Minor toolchain RED: with PATH limited to Strawberry `g++` plus Git/System32, a GUID-isolated CWD containing a fake `libuiautomationcore.a` caused the old resolver to enter the real build and fail at link with `ld.exe: cannot find -luiautomationcore: No such file or directory`; the regression then raised `NativeUi build did not reject the incomplete Strawberry toolchain before compile/link.` and exited 1.
+- The resolver now rejects an exact ordinal match between GCC's response and the requested import-library name, rejects every non-rooted response, and only then checks the absolute leaf. The same real regression now reports `PASS ExecutableIdentity_RejectsRelativeCompilerLibrarySpoofBeforeBuild`, produces no EXE, and the normal default Strawberry-first build still selects absolute WinLibs `g++.exe` 16.1.0 without caller PATH changes.
 
 Protection and scope evidence:
 
-- At 20:06:46 +08:00 exactly one protected process remains: PID `29376` at `C:\Users\thoma\Desktop\启动台\artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe`, SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`. HKCU Run remains its exact quoted path; `%LOCALAPPDATA%\Programs\LightLaunchpad\LightLaunchpad.NativeUi.exe` remains absent; `C:\TOOL\LightLaunchpad-nativeui-win-x64-V1.10\LightLaunchpad.NativeUi.exe` remains SHA256 `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`.
+- At 20:39:45 +08:00 exactly one protected process remains: PID `29376` at `C:\Users\thoma\Desktop\启动台\artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe`, SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`. HKCU Run remains its exact quoted path; `%LOCALAPPDATA%\Programs\LightLaunchpad\LightLaunchpad.NativeUi.exe` remains absent; `C:\TOOL\LightLaunchpad-nativeui-win-x64-V1.10\LightLaunchpad.NativeUi.exe` remains SHA256 `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`.
 - The bootstrap artifact has no running process. `LLP_reconstruction/` remains untracked/unstaged, ignored `LightLaunchpad.NativeUi.o` is untouched, and no formal install, startup mutation, `C:\TOOL` mutation, push, tag, release, capture/composition implementation, or Task 4 work occurred.
-- Scoped implementation commit: pending. Independent specification and code-quality review: pending; no review pass is claimed.
+- Initial scoped implementation commit: `38308d6a732bb1858ea36f6b81c70d8c1eae6f46` (`feat: bootstrap native material renderer`). Quality-correction commit: pending. Independent specification/code-quality re-review: pending; no corrected-review pass is claimed.
 
 Next step:
 
-- Stage only the six Task 3 production/test files plus this progress evidence, run fresh focused verification and cached diff checks, then commit `feat: bootstrap native material renderer`. Send that commit through fresh independent specification and code-quality review before Task 3 is closed or Task 4 begins.
+- Stage only the four quality-correction production/test files plus this progress evidence, run fresh focused verification and cached diff checks, then commit the scoped fix. Send the initial and correction commits through fresh independent specification and code-quality re-review before Task 3 is closed or Task 4 begins.
 
 ## LLP-013 Task 2 Completion Evidence
 
