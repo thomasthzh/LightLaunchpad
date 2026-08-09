@@ -41,6 +41,43 @@ Before any test clicks a legacy or unknown settings Apply/Save path, inventory e
 
 ---
 
+## [ERR-20260809-006] powershell-junction-remove-null-reference
+
+**Logged**: 2026-08-09T16:25:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: tests
+
+### Summary
+
+The Catalog/Shell real-EXE suite passed all product assertions, then Windows PowerShell `Remove-Item -LiteralPath` threw an internal null-reference while removing its test-created junction.
+
+### Error
+
+```text
+Remove-Item : Object reference not set to an instance of an object.
+```
+
+### Context
+
+- Exact root: `C:\Users\thoma\AppData\Local\Temp\lightlaunchpad-catalog-broker-tests-8db2a79ccba740e19228c131dc4bcd9c`.
+- Exact junction: `StartMenuFixture\LinkedApps`; attributes are `Directory, ReparsePoint`, link type is `Junction`.
+- The junction target is `ReparseTarget` inside the same GUID test root.
+- The root is inside `%TEMP%`, is an ordinary directory, and was created by this test run.
+- Product checks passed: cached input remained responsive, future history was preserved, import was idempotent, and the reparse point was skipped.
+- No retry or alternative deletion primitive has been used; the exact failed-test root remains in place pending user authorization.
+
+### Suggested Fix
+
+After explicit approval, replace the junction cleanup with a non-recursive `.NET Directory.Delete(path, false)` only after exact `%TEMP%` boundary, reparse-point, junction-type, and in-root target validation. Then remove only the validated test root with the existing guarded recursive cleanup and rerun the suite.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/CatalogShellBroker.Tests.ps1`
+
+---
+
 ## [ERR-20260809-005] native-build-selects-incomplete-mingw
 
 **Logged**: 2026-08-09T16:05:00+08:00
