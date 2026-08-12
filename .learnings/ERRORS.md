@@ -1,5 +1,125 @@
 # Error Log
 
+## [ERR-20260812-019] task5-manual-build-identity-mismatch
+
+**Logged**: 2026-08-12T12:06:15+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+A retained Task 5 artifact was built with a manually copied short commit string that did not equal the repository HEAD, so its otherwise successful real probe could not be identity evidence.
+
+### Error
+
+```text
+Requested build commit 0c593a2d9fa2 did not equal HEAD 0c593a291d10444a4e0a697251f334963a4a3eac.
+```
+
+### Context
+
+- The artifact ran `high-fidelity/None`, but its compiled identity was wrong.
+- It was retained under ignored `artifacts/` and explicitly excluded from all completion evidence.
+- A new isolated build used the exact full `git rev-parse HEAD` value and passed identity plus real-probe checks.
+
+### Suggested Fix
+
+Resolve the full HEAD programmatically in the same foreground PowerShell command that validates and passes the build parameter; never retype a commit identifier for identity-bearing artifacts.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tools/build-native-ui.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-12T12:06:15+08:00
+- **Commit/PR**: Task 5 completion-evidence documentation commit
+- **Notes**: Final evidence uses exact HEAD `7a435550b05e52b1c9bc3a5d808f5b477f780ae0` and independent real builds only.
+
+---
+
+## [ERR-20260812-018] material-probe-unsupported-field-assertion
+
+**Logged**: 2026-08-12T12:06:15+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+A reviewer wrapper asserted a `buildId` property that the material-probe JSON contract does not publish, causing a false outer failure after the exact-HEAD suite had passed and cleaned up.
+
+### Error
+
+```text
+The wrapper attempted to read/assert a buildId field absent from material-probe JSON.
+```
+
+### Context
+
+- The exact full commit was passed into the build and independently visible in executable diagnostics.
+- The real material suite had already passed with `high-fidelity/None`, positive acquired/presented counts, stable rejection, and complete cleanup.
+- The failure belonged only to the extra wrapper assertion.
+
+### Suggested Fix
+
+Assert identity from the documented diagnostics JSON and assert renderer behavior only from the material-probe JSON fields it actually defines.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/MaterialRendererBehavior.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-12T12:06:15+08:00
+- **Commit/PR**: Task 5 completion-evidence documentation commit
+- **Notes**: Final spec and quality evidence used supported fields plus separate exact-HEAD diagnostics.
+
+---
+
+## [ERR-20260812-017] powershell-single-staged-path-scalar
+
+**Logged**: 2026-08-12T12:06:15+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+A staged-scope guard treated one line of `git diff --cached --name-only` as a scalar string, so `.Count` measured string behavior and stopped a valid one-file documentation commit before Git committed it.
+
+### Error
+
+```text
+Unexpected staged scope.
+```
+
+### Context
+
+- Only the intended plan file was staged; the guard failed safe before commit.
+- No protected or unrelated path was staged.
+
+### Suggested Fix
+
+Always wrap Git line output as an array: `$names = @(git diff --cached --name-only)` before count and element checks.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `docs/superpowers/plans/2026-08-09-llp-013-live-material-renderer.md`
+- See Also: `ERR-20260809-003`, `ERR-20260809-012`
+
+### Resolution
+
+- **Resolved**: 2026-08-12T12:06:15+08:00
+- **Commit/PR**: `d0cbe69`
+- **Notes**: Reissuing the same guarded commit with `@(...)` staged and committed exactly one plan file.
+
+---
+
 ## [ERR-20260809-016] parallel-real-exe-review-singleton-collision
 
 **Logged**: 2026-08-09T20:56:02+08:00
@@ -502,7 +622,7 @@ After explicit approval, replace the junction cleanup with a non-recursive `.NET
 
 **Logged**: 2026-08-09T16:05:00+08:00
 **Priority**: high
-**Status**: in_progress
+**Status**: resolved
 **Area**: config
 
 ### Summary
@@ -531,6 +651,12 @@ Make the production build probe candidate compilers for every required header/im
 
 - Reproducible: yes
 - Related Files: `tools/build-native-ui.ps1`, `tests/LightLaunchpad.NativeUi.Tests/AdaptiveWindowBehavior.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-09T20:56:02+08:00
+- **Commit/PR**: `4f5b044c6c1e64af59859cebe4c5596b5b6a2e6d`
+- **Notes**: The production resolver now rejects an ordinal requested-name echo and every non-rooted library response before checking the absolute leaf. Under a Strawberry-first PATH it rejects the incomplete Strawberry toolchain, selects complete WinLibs 16.1 deterministically, and the clean-source identity spoof gate proves an in-CWD fake import library cannot bypass capability detection.
 
 ---
 

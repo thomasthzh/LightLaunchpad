@@ -2,16 +2,49 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-09 22:38:00 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-12 12:06:15 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `c4bc9b0241048c49132a8961d6396b5476ae2394`
+- HEAD: `7a435550b05e52b1c9bc3a5d808f5b477f780ae0`
 - Remote main: `origin/main@33e91c2`
 - Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
 - Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
 - Goal status: active; LLP-013 remains the only task in progress.
-- Current gate: LLP-013 Task 4 is complete after independent specification and code-quality re-review; Task 5 three-layer DirectComposition rendering is the next gate and has not started.
+- Current gate: LLP-013 Task 5 is complete after independent specification and code-quality re-review; Task 6 normal Spotlight host integration and legacy-lens removal is the next gate and has not started.
+
+## LLP-013 Task 5 Completion Evidence
+
+Status at 2026-08-12 12:06 +08:00: Task 5 complete; LLP-013 remains the sole project-level `in_progress` task, and Task 6 is the next implementation gate.
+
+Changed files and commits:
+
+- `src/LightLaunchpad.NativeUi/MaterialRenderer.cpp` - one DirectComposition target/root with exactly three ordered premultiplied surfaces, shared immutable material-frame plan, exact desktop crop/rotation/atlas transforms, bounded optical material/search response, crisp overlay/content rendering, spatial 16x12 luminance readback, required-resource failure propagation, and dirty-only single-commit presentation.
+- `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp` - production orchestration recording, four-rotation GPU quadrant readback, nonzero atlas and 24-step search-edge state checks, spatial guard tests, actual D2D/DWrite `Create*` failure injection, controlled mutations, and commit/presentation oracles.
+- `tests/LightLaunchpad.NativeUi.Tests/AdaptiveWindowBehavior.Tests.ps1` - prerequisite test-only foreground activation now uses bounded paired `AttachThreadInput`, validates `SetForegroundWindow`, and detaches successful pairs in reverse order; commit `8a2fe91`.
+- Task 5 commits: initial composition `1a2421f`; corrected source bitmap flags in plan `d0cbe69`; effect-input flag fix `9e7085e`; optical material completion `5d1b2b9`; focused-transform removal `8b44ca1`; atlas/resource/local-grid hardening `0c593a2`; per-edge transform isolation `a8cb096`; final rotated GPU sampling and real-operation failure proof `7a43555`.
+
+TDD RED and systematic-debugging evidence:
+
+- Initial RED failed to link `LLP_MaterialRunFakeCompositionScenario`; a second dirty-event schema RED proved lifecycle/rebuild events must present. The first real composition run fell back with `CompositionUnavailable`; exact instrumentation found material `EndDraw=0x8899001E` (`D2DERR_INVALID_GRAPH_CONFIGURATION`) and luminance `EndDraw=0x88990021` (`D2DERR_BITMAP_CANNOT_DRAW`). Microsoft defines `CANNOT_DRAW` as invalid for effect input, so the plan was minimally corrected: desktop/effect-source bitmaps use `NONE`, while target bitmaps remain `TARGET | CANNOT_DRAW`.
+- Specification review first found discarded search sampling, missing radial clarity/local guards, and self-proving recording constants. RED schema/mutations now require real shared material/overlay plans, five bounded search samples, center-to-edge clarity, search-text/focused-region guards, and no focus displacement/scale command channel.
+- Quality review found lost nonzero `BeginDraw` atlas offsets, swallowed required resource failures, and an unused spatial luminance grid. REDs added atlas `(7,11)`, direct and injected HRESULT failures, zero-commit/zero-present checks, and split dark/light local guards. Production now explicitly composes atlas state, propagates required failures before commit, and consumes covered 16x12 cells for bounded local strength.
+- A later spec regression exposed search-edge clip state leaking between iterations. The shared 24-operation stream now performs, for each of four edges, atlas reset -> push clip -> crop/displacement/atlas -> draw -> pop -> atlas restore. Reintroducing the old first-only/last-only reset produces the expected RED.
+- Final quality review found unrotated spatial luminance and weak generic failure tests. An actual GPU quadrant readback initially returned `1,1,1,1`, proving a second crop translation; the shared desktop command now uses the crop origin correctly. Expected outputs are Identity `1,2,3,4`, 90 `3,1,4,2`, 180 `4,3,2,1`, and 270 `2,4,1,3`, including negative output origin and nonzero crop. Macro-only per-instance injection now hits the actual desktop bitmap, effect, text-format, and icon creation sites exactly once; deleting the real desktop or icon check independently turns the focused suite red.
+
+Final verification, performance, and real-EXE evidence:
+
+- Fresh Windows PowerShell 5.1 production module gate passes 29/29 twice and post-commit. It includes real GPU four-rotation readback, four actual `Create*` failure cases with `hit=1`, `commit=0`, `present=0`, 1,000 immediate lifetimes, 500 Show/Hide lifetimes, exact three-layer order, copied premultiplied BGRA icons, and timeout-without-present behavior. `AdaptiveEnvironment` passes 3/3 and `AdaptiveWindowBehavior` passes 4/4 over the actual monitor plus 96/144/192-DPI matrix.
+- Serial real Lifecycle gates pass twice on the final implementation with `high-fidelity/None`, acquired frames greater than zero, zero rebuilds, stable window events zero, unchanged startup, and no production fake symbol. The independent final exact-HEAD quality artifact is 1,783,808 bytes, SHA256 `891FFAEEF49467C305EFB50EA6E505406415AB1A854CE234954D48F7638D7134`; its real probe reports `high-fidelity/live/None`, acquired 20, presented 20, rebuilds 0, and exits 0.
+- A production `MaterialRenderer.o` compiled without `LLP_MATERIAL_TESTING` contains none of the seven test markers; macro-only injection state/functions are absent. The exact-HEAD isolated probe root was checked for root/nested reparse points, had no active process, and was removed by its reviewer.
+- Final independent specification review: PASS with zero findings. Final independent code-quality review: Ready Yes with Critical=0, Important=0, and Minor=0. Both independently reran the affected module, adaptive, real-window, and real-EXE gates serially.
+- Task 5 proves the probe-only production renderer and real GPU/compositor path. Normal Spotlight `ShowNativeUi`/`HideNativeUi` integration, legacy lens removal, canonical launch flows under the renderer, screenshots, pixel/contrast audit, and renderer frame-time/memory release gates remain Task 6-9 work and are not claimed here. Screenshot evidence and final frame-time acceptance are therefore N/A at this checkpoint.
+
+Protection, retained diagnostics, and next step:
+
+- A normal system restart changed the observed protected PID from `29376` to `11192`; identity remains the exact protected path `C:\Users\thoma\Desktop\启动台\artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe`, SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`, with one matching process and the exact quoted HKCU Run command. The stable install remains absent; the `C:\TOOL` EXE remains SHA256 `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`.
+- Six historical `lightlaunchpad-*` roots remain unchanged. Two small non-executable `%TEMP%` D2D diagnostic traces (`llp-task5-material-trace.txt`, 48 bytes; `llp-task5-material-trace-luminance.txt`, 780 bytes) are intentionally retained because deletion attempts were rejected before execution; neither is release evidence or under the workspace. One ignored artifact with a mistyped build identity is also retained and explicitly excluded from evidence. `LLP_reconstruction/` remains untracked/unstaged and ignored `LightLaunchpad.NativeUi.o` remains untouched.
+- Start Task 6 RED for normal Spotlight host integration and legacy lens removal. Keep LLP-013 as the only project task in progress and do not start Task 7 until Task 6 implementation, specification review, quality review, and evidence update close. No formal install, startup, `C:\TOOL`, push, tag, or release mutation has occurred.
 
 ## LLP-013 Task 4 Completion Evidence
 
