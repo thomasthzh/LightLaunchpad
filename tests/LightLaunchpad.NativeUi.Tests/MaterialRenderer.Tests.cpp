@@ -55,6 +55,13 @@ extern "C" int LLP_MaterialRunFakeCompositionScenario(
     std::int64_t* values,
     std::size_t valueCount);
 
+extern "C" int LLP_MaterialRunFakeCompositionFailureScenario(
+    int failurePoint,
+    std::int64_t* values,
+    std::size_t valueCount);
+
+extern "C" int LLP_MaterialClassifyRequiredOperation(long result);
+
 namespace
 {
 using llp::material::AdvanceLifecycle;
@@ -117,6 +124,12 @@ enum MaterialCompositionValue : std::size_t
     CompositionContentDesktopReferences,
     CompositionCropCount,
     CompositionRotationNormalizations,
+    CompositionMaterialAtlasOffsetX,
+    CompositionMaterialAtlasOffsetY,
+    CompositionOverlayAtlasOffsetX,
+    CompositionOverlayAtlasOffsetY,
+    CompositionContentAtlasOffsetX,
+    CompositionContentAtlasOffsetY,
     CompositionBlurPasses,
     CompositionTintPasses,
     CompositionSearchOpticalPasses,
@@ -130,6 +143,10 @@ enum MaterialCompositionValue : std::size_t
     CompositionClarityCenterOpacityMilli,
     CompositionClarityEdgeOpacityMilli,
     CompositionLocalContrastGuards,
+    CompositionDarkGuardOpacityMilli,
+    CompositionLightGuardOpacityMilli,
+    CompositionDegenerateGuardOpacityMilli,
+    CompositionClampedGuardOpacityMilli,
     CompositionRimPasses,
     CompositionShadowPasses,
     CompositionLuminanceWidth,
@@ -145,6 +162,14 @@ enum MaterialCompositionValue : std::size_t
     CompositionPresentedAfterScene,
     CompositionPresentedAfterLifecycle,
     MaterialCompositionValueCount
+};
+
+enum MaterialCompositionFailureValue : std::size_t
+{
+    CompositionFailureReason,
+    CompositionFailureCommits,
+    CompositionFailurePresented,
+    MaterialCompositionFailureValueCount
 };
 
 struct ExpectedModernPixel
@@ -808,6 +833,13 @@ void TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit()
     Require(values[CompositionCropCount] == 1
             && values[CompositionRotationNormalizations] == 1,
         "Desktop crop or output rotation was applied more than once.");
+    Require(values[CompositionMaterialAtlasOffsetX] == 7
+            && values[CompositionMaterialAtlasOffsetY] == 11
+            && values[CompositionOverlayAtlasOffsetX] == values[CompositionMaterialAtlasOffsetX]
+            && values[CompositionOverlayAtlasOffsetY] == values[CompositionMaterialAtlasOffsetY]
+            && values[CompositionContentAtlasOffsetX] == values[CompositionMaterialAtlasOffsetX]
+            && values[CompositionContentAtlasOffsetY] == values[CompositionMaterialAtlasOffsetY],
+        "A nonzero DirectComposition atlas offset did not align material, overlay, and content.");
     Require(SatisfiesOpticalMaterialContract(values),
         "The shared production orchestration omitted a bounded optical, clarity, guard, or focus command.");
     Require(values[CompositionLuminanceWidth] == 16
@@ -816,6 +848,18 @@ void TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit()
             && values[CompositionDoNotWaitMaps] == 1
             && values[CompositionMinimumReadbackIntervalMs] == 100,
         "Luminance analysis was not a nonblocking 16x12 alternating readback.");
+    Require(values[CompositionDarkGuardOpacityMilli] >= 160
+            && values[CompositionDarkGuardOpacityMilli] <= 240
+            && values[CompositionLightGuardOpacityMilli] >= 160
+            && values[CompositionLightGuardOpacityMilli] <= 240
+            && values[CompositionDarkGuardOpacityMilli]
+                > values[CompositionLightGuardOpacityMilli],
+        "Spatial luminance did not strengthen the dark-region guard relative to the light region.");
+    Require(values[CompositionDegenerateGuardOpacityMilli] >= 160
+            && values[CompositionDegenerateGuardOpacityMilli] <= 240
+            && values[CompositionClampedGuardOpacityMilli] >= 160
+            && values[CompositionClampedGuardOpacityMilli] <= 240,
+        "Degenerate or clipped guard geometry escaped the bounded luminance policy.");
     Require(values[CompositionCopiedBgraIcons] == 1
             && values[CompositionHiconReferences] == 0,
         "Content did not consume the scene's copied BGRA icon bytes.");
@@ -844,6 +888,38 @@ void TestCompositionContractRejectsDiscardedCommands()
     Require(!SatisfiesOpticalMaterialContract(discardedGuards),
         "The composition test accepted a backend that discarded local contrast guards.");
     Pass("MaterialRenderer_CompositionContractRejectsDiscardedCommands");
+}
+
+void TestRequiredCompositionResourceFailuresStopBeforeCommit()
+{
+    Require(LLP_MaterialClassifyRequiredOperation(S_OK)
+            == static_cast<int>(llp::material::FailureReason::None),
+        "A successful required composition operation was classified as failure.");
+    Require(LLP_MaterialClassifyRequiredOperation(E_FAIL)
+            == static_cast<int>(llp::material::FailureReason::CompositionUnavailable)
+            && LLP_MaterialClassifyRequiredOperation(E_OUTOFMEMORY)
+                == static_cast<int>(llp::material::FailureReason::CompositionUnavailable),
+        "A failed required composition operation was not classified for propagation.");
+    constexpr std::array<const char*, 4> names = {
+        "material desktop bitmap",
+        "material blur effect",
+        "content text format",
+        "content icon bitmap"
+    };
+    for (std::size_t failurePoint = 0; failurePoint < names.size(); ++failurePoint)
+    {
+        std::array<std::int64_t, MaterialCompositionFailureValueCount> values = {};
+        Require(LLP_MaterialRunFakeCompositionFailureScenario(
+                    static_cast<int>(failurePoint), values.data(), values.size()) == 0,
+            "The production composition path rejected a required-resource failure scenario.");
+        Require(values[CompositionFailureReason]
+                == static_cast<std::int64_t>(llp::material::FailureReason::CompositionUnavailable),
+            "A required composition resource failure was not classified.");
+        Require(values[CompositionFailureCommits] == 0
+                && values[CompositionFailurePresented] == 0,
+            "A required composition resource failure reached commit or presentation.");
+    }
+    Pass("MaterialRenderer_RequiredResourceFailuresStopBeforeCommit");
 }
 
 void TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport()
@@ -1093,6 +1169,7 @@ int main()
         TestPrivateFakeAbiIsExplicitAndBounded();
         TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit();
         TestCompositionContractRejectsDiscardedCommands();
+        TestRequiredCompositionResourceFailuresStopBeforeCommit();
         TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport();
         TestFirstFrameDeadlineAndTimeoutDoNotRedraw();
         TestFramesReleaseBeforeReacquireRebuildAndHide();
@@ -1105,7 +1182,7 @@ int main()
         TestAcquireDeviceRemovalUsesOneBoundedRebuild();
         TestReleaseGenericFailureFallsBackWithoutRebuild();
         TestHideRequestRemainsAsynchronous();
-        constexpr int expected = 26;
+        constexpr int expected = 27;
         std::cout << passed << "/" << expected << " tests passed\n";
         return passed == expected ? 0 : 1;
     }

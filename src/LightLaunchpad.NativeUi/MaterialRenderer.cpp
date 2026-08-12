@@ -243,14 +243,72 @@ struct MaterialFramePlan
     std::vector<ContrastGuardCommand> contrastGuards;
 };
 
+using LuminanceGrid = std::array<float, 16 * 12>;
+
 bool IsValidRect(llp::geometry::Rect rect)
 {
     return rect.right > rect.left && rect.bottom > rect.top;
 }
 
+float LocalGuardOpacity(
+    llp::geometry::Rect bounds,
+    int windowWidth,
+    int windowHeight,
+    const LuminanceGrid& luminanceGrid,
+    const MaterialTone& tone)
+{
+    const float baseOpacity = std::clamp(
+        0.12f + tone.tintOpacity * 0.50f, 0.16f, 0.24f);
+    if (windowWidth <= 0 || windowHeight <= 0 || !IsValidRect(bounds))
+    {
+        return baseOpacity;
+    }
+
+    const int left = std::clamp(bounds.left, 0, windowWidth);
+    const int top = std::clamp(bounds.top, 0, windowHeight);
+    const int right = std::clamp(bounds.right, 0, windowWidth);
+    const int bottom = std::clamp(bounds.bottom, 0, windowHeight);
+    if (right <= left || bottom <= top) return baseOpacity;
+
+    const int firstColumn = static_cast<int>(std::clamp(
+        static_cast<std::int64_t>(left) * 16 / windowWidth,
+        static_cast<std::int64_t>(0), static_cast<std::int64_t>(15)));
+    const int lastColumn = static_cast<int>(std::clamp(
+        (static_cast<std::int64_t>(right) * 16 + windowWidth - 1) / windowWidth - 1,
+        static_cast<std::int64_t>(0), static_cast<std::int64_t>(15)));
+    const int firstRow = static_cast<int>(std::clamp(
+        static_cast<std::int64_t>(top) * 12 / windowHeight,
+        static_cast<std::int64_t>(0), static_cast<std::int64_t>(11)));
+    const int lastRow = static_cast<int>(std::clamp(
+        (static_cast<std::int64_t>(bottom) * 12 + windowHeight - 1) / windowHeight - 1,
+        static_cast<std::int64_t>(0), static_cast<std::int64_t>(11)));
+    if (lastColumn < firstColumn || lastRow < firstRow) return baseOpacity;
+
+    double total = 0.0;
+    int count = 0;
+    for (int row = firstRow; row <= lastRow; ++row)
+    {
+        for (int column = firstColumn; column <= lastColumn; ++column)
+        {
+            const float value = luminanceGrid[static_cast<std::size_t>(row * 16 + column)];
+            total += std::isfinite(value) ? std::clamp(value, 0.0f, 1.0f) : 0.5f;
+            ++count;
+        }
+    }
+    if (count == 0) return baseOpacity;
+    const float localMean = static_cast<float>(total / count);
+    return std::clamp(
+        baseOpacity + (0.5f - localMean) * tone.tintOpacity,
+        0.16f,
+        0.24f);
+}
+
 MaterialFramePlan BuildMaterialFramePlan(
     const SceneSnapshot& scene,
-    const MaterialTone& tone)
+    const MaterialTone& tone,
+    const LuminanceGrid& luminanceGrid,
+    int windowWidth,
+    int windowHeight)
 {
     MaterialFramePlan plan;
     plan.clarityCenterOpacity = std::clamp(0.04f + tone.tintOpacity * 0.20f, 0.04f, 0.08f);
@@ -291,19 +349,23 @@ MaterialFramePlan BuildMaterialFramePlan(
         }
     }
 
-    const float guardOpacity = std::clamp(0.12f + tone.tintOpacity * 0.50f, 0.16f, 0.24f);
     if (IsValidRect(scene.metrics.searchText))
     {
         plan.contrastGuards.push_back({
             scene.metrics.searchText,
             static_cast<float>(std::max(1, (scene.metrics.searchText.bottom - scene.metrics.searchText.top) / 2)),
-            guardOpacity
+            LocalGuardOpacity(
+                scene.metrics.searchText, windowWidth, windowHeight, luminanceGrid, tone)
         });
     }
     for (const auto& item : scene.items)
     {
         if (!item.focused || !IsValidRect(item.bounds)) continue;
-        plan.contrastGuards.push_back({ item.bounds, 18.0f, guardOpacity });
+        plan.contrastGuards.push_back({
+            item.bounds,
+            18.0f,
+            LocalGuardOpacity(item.bounds, windowWidth, windowHeight, luminanceGrid, tone)
+        });
     }
     return plan;
 }
@@ -322,6 +384,7 @@ public:
         UINT mapFlags,
         std::uint32_t minimumIntervalMs) = 0;
     virtual float RelativeLuminance() const = 0;
+    virtual const LuminanceGrid& CurrentLuminanceGrid() const = 0;
     virtual FailureReason DrawMaterial(
         const SceneSnapshot& scene,
         const MaterialTone& tone,
@@ -370,7 +433,12 @@ FailureReason ComposeUnifiedFrame(
     }
     const MaterialTone tone = ResolveMaterialTone(
         backend.RelativeLuminance(), scene.policy.darkMode);
-    const MaterialFramePlan materialPlan = BuildMaterialFramePlan(scene, tone);
+    const MaterialFramePlan materialPlan = BuildMaterialFramePlan(
+        scene,
+        tone,
+        backend.CurrentLuminanceGrid(),
+        std::max(0, request.windowDesktop.right - request.windowDesktop.left),
+        std::max(0, request.windowDesktop.bottom - request.windowDesktop.top));
     failure = backend.DrawMaterial(scene, tone, materialPlan);
     if (failure != FailureReason::None) return failure;
     failure = backend.DrawOverlay(scene);
@@ -399,6 +467,52 @@ D2D1_RECT_F D2DRect(llp::geometry::Rect rect)
         static_cast<float>(rect.top),
         static_cast<float>(rect.right),
         static_cast<float>(rect.bottom));
+}
+
+FailureReason RequiredResourceResult(HRESULT result)
+{
+    return SUCCEEDED(result)
+        ? FailureReason::None
+        : FailureReason::CompositionUnavailable;
+}
+
+D2D1_MATRIX_3X2_F SurfaceAtlasTransform(POINT offset)
+{
+    return D2D1::Matrix3x2F::Translation(
+        static_cast<float>(offset.x), static_cast<float>(offset.y));
+}
+
+D2D1_MATRIX_3X2_F CropTransform(PixelRect crop, OutputRotation rotation)
+{
+    const float width = static_cast<float>(crop.right - crop.left);
+    const float height = static_cast<float>(crop.bottom - crop.top);
+    D2D1::Matrix3x2F transform = D2D1::Matrix3x2F::Translation(
+        static_cast<float>(-crop.left), static_cast<float>(-crop.top));
+    switch (rotation)
+    {
+    case OutputRotation::Rotate90:
+        transform = transform * D2D1::Matrix3x2F::Rotation(90.0f)
+            * D2D1::Matrix3x2F::Translation(height, 0.0f);
+        break;
+    case OutputRotation::Rotate180:
+        transform = transform * D2D1::Matrix3x2F::Rotation(180.0f)
+            * D2D1::Matrix3x2F::Translation(width, height);
+        break;
+    case OutputRotation::Rotate270:
+        transform = transform * D2D1::Matrix3x2F::Rotation(270.0f)
+            * D2D1::Matrix3x2F::Translation(0.0f, width);
+        break;
+    default:
+        break;
+    }
+    return transform;
+}
+
+D2D1_POINT_2F TransformPoint(D2D1_POINT_2F point, const D2D1_MATRIX_3X2_F& transform)
+{
+    return D2D1::Point2F(
+        point.x * transform._11 + point.y * transform._21 + transform._31,
+        point.x * transform._12 + point.y * transform._22 + transform._32);
 }
 
 FailureReason InitializeDevice(
@@ -848,8 +962,9 @@ public:
     {
         for (std::size_t index = 0; index < surfaces_.size(); ++index)
         {
-            const FailureReason result = DrawSurface(index, [](ID2D1DeviceContext* context) {
+            const FailureReason result = DrawSurface(index, [](ID2D1DeviceContext* context, const D2D1_MATRIX_3X2_F&) {
                 context->Clear(D2D1::ColorF(0.0f, 0.0f));
+                return FailureReason::None;
             });
             if (result != FailureReason::None) return result;
         }
@@ -956,6 +1071,7 @@ public:
     }
 
     float RelativeLuminance() const override { return relativeLuminance_; }
+    const LuminanceGrid& CurrentLuminanceGrid() const override { return luminanceGrid_; }
 
     FailureReason DrawMaterial(
         const SceneSnapshot& scene,
@@ -968,40 +1084,48 @@ public:
         {
             return FailureReason::DuplicationUnavailable;
         }
-        return DrawSurface(0, [&](ID2D1DeviceContext* context) {
+        return DrawSurface(0, [&](ID2D1DeviceContext* context, const D2D1_MATRIX_3X2_F& atlasTransform) {
             D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
                 D2D1_BITMAP_OPTIONS_NONE,
                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
             ComOwner<ID2D1Bitmap1> desktopBitmap;
-            if (FAILED(context->CreateBitmapFromDxgiSurface(
-                    desktopSurface.Get(), &properties, desktopBitmap.Put()))) return;
+            FailureReason failure = RequiredResourceResult(context->CreateBitmapFromDxgiSurface(
+                desktopSurface.Get(), &properties, desktopBitmap.Put()));
+            if (failure != FailureReason::None) return failure;
             ComOwner<ID2D1Effect> blur;
-            if (FAILED(context->CreateEffect(CLSID_D2D1GaussianBlur, blur.Put()))) return;
+            failure = RequiredResourceResult(context->CreateEffect(CLSID_D2D1GaussianBlur, blur.Put()));
+            if (failure != FailureReason::None) return failure;
             blur.Get()->SetInput(0, desktopBitmap.Get());
-            blur.Get()->SetValue(
+            failure = RequiredResourceResult(blur.Get()->SetValue(
                 D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-                tone.blurRadiusDip * static_cast<float>(std::max(1, scene.metrics.dpi)) / 96.0f);
-            blur.Get()->SetValue(
+                tone.blurRadiusDip * static_cast<float>(std::max(1, scene.metrics.dpi)) / 96.0f));
+            if (failure != FailureReason::None) return failure;
+            failure = RequiredResourceResult(blur.Get()->SetValue(
                 D2D1_GAUSSIANBLUR_PROP_BORDER_MODE,
-                D2D1_BORDER_MODE_HARD);
+                D2D1_BORDER_MODE_HARD));
+            if (failure != FailureReason::None) return failure;
 
             ComOwner<ID2D1Factory> factory;
             resources_.d2dDevice.Get()->GetFactory(factory.Put());
+            if (!factory.Get()) return FailureReason::CompositionUnavailable;
             ComOwner<ID2D1RoundedRectangleGeometry> boundary;
             const float radius = static_cast<float>(std::max(0, scene.metrics.cornerRadiusPx));
-            factory.Get()->CreateRoundedRectangleGeometry(
+            failure = RequiredResourceResult(factory.Get()->CreateRoundedRectangleGeometry(
                 D2D1::RoundedRect(
                     D2D1::RectF(0.0f, 0.0f, static_cast<float>(surfaceWidth_), static_cast<float>(surfaceHeight_)),
                     radius,
                     radius),
-                boundary.Put());
+                boundary.Put()));
+            if (failure != FailureReason::None) return failure;
             ComOwner<ID2D1Layer> layer;
-            context->CreateLayer(layer.Put());
+            failure = RequiredResourceResult(context->CreateLayer(layer.Put()));
+            if (failure != FailureReason::None) return failure;
             D2D1_LAYER_PARAMETERS1 parameters = D2D1::LayerParameters1();
             parameters.geometricMask = boundary.Get();
             context->PushLayer(parameters, layer.Get());
 
-            const D2D1_MATRIX_3X2_F baseTransform = CropTransform(currentCrop_, currentRotation_);
+            const D2D1_MATRIX_3X2_F cropTransform = CropTransform(currentCrop_, currentRotation_);
+            const D2D1_MATRIX_3X2_F baseTransform = cropTransform * atlasTransform;
             const D2D1_RECT_F desktopSource = D2D1::RectF(
                 static_cast<float>(currentCrop_.left),
                 static_cast<float>(currentCrop_.top),
@@ -1017,18 +1141,28 @@ public:
                     D2D1_INTERPOLATION_MODE_LINEAR,
                     D2D1_COMPOSITE_MODE_SOURCE_COPY);
             }
-            context->SetTransform(D2D1::Matrix3x2F::Identity());
+            context->SetTransform(atlasTransform);
 
             if (plan.searchOpticalPoints.size() == 5 && IsValidRect(plan.searchBoundsPx))
             {
                 ComOwner<ID2D1RoundedRectangleGeometry> searchBoundary;
                 const float searchRadius = static_cast<float>(
                     std::max(1, (plan.searchBoundsPx.bottom - plan.searchBoundsPx.top) / 2));
-                factory.Get()->CreateRoundedRectangleGeometry(
+                failure = RequiredResourceResult(factory.Get()->CreateRoundedRectangleGeometry(
                     D2D1::RoundedRect(D2DRect(plan.searchBoundsPx), searchRadius, searchRadius),
-                    searchBoundary.Put());
+                    searchBoundary.Put()));
+                if (failure != FailureReason::None)
+                {
+                    context->PopLayer();
+                    return failure;
+                }
                 ComOwner<ID2D1Layer> searchLayer;
-                context->CreateLayer(searchLayer.Put());
+                failure = RequiredResourceResult(context->CreateLayer(searchLayer.Put()));
+                if (failure != FailureReason::None)
+                {
+                    context->PopLayer();
+                    return failure;
+                }
                 D2D1_LAYER_PARAMETERS1 searchParameters = D2D1::LayerParameters1();
                 searchParameters.geometricMask = searchBoundary.Get();
                 context->PushLayer(searchParameters, searchLayer.Get());
@@ -1062,7 +1196,9 @@ public:
                     const float deltaX = (point.sample.sourceXDip - point.destinationXDip) * pixelsPerDip;
                     const float deltaY = (point.sample.sourceYDip - point.destinationYDip) * pixelsPerDip;
                     context->PushAxisAlignedClip(edgeBands[index - 1], D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                    context->SetTransform(baseTransform * D2D1::Matrix3x2F::Translation(-deltaX, -deltaY));
+                    context->SetTransform(cropTransform
+                        * D2D1::Matrix3x2F::Translation(-deltaX, -deltaY)
+                        * atlasTransform);
                     context->DrawImage(
                         blur.Get(),
                         D2D1::Point2F(0.0f, 0.0f),
@@ -1071,13 +1207,19 @@ public:
                         D2D1_COMPOSITE_MODE_SOURCE_COPY);
                     context->PopAxisAlignedClip();
                 }
-                context->SetTransform(D2D1::Matrix3x2F::Identity());
+                context->SetTransform(atlasTransform);
                 context->PopLayer();
             }
 
             ComOwner<ID2D1SolidColorBrush> tint;
-            context->CreateSolidColorBrush(D2DColor(tone.tint, tone.tintOpacity), tint.Put());
-            if (plan.drawTint && tint.Get()) context->FillRectangle(
+            failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                D2DColor(tone.tint, tone.tintOpacity), tint.Put()));
+            if (failure != FailureReason::None)
+            {
+                context->PopLayer();
+                return failure;
+            }
+            if (plan.drawTint) context->FillRectangle(
                 D2D1::RectF(0.0f, 0.0f, static_cast<float>(surfaceWidth_), static_cast<float>(surfaceHeight_)),
                 tint.Get());
             if (plan.drawClarityShape)
@@ -1087,33 +1229,54 @@ public:
                     { 1.0f, D2DColor(tone.guardedSurface, plan.clarityEdgeOpacity) }
                 } };
                 ComOwner<ID2D1GradientStopCollection> gradientStops;
-                context->CreateGradientStopCollection(
+                failure = RequiredResourceResult(context->CreateGradientStopCollection(
                     stops.data(), static_cast<UINT32>(stops.size()),
-                    D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP, gradientStops.Put());
+                    D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP, gradientStops.Put()));
+                if (failure != FailureReason::None)
+                {
+                    context->PopLayer();
+                    return failure;
+                }
                 ComOwner<ID2D1RadialGradientBrush> clarity;
-                if (gradientStops.Get()) context->CreateRadialGradientBrush(
+                failure = RequiredResourceResult(context->CreateRadialGradientBrush(
                     D2D1::RadialGradientBrushProperties(
                         D2D1::Point2F(surfaceWidth_ * 0.5f, surfaceHeight_ * 0.5f),
                         D2D1::Point2F(0.0f, 0.0f),
                         std::max(1.0f, surfaceWidth_ * 0.65f),
                         std::max(1.0f, surfaceHeight_ * 0.65f)),
-                    gradientStops.Get(), clarity.Put());
-                if (clarity.Get()) context->FillRectangle(
+                    gradientStops.Get(), clarity.Put()));
+                if (failure != FailureReason::None)
+                {
+                    context->PopLayer();
+                    return failure;
+                }
+                context->FillRectangle(
                     D2D1::RectF(0.0f, 0.0f, static_cast<float>(surfaceWidth_), static_cast<float>(surfaceHeight_)),
                     clarity.Get());
             }
             for (const auto& guard : plan.contrastGuards)
             {
                 ComOwner<ID2D1SolidColorBrush> guardBrush;
-                context->CreateSolidColorBrush(
-                    D2DColor(tone.guardedSurface, guard.opacity), guardBrush.Put());
-                if (guardBrush.Get()) context->FillRoundedRectangle(
+                failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                    D2DColor(tone.guardedSurface, guard.opacity), guardBrush.Put()));
+                if (failure != FailureReason::None)
+                {
+                    context->PopLayer();
+                    return failure;
+                }
+                context->FillRoundedRectangle(
                     D2D1::RoundedRect(D2DRect(guard.bounds), guard.radiusPx, guard.radiusPx),
                     guardBrush.Get());
             }
             ComOwner<ID2D1SolidColorBrush> shadow;
-            context->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.20f), shadow.Put());
-            if (plan.drawShadow && shadow.Get()) context->DrawRoundedRectangle(
+            failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                D2D1::ColorF(0.0f, 0.20f), shadow.Put()));
+            if (failure != FailureReason::None)
+            {
+                context->PopLayer();
+                return failure;
+            }
+            if (plan.drawShadow) context->DrawRoundedRectangle(
                 D2D1::RoundedRect(
                     D2D1::RectF(2.0f, 3.0f, static_cast<float>(surfaceWidth_ - 2), static_cast<float>(surfaceHeight_ - 1)),
                     radius,
@@ -1121,8 +1284,14 @@ public:
                 shadow.Get(),
                 4.0f);
             ComOwner<ID2D1SolidColorBrush> rim;
-            context->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.30f), rim.Put());
-            if (plan.drawRim && rim.Get()) context->DrawRoundedRectangle(
+            failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                D2D1::ColorF(1.0f, 0.30f), rim.Put()));
+            if (failure != FailureReason::None)
+            {
+                context->PopLayer();
+                return failure;
+            }
+            if (plan.drawRim) context->DrawRoundedRectangle(
                 D2D1::RoundedRect(
                     D2D1::RectF(0.5f, 0.5f, static_cast<float>(surfaceWidth_) - 0.5f, static_cast<float>(surfaceHeight_) - 0.5f),
                     radius,
@@ -1130,22 +1299,33 @@ public:
                 rim.Get(),
                 1.0f);
             context->PopLayer();
+            return FailureReason::None;
         });
     }
 
     FailureReason DrawOverlay(const SceneSnapshot& scene) override
     {
-        return DrawSurface(1, [&](ID2D1DeviceContext* context) {
+        return DrawSurface(1, [&](ID2D1DeviceContext* context, const D2D1_MATRIX_3X2_F& atlasTransform) {
+            context->SetTransform(atlasTransform);
             const auto& search = scene.metrics.search;
-            const float searchRadius = static_cast<float>(std::max(1, (search.bottom - search.top) / 2));
-            ComOwner<ID2D1SolidColorBrush> searchFill;
-            context->CreateSolidColorBrush(D2D1::ColorF(1.0f, scene.search.active ? 0.16f : 0.10f), searchFill.Put());
-            if (searchFill.Get()) context->FillRoundedRectangle(
-                D2D1::RoundedRect(D2DRect(search), searchRadius, searchRadius), searchFill.Get());
-            ComOwner<ID2D1SolidColorBrush> edge;
-            context->CreateSolidColorBrush(D2D1::ColorF(1.0f, scene.search.active ? 0.55f : 0.28f), edge.Put());
-            if (edge.Get()) context->DrawRoundedRectangle(
-                D2D1::RoundedRect(D2DRect(search), searchRadius, searchRadius), edge.Get(), 1.0f);
+            FailureReason failure = FailureReason::None;
+            if (IsValidRect(search))
+            {
+                const float searchRadius = static_cast<float>(
+                    std::max(1, (search.bottom - search.top) / 2));
+                ComOwner<ID2D1SolidColorBrush> searchFill;
+                failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                    D2D1::ColorF(1.0f, scene.search.active ? 0.16f : 0.10f), searchFill.Put()));
+                if (failure != FailureReason::None) return failure;
+                context->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2DRect(search), searchRadius, searchRadius), searchFill.Get());
+                ComOwner<ID2D1SolidColorBrush> edge;
+                failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                    D2D1::ColorF(1.0f, scene.search.active ? 0.55f : 0.28f), edge.Put()));
+                if (failure != FailureReason::None) return failure;
+                context->DrawRoundedRectangle(
+                    D2D1::RoundedRect(D2DRect(search), searchRadius, searchRadius), edge.Get(), 1.0f);
+            }
             for (const auto& item : scene.items)
             {
                 if (!item.focused || !IsValidRect(item.bounds)) continue;
@@ -1153,39 +1333,61 @@ public:
                     D2DRect(item.bounds),
                     18.0f, 18.0f);
                 ComOwner<ID2D1SolidColorBrush> focusShadow;
-                context->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.20f), focusShadow.Put());
-                if (focusShadow.Get()) context->DrawRoundedRectangle(tile, focusShadow.Get(), 5.0f);
+                failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                    D2D1::ColorF(0.0f, 0.20f), focusShadow.Put()));
+                if (failure != FailureReason::None) return failure;
+                context->DrawRoundedRectangle(tile, focusShadow.Get(), 5.0f);
                 ComOwner<ID2D1SolidColorBrush> focusFill;
-                context->CreateSolidColorBrush(D2DColor(scene.policy.focus, 0.20f), focusFill.Put());
-                if (focusFill.Get()) context->FillRoundedRectangle(tile, focusFill.Get());
+                failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                    D2DColor(scene.policy.focus, 0.20f), focusFill.Put()));
+                if (failure != FailureReason::None) return failure;
+                context->FillRoundedRectangle(tile, focusFill.Get());
                 ComOwner<ID2D1SolidColorBrush> focusRim;
-                context->CreateSolidColorBrush(D2DColor(scene.policy.focus, 0.90f), focusRim.Put());
-                if (focusRim.Get()) context->DrawRoundedRectangle(tile, focusRim.Get(), 2.0f);
+                failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                    D2DColor(scene.policy.focus, 0.90f), focusRim.Put()));
+                if (failure != FailureReason::None) return failure;
+                context->DrawRoundedRectangle(tile, focusRim.Get(), 2.0f);
             }
+            return FailureReason::None;
         });
     }
 
     FailureReason DrawContent(const SceneSnapshot& scene) override
     {
-        return DrawSurface(2, [&](ID2D1DeviceContext* context) {
+        return DrawSurface(2, [&](ID2D1DeviceContext* context, const D2D1_MATRIX_3X2_F& atlasTransform) {
+            context->SetTransform(atlasTransform);
             ComOwner<ID2D1SolidColorBrush> textBrush;
-            context->CreateSolidColorBrush(D2DColor(scene.policy.text), textBrush.Put());
-            if (!textBrush.Get()) return;
+            FailureReason failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                D2DColor(scene.policy.text), textBrush.Put()));
+            if (failure != FailureReason::None) return failure;
             ComOwner<IDWriteTextFormat> searchFormat;
             ComOwner<IDWriteTextFormat> titleFormat;
             ComOwner<IDWriteTextFormat> subtitleFormat;
-            resources_.dwriteFactory.Get()->CreateTextFormat(
+            failure = RequiredResourceResult(resources_.dwriteFactory.Get()->CreateTextFormat(
                 L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(std::max(1, scene.metrics.searchFontPx)),
-                L"", searchFormat.Put());
-            resources_.dwriteFactory.Get()->CreateTextFormat(
-                L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(std::max(1, scene.metrics.tileFontPx)),
-                L"", titleFormat.Put());
-            resources_.dwriteFactory.Get()->CreateTextFormat(
-                L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(std::max(1, scene.metrics.tileFontPx - 2)),
-                L"", subtitleFormat.Put());
+                L"", searchFormat.Put()));
+            if (failure != FailureReason::None) return failure;
+            if (!scene.items.empty())
+            {
+                failure = RequiredResourceResult(resources_.dwriteFactory.Get()->CreateTextFormat(
+                    L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(std::max(1, scene.metrics.tileFontPx)),
+                    L"", titleFormat.Put()));
+                if (failure != FailureReason::None) return failure;
+            }
+            const bool hasSubtitle = std::any_of(
+                scene.items.begin(), scene.items.end(), [](const SceneItem& item) {
+                    return !item.subtitle.empty();
+                });
+            if (hasSubtitle)
+            {
+                failure = RequiredResourceResult(resources_.dwriteFactory.Get()->CreateTextFormat(
+                    L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(std::max(1, scene.metrics.tileFontPx - 2)),
+                    L"", subtitleFormat.Put()));
+                if (failure != FailureReason::None) return failure;
+            }
 
             const auto& searchRect = scene.metrics.searchText;
             const float searchOrigin = static_cast<float>(searchRect.left - scene.search.horizontalOffsetPx);
@@ -1196,17 +1398,27 @@ public:
             const std::size_t compositionStart = std::min(scene.search.compositionStart, textLength);
             const std::size_t compositionEnd = std::min(scene.search.compositionEnd, textLength);
             const std::size_t caret = std::min(scene.search.caret, textLength);
-            const float selectionLeft = searchOrigin + MeasurePrefix(scene.search.displayText, selectionStart, searchFormat.Get());
-            const float selectionRight = searchOrigin + MeasurePrefix(scene.search.displayText, selectionEnd, searchFormat.Get());
+            float selectionStartWidth = 0.0f;
+            float selectionEndWidth = 0.0f;
+            failure = MeasurePrefix(
+                scene.search.displayText, selectionStart, searchFormat.Get(), selectionStartWidth);
+            if (failure != FailureReason::None) return failure;
+            failure = MeasurePrefix(
+                scene.search.displayText, selectionEnd, searchFormat.Get(), selectionEndWidth);
+            if (failure != FailureReason::None) return failure;
+            const float selectionLeft = searchOrigin + selectionStartWidth;
+            const float selectionRight = searchOrigin + selectionEndWidth;
             if (selectionEnd > selectionStart)
             {
                 ComOwner<ID2D1SolidColorBrush> selectionBrush;
-                context->CreateSolidColorBrush(D2DColor(scene.policy.focus, 0.36f), selectionBrush.Put());
-                if (selectionBrush.Get()) context->FillRectangle(
+                failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                    D2DColor(scene.policy.focus, 0.36f), selectionBrush.Put()));
+                if (failure != FailureReason::None) return failure;
+                context->FillRectangle(
                     D2D1::RectF(selectionLeft, static_cast<float>(searchRect.top), selectionRight, static_cast<float>(searchRect.bottom)),
                     selectionBrush.Get());
             }
-            if (searchFormat.Get()) context->DrawText(
+            context->DrawText(
                 scene.search.displayText.c_str(),
                 static_cast<UINT32>(scene.search.displayText.size()),
                 searchFormat.Get(),
@@ -1216,8 +1428,16 @@ public:
                 textBrush.Get());
             if (scene.search.composing && compositionEnd > compositionStart)
             {
-                const float start = searchOrigin + MeasurePrefix(scene.search.displayText, compositionStart, searchFormat.Get());
-                const float end = searchOrigin + MeasurePrefix(scene.search.displayText, compositionEnd, searchFormat.Get());
+                float compositionStartWidth = 0.0f;
+                float compositionEndWidth = 0.0f;
+                failure = MeasurePrefix(
+                    scene.search.displayText, compositionStart, searchFormat.Get(), compositionStartWidth);
+                if (failure != FailureReason::None) return failure;
+                failure = MeasurePrefix(
+                    scene.search.displayText, compositionEnd, searchFormat.Get(), compositionEndWidth);
+                if (failure != FailureReason::None) return failure;
+                const float start = searchOrigin + compositionStartWidth;
+                const float end = searchOrigin + compositionEndWidth;
                 context->DrawLine(
                     D2D1::Point2F(start, static_cast<float>(searchRect.bottom - 3)),
                     D2D1::Point2F(end, static_cast<float>(searchRect.bottom - 3)),
@@ -1225,7 +1445,10 @@ public:
             }
             if (scene.search.active)
             {
-                const float caretX = searchOrigin + MeasurePrefix(scene.search.displayText, caret, searchFormat.Get());
+                float caretWidth = 0.0f;
+                failure = MeasurePrefix(scene.search.displayText, caret, searchFormat.Get(), caretWidth);
+                if (failure != FailureReason::None) return failure;
+                const float caretX = searchOrigin + caretWidth;
                 context->DrawLine(
                     D2D1::Point2F(caretX, static_cast<float>(searchRect.top + 6)),
                     D2D1::Point2F(caretX, static_cast<float>(searchRect.top) + searchHeight - 6.0f),
@@ -1243,34 +1466,34 @@ public:
                         D2D1_BITMAP_OPTIONS_NONE,
                         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
                     ComOwner<ID2D1Bitmap1> iconBitmap;
-                    if (SUCCEEDED(context->CreateBitmap(
-                            D2D1::SizeU(
-                                static_cast<UINT32>(item.icon->width),
-                                static_cast<UINT32>(item.icon->height)),
-                            item.icon->premultipliedBgra.data(),
-                            static_cast<UINT32>(item.icon->stride),
-                            &iconProperties,
-                            iconBitmap.Put())))
-                    {
-                        const float left = static_cast<float>(item.bounds.left
-                            + std::max(0, (item.bounds.right - item.bounds.left - item.icon->width) / 2));
-                        const float top = static_cast<float>(item.bounds.top + 8);
-                        context->DrawBitmap(iconBitmap.Get(), D2D1::RectF(
-                            left, top, left + item.icon->width, top + item.icon->height));
-                    }
+                    failure = RequiredResourceResult(context->CreateBitmap(
+                        D2D1::SizeU(
+                            static_cast<UINT32>(item.icon->width),
+                            static_cast<UINT32>(item.icon->height)),
+                        item.icon->premultipliedBgra.data(),
+                        static_cast<UINT32>(item.icon->stride),
+                        &iconProperties,
+                        iconBitmap.Put()));
+                    if (failure != FailureReason::None) return failure;
+                    const float left = static_cast<float>(item.bounds.left
+                        + std::max(0, (item.bounds.right - item.bounds.left - item.icon->width) / 2));
+                    const float top = static_cast<float>(item.bounds.top + 8);
+                    context->DrawBitmap(iconBitmap.Get(), D2D1::RectF(
+                        left, top, left + item.icon->width, top + item.icon->height));
                 }
                 const float textTop = static_cast<float>(item.bounds.bottom - std::max(36, scene.metrics.tileFontPx * 2));
-                if (titleFormat.Get()) context->DrawText(
+                context->DrawText(
                     item.title.c_str(), static_cast<UINT32>(item.title.size()), titleFormat.Get(),
                     D2D1::RectF(static_cast<float>(item.bounds.left), textTop,
                         static_cast<float>(item.bounds.right), static_cast<float>(item.bounds.bottom)),
                     textBrush.Get());
-                if (!item.subtitle.empty() && subtitleFormat.Get()) context->DrawText(
+                if (!item.subtitle.empty()) context->DrawText(
                     item.subtitle.c_str(), static_cast<UINT32>(item.subtitle.size()), subtitleFormat.Get(),
                     D2D1::RectF(static_cast<float>(item.bounds.left), textTop + scene.metrics.tileFontPx,
                         static_cast<float>(item.bounds.right), static_cast<float>(item.bounds.bottom)),
                     textBrush.Get());
             }
+            return FailureReason::None;
         });
     }
 
@@ -1343,63 +1566,45 @@ private:
         ComOwner<ID2D1Bitmap1> target;
         result = resources_.d2dContext.Get()->CreateBitmapFromDxgiSurface(
             dxgiSurface.Get(), &properties, target.Put());
+        FailureReason drawFailure = FailureReason::None;
         if (SUCCEEDED(result))
         {
             resources_.d2dContext.Get()->SetTarget(target.Get());
             resources_.d2dContext.Get()->BeginDraw();
-            resources_.d2dContext.Get()->SetTransform(D2D1::Matrix3x2F::Translation(
-                static_cast<float>(offset.x), static_cast<float>(offset.y)));
-            draw(resources_.d2dContext.Get());
+            const D2D1_MATRIX_3X2_F atlasTransform = SurfaceAtlasTransform(offset);
+            resources_.d2dContext.Get()->SetTransform(atlasTransform);
+            drawFailure = draw(resources_.d2dContext.Get(), atlasTransform);
             result = resources_.d2dContext.Get()->EndDraw();
             resources_.d2dContext.Get()->SetTarget(nullptr);
         }
         const HRESULT surfaceResult = surfaces_[index].Get()->EndDraw();
-        return SUCCEEDED(result) && SUCCEEDED(surfaceResult)
-            ? FailureReason::None
-            : FailureReason::CompositionUnavailable;
+        if (drawFailure != FailureReason::None) return drawFailure;
+        return RequiredResourceResult(FAILED(result) ? result : surfaceResult);
     }
 
-    static D2D1_MATRIX_3X2_F CropTransform(PixelRect crop, OutputRotation rotation)
-    {
-        const float width = static_cast<float>(crop.right - crop.left);
-        const float height = static_cast<float>(crop.bottom - crop.top);
-        D2D1::Matrix3x2F transform = D2D1::Matrix3x2F::Translation(
-            static_cast<float>(-crop.left), static_cast<float>(-crop.top));
-        switch (rotation)
-        {
-        case OutputRotation::Rotate90:
-            transform = transform * D2D1::Matrix3x2F::Rotation(90.0f)
-                * D2D1::Matrix3x2F::Translation(height, 0.0f);
-            break;
-        case OutputRotation::Rotate180:
-            transform = transform * D2D1::Matrix3x2F::Rotation(180.0f)
-                * D2D1::Matrix3x2F::Translation(width, height);
-            break;
-        case OutputRotation::Rotate270:
-            transform = transform * D2D1::Matrix3x2F::Rotation(270.0f)
-                * D2D1::Matrix3x2F::Translation(0.0f, width);
-            break;
-        default:
-            break;
-        }
-        return transform;
-    }
-
-    float MeasurePrefix(
+    FailureReason MeasurePrefix(
         const std::wstring& text,
         std::size_t length,
-        IDWriteTextFormat* format) const
+        IDWriteTextFormat* format,
+        float& width) const
     {
-        if (!format || length == 0) return 0.0f;
+        width = 0.0f;
+        if (!format) return FailureReason::CompositionUnavailable;
+        if (length == 0) return FailureReason::None;
         const std::size_t bounded = std::min(length, text.size());
         ComOwner<IDWriteTextLayout> layout;
-        if (FAILED(resources_.dwriteFactory.Get()->CreateTextLayout(
+        FailureReason failure = RequiredResourceResult(
+            resources_.dwriteFactory.Get()->CreateTextLayout(
                 text.c_str(), static_cast<UINT32>(bounded), format,
-                100000.0f, 1000.0f, layout.Put()))) return 0.0f;
+                100000.0f, 1000.0f, layout.Put()));
+        if (failure != FailureReason::None) return failure;
         DWRITE_TEXT_METRICS metrics = {};
-        return SUCCEEDED(layout.Get()->GetMetrics(&metrics))
-            ? metrics.widthIncludingTrailingWhitespace
-            : 0.0f;
+        failure = RequiredResourceResult(layout.Get()->GetMetrics(&metrics));
+        if (failure == FailureReason::None)
+        {
+            width = metrics.widthIncludingTrailingWhitespace;
+        }
+        return failure;
     }
 
     bool EnsureLuminanceResources()
@@ -2337,6 +2542,12 @@ enum MaterialCompositionValue : std::size_t
     CompositionContentDesktopReferences,
     CompositionCropCount,
     CompositionRotationNormalizations,
+    CompositionMaterialAtlasOffsetX,
+    CompositionMaterialAtlasOffsetY,
+    CompositionOverlayAtlasOffsetX,
+    CompositionOverlayAtlasOffsetY,
+    CompositionContentAtlasOffsetX,
+    CompositionContentAtlasOffsetY,
     CompositionBlurPasses,
     CompositionTintPasses,
     CompositionSearchOpticalPasses,
@@ -2350,6 +2561,10 @@ enum MaterialCompositionValue : std::size_t
     CompositionClarityCenterOpacityMilli,
     CompositionClarityEdgeOpacityMilli,
     CompositionLocalContrastGuards,
+    CompositionDarkGuardOpacityMilli,
+    CompositionLightGuardOpacityMilli,
+    CompositionDegenerateGuardOpacityMilli,
+    CompositionClampedGuardOpacityMilli,
     CompositionRimPasses,
     CompositionShadowPasses,
     CompositionLuminanceWidth,
@@ -2365,6 +2580,14 @@ enum MaterialCompositionValue : std::size_t
     CompositionPresentedAfterScene,
     CompositionPresentedAfterLifecycle,
     MaterialCompositionValueCount
+};
+
+enum MaterialCompositionFailureValue : std::size_t
+{
+    CompositionFailureReason,
+    CompositionFailureCommits,
+    CompositionFailurePresented,
+    MaterialCompositionFailureValueCount
 };
 
 static_assert(sizeof(std::int64_t) == 8, "The private fake ABI requires 64-bit values.");
@@ -2582,6 +2805,11 @@ private:
 class RecordingCompositionBackend final : public CompositionBackend
 {
 public:
+    RecordingCompositionBackend()
+    {
+        luminanceGrid.fill(0.45f);
+    }
+
     FailureReason EnsureTree(const ShowRequest&) override
     {
         if (!treeReady)
@@ -2608,6 +2836,8 @@ public:
         ++desktopReferences;
         if (crop == PixelRect{ 120, 120, 520, 520 }) ++cropCount;
         if (rotation == OutputRotation::Identity) ++rotationNormalizations;
+        currentCrop = crop;
+        currentRotation = rotation;
         return FailureReason::None;
     }
 
@@ -2626,6 +2856,7 @@ public:
     }
 
     float RelativeLuminance() const override { return 0.45f; }
+    const LuminanceGrid& CurrentLuminanceGrid() const override { return luminanceGrid; }
 
     FailureReason DrawMaterial(
         const SceneSnapshot& scene,
@@ -2633,6 +2864,15 @@ public:
         const MaterialFramePlan& plan) override
     {
         commands.push_back(FrameCommand::MaterialPass);
+        if (failurePoint == 0 || failurePoint == 1)
+        {
+            return RequiredResourceResult(E_FAIL);
+        }
+        const auto origin = TransformPoint(
+            D2D1::Point2F(static_cast<float>(currentCrop.left), static_cast<float>(currentCrop.top)),
+            CropTransform(currentCrop, currentRotation) * SurfaceAtlasTransform(surfaceOffset));
+        materialAtlasOffsetX = static_cast<int>(std::lround(origin.x));
+        materialAtlasOffsetY = static_cast<int>(std::lround(origin.y));
         blurPasses += plan.drawBlur ? 1 : 0;
         tintPasses += plan.drawTint ? 1 : 0;
         clarityShapePasses += plan.drawClarityShape ? 1 : 0;
@@ -2641,6 +2881,16 @@ public:
         clarityCenterOpacityMilli = static_cast<int>(std::lround(plan.clarityCenterOpacity * 1000.0f));
         clarityEdgeOpacityMilli = static_cast<int>(std::lround(plan.clarityEdgeOpacity * 1000.0f));
         localContrastGuards += static_cast<int>(plan.contrastGuards.size());
+        if (!plan.contrastGuards.empty())
+        {
+            darkGuardOpacityMilli = static_cast<int>(std::lround(
+                plan.contrastGuards.front().opacity * 1000.0f));
+        }
+        if (plan.contrastGuards.size() > 1)
+        {
+            lightGuardOpacityMilli = static_cast<int>(std::lround(
+                plan.contrastGuards[1].opacity * 1000.0f));
+        }
         if (!plan.searchOpticalPoints.empty())
         {
             ++searchOpticalPasses;
@@ -2690,12 +2940,22 @@ public:
     FailureReason DrawOverlay(const SceneSnapshot&) override
     {
         commands.push_back(FrameCommand::OverlayPass);
+        const auto origin = TransformPoint(D2D1::Point2F(), SurfaceAtlasTransform(surfaceOffset));
+        overlayAtlasOffsetX = static_cast<int>(std::lround(origin.x));
+        overlayAtlasOffsetY = static_cast<int>(std::lround(origin.y));
         return FailureReason::None;
     }
 
     FailureReason DrawContent(const SceneSnapshot& scene) override
     {
         commands.push_back(FrameCommand::ContentPass);
+        if (failurePoint == 2 || failurePoint == 3)
+        {
+            return RequiredResourceResult(E_OUTOFMEMORY);
+        }
+        const auto origin = TransformPoint(D2D1::Point2F(), SurfaceAtlasTransform(surfaceOffset));
+        contentAtlasOffsetX = static_cast<int>(std::lround(origin.x));
+        contentAtlasOffsetY = static_cast<int>(std::lround(origin.y));
         for (const auto& item : scene.items)
         {
             if (item.icon && !item.icon->premultipliedBgra.empty()) ++copiedBgraIcons;
@@ -2721,6 +2981,15 @@ public:
     int contentDesktopReferences = 0;
     int cropCount = 0;
     int rotationNormalizations = 0;
+    POINT surfaceOffset = {};
+    PixelRect currentCrop = {};
+    OutputRotation currentRotation = OutputRotation::Identity;
+    int materialAtlasOffsetX = 0;
+    int materialAtlasOffsetY = 0;
+    int overlayAtlasOffsetX = 0;
+    int overlayAtlasOffsetY = 0;
+    int contentAtlasOffsetX = 0;
+    int contentAtlasOffsetY = 0;
     int blurPasses = 0;
     int tintPasses = 0;
     int searchOpticalPasses = 0;
@@ -2734,6 +3003,10 @@ public:
     int clarityCenterOpacityMilli = 0;
     int clarityEdgeOpacityMilli = 0;
     int localContrastGuards = 0;
+    int darkGuardOpacityMilli = 0;
+    int lightGuardOpacityMilli = 0;
+    int degenerateGuardOpacityMilli = 0;
+    int clampedGuardOpacityMilli = 0;
     int rimPasses = 0;
     int shadowPasses = 0;
     int luminanceWidth = 0;
@@ -2744,6 +3017,8 @@ public:
     int copiedBgraIcons = 0;
     int hiconReferences = 0;
     int presentedFrames = 0;
+    int failurePoint = -1;
+    LuminanceGrid luminanceGrid = {};
     std::vector<FrameCommand> commands;
 };
 }
@@ -2878,17 +3153,26 @@ extern "C" int LLP_MaterialRunFakeCompositionScenario(
     scene.metrics.dpi = 96;
     scene.metrics.cornerRadiusPx = 34;
     scene.metrics.search = { 40, 40, 360, 100 };
-    scene.metrics.searchText = { 60, 45, 340, 95 };
+    scene.metrics.searchText = { 60, 45, 180, 95 };
     scene.policy.darkMode = true;
     auto icon = std::make_shared<IconRaster>();
     icon->width = 1;
     icon->height = 1;
     icon->stride = 4;
     icon->premultipliedBgra = { 20, 30, 40, 255 };
-    scene.items.push_back({ { 20, 80, 148, 208 }, L"Result", L"Application", icon, true, false });
+    scene.items.push_back({ { 220, 80, 380, 208 }, L"Result", L"Application", icon, true, false });
     const PixelRect output = { -1920, -100, 0, 980 };
 
     RecordingCompositionBackend recorded;
+    recorded.surfaceOffset = { 7, 11 };
+    for (int row = 0; row < 12; ++row)
+    {
+        for (int column = 0; column < 16; ++column)
+        {
+            recorded.luminanceGrid[static_cast<std::size_t>(row * 16 + column)]
+                = column < 8 ? 0.10f : 0.90f;
+        }
+    }
     bool presented = false;
     if (ComposeUnifiedFrame(
             recorded, request, &scene, output, OutputRotation::Identity,
@@ -2896,6 +3180,14 @@ extern "C" int LLP_MaterialRunFakeCompositionScenario(
     {
         return 3;
     }
+    const MaterialTone recordedTone = ResolveMaterialTone(
+        recorded.RelativeLuminance(), scene.policy.darkMode);
+    recorded.degenerateGuardOpacityMilli = static_cast<int>(std::lround(
+        LocalGuardOpacity(
+            scene.metrics.searchText, 0, 0, recorded.luminanceGrid, recordedTone) * 1000.0f));
+    recorded.clampedGuardOpacityMilli = static_cast<int>(std::lround(
+        LocalGuardOpacity(
+            { -100, -100, 80, 80 }, 400, 400, recorded.luminanceGrid, recordedTone) * 1000.0f));
     SceneSnapshot reducedScene = scene;
     reducedScene.policy.reducedMotion = true;
     RecordingCompositionBackend reduced;
@@ -2923,6 +3215,12 @@ extern "C" int LLP_MaterialRunFakeCompositionScenario(
     values[CompositionContentDesktopReferences] = recorded.contentDesktopReferences;
     values[CompositionCropCount] = recorded.cropCount;
     values[CompositionRotationNormalizations] = recorded.rotationNormalizations;
+    values[CompositionMaterialAtlasOffsetX] = recorded.materialAtlasOffsetX;
+    values[CompositionMaterialAtlasOffsetY] = recorded.materialAtlasOffsetY;
+    values[CompositionOverlayAtlasOffsetX] = recorded.overlayAtlasOffsetX;
+    values[CompositionOverlayAtlasOffsetY] = recorded.overlayAtlasOffsetY;
+    values[CompositionContentAtlasOffsetX] = recorded.contentAtlasOffsetX;
+    values[CompositionContentAtlasOffsetY] = recorded.contentAtlasOffsetY;
     values[CompositionBlurPasses] = recorded.blurPasses;
     values[CompositionTintPasses] = recorded.tintPasses;
     values[CompositionSearchOpticalPasses] = recorded.searchOpticalPasses;
@@ -2936,6 +3234,10 @@ extern "C" int LLP_MaterialRunFakeCompositionScenario(
     values[CompositionClarityCenterOpacityMilli] = recorded.clarityCenterOpacityMilli;
     values[CompositionClarityEdgeOpacityMilli] = recorded.clarityEdgeOpacityMilli;
     values[CompositionLocalContrastGuards] = recorded.localContrastGuards;
+    values[CompositionDarkGuardOpacityMilli] = recorded.darkGuardOpacityMilli;
+    values[CompositionLightGuardOpacityMilli] = recorded.lightGuardOpacityMilli;
+    values[CompositionDegenerateGuardOpacityMilli] = recorded.degenerateGuardOpacityMilli;
+    values[CompositionClampedGuardOpacityMilli] = recorded.clampedGuardOpacityMilli;
     values[CompositionRimPasses] = recorded.rimPasses;
     values[CompositionShadowPasses] = recorded.shadowPasses;
     values[CompositionLuminanceWidth] = recorded.luminanceWidth;
@@ -2968,6 +3270,55 @@ extern "C" int LLP_MaterialRunFakeCompositionScenario(
             dirty, request, &scene, output, OutputRotation::Identity,
             false, false, true, presented) != FailureReason::None) return 3;
     values[CompositionPresentedAfterLifecycle] = dirty.presentedFrames;
+    return 0;
+}
+
+extern "C" int LLP_MaterialClassifyRequiredOperation(long result)
+{
+    return static_cast<int>(RequiredResourceResult(static_cast<HRESULT>(result)));
+}
+
+extern "C" int LLP_MaterialRunFakeCompositionFailureScenario(
+    int failurePoint,
+    std::int64_t* values,
+    std::size_t valueCount)
+{
+    if (!values || valueCount != MaterialCompositionFailureValueCount
+        || failurePoint < 0 || failurePoint > 3) return 2;
+    std::fill(values, values + valueCount, 0);
+
+    ShowRequest request;
+    request.windowDesktop = { -1800, 20, -1400, 420 };
+    request.dpi = 96;
+    SceneSnapshot scene;
+    scene.generation = 1;
+    scene.metrics.dpi = 96;
+    scene.metrics.cornerRadiusPx = 34;
+    scene.metrics.search = { 40, 40, 360, 100 };
+    scene.metrics.searchText = { 60, 45, 340, 95 };
+    auto icon = std::make_shared<IconRaster>();
+    icon->width = 1;
+    icon->height = 1;
+    icon->stride = 4;
+    icon->premultipliedBgra = { 20, 30, 40, 255 };
+    scene.items.push_back({ { 20, 80, 148, 208 }, L"Result", L"Application", icon, true, false });
+
+    RecordingCompositionBackend backend;
+    backend.failurePoint = failurePoint;
+    bool presented = false;
+    const FailureReason result = ComposeUnifiedFrame(
+        backend,
+        request,
+        &scene,
+        { -1920, -100, 0, 980 },
+        OutputRotation::Identity,
+        true,
+        true,
+        false,
+        presented);
+    values[CompositionFailureReason] = static_cast<std::int64_t>(result);
+    values[CompositionFailureCommits] = backend.presentedFrames;
+    values[CompositionFailurePresented] = presented ? 1 : 0;
     return 0;
 }
 #endif
