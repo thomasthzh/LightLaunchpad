@@ -230,6 +230,16 @@ enum class SearchEdgeTransformState : std::int64_t
     Displaced = 2
 };
 
+#if defined(LLP_MATERIAL_TESTING)
+enum class RequiredResourceOperation : int
+{
+    MaterialDesktopBitmap = 0,
+    MaterialBlurEffect = 1,
+    ContentTextFormat = 2,
+    ContentIconBitmap = 3
+};
+#endif
+
 struct SearchEdgeCommand
 {
     SearchEdgeOperation operation;
@@ -267,6 +277,14 @@ struct MaterialFramePlan
     float clarityCenterOpacity = 0.0f;
     float clarityEdgeOpacity = 0.0f;
     std::vector<ContrastGuardCommand> contrastGuards;
+};
+
+struct DesktopSourceCommand
+{
+    PixelRect source;
+    int uprightWidth = 0;
+    int uprightHeight = 0;
+    D2D1_MATRIX_3X2_F sourceToUpright = D2D1::Matrix3x2F::Identity();
 };
 
 using LuminanceGrid = std::array<float, 16 * 12>;
@@ -502,6 +520,22 @@ FailureReason RequiredResourceResult(HRESULT result)
         : FailureReason::CompositionUnavailable;
 }
 
+#if defined(LLP_MATERIAL_TESTING)
+HRESULT InjectRequiredResourceFailure(
+    RequiredResourceOperation selected,
+    RequiredResourceOperation operation,
+    HRESULT result,
+    int& hitCount)
+{
+    if (selected == operation)
+    {
+        ++hitCount;
+        return E_FAIL;
+    }
+    return result;
+}
+#endif
+
 D2D1_MATRIX_3X2_F SurfaceAtlasTransform(POINT offset)
 {
     return D2D1::Matrix3x2F::Translation(
@@ -532,6 +566,42 @@ D2D1_MATRIX_3X2_F CropTransform(PixelRect crop, OutputRotation rotation)
         break;
     }
     return transform;
+}
+
+DesktopSourceCommand BuildDesktopSourceCommand(PixelRect crop, OutputRotation rotation)
+{
+    const int sourceWidth = std::max(0, crop.right - crop.left);
+    const int sourceHeight = std::max(0, crop.bottom - crop.top);
+    const bool quarterTurn = rotation == OutputRotation::Rotate90
+        || rotation == OutputRotation::Rotate270;
+    return {
+        crop,
+        quarterTurn ? sourceHeight : sourceWidth,
+        quarterTurn ? sourceWidth : sourceHeight,
+        CropTransform(crop, rotation)
+    };
+}
+
+template<typename Image>
+void DrawDesktopSource(
+    ID2D1DeviceContext* context,
+    Image* image,
+    const DesktopSourceCommand& command,
+    const D2D1_MATRIX_3X2_F& uprightToTarget)
+{
+    context->SetTransform(command.sourceToUpright * uprightToTarget);
+    context->DrawImage(
+        image,
+        D2D1::Point2F(
+            static_cast<float>(command.source.left),
+            static_cast<float>(command.source.top)),
+        D2D1::RectF(
+            static_cast<float>(command.source.left),
+            static_cast<float>(command.source.top),
+            static_cast<float>(command.source.right),
+            static_cast<float>(command.source.bottom)),
+        D2D1_INTERPOLATION_MODE_LINEAR,
+        D2D1_COMPOSITE_MODE_SOURCE_COPY);
 }
 
 D2D1_POINT_2F TransformPoint(D2D1_POINT_2F point, const D2D1_MATRIX_3X2_F& transform)
@@ -759,6 +829,17 @@ public:
 class DesktopDuplicationBackend final : public CaptureBackend, public CompositionBackend
 {
 public:
+#if defined(LLP_MATERIAL_TESTING)
+    void InjectFailure(RequiredResourceOperation operation)
+    {
+        injectedFailure_ = operation;
+        injectedFailureHitCount_ = 0;
+    }
+
+    int InjectedFailureHitCount() const { return injectedFailureHitCount_; }
+    int CommitCallCount() const { return commitCallCount_; }
+#endif
+
     ~DesktopDuplicationBackend() override
     {
         Stop();
@@ -1113,17 +1194,15 @@ public:
 
         resources_.d2dContext.Get()->SetTarget(targetBitmap.Get());
         resources_.d2dContext.Get()->BeginDraw();
-        resources_.d2dContext.Get()->SetTransform(D2D1::Matrix3x2F::Identity());
-        resources_.d2dContext.Get()->DrawBitmap(
+        const DesktopSourceCommand sourceCommand = BuildDesktopSourceCommand(
+            currentCrop_, currentRotation_);
+        DrawDesktopSource(
+            resources_.d2dContext.Get(),
             sourceBitmap.Get(),
-            D2D1::RectF(0.0f, 0.0f, 16.0f, 12.0f),
-            1.0f,
-            D2D1_INTERPOLATION_MODE_LINEAR,
-            D2D1::RectF(
-                static_cast<float>(currentCrop_.left),
-                static_cast<float>(currentCrop_.top),
-                static_cast<float>(currentCrop_.right),
-                static_cast<float>(currentCrop_.bottom)));
+            sourceCommand,
+            D2D1::Matrix3x2F::Scale(
+                16.0f / static_cast<float>(sourceCommand.uprightWidth),
+                12.0f / static_cast<float>(sourceCommand.uprightHeight)));
         const HRESULT drawResult = resources_.d2dContext.Get()->EndDraw();
         resources_.d2dContext.Get()->SetTarget(nullptr);
         if (FAILED(drawResult)) return;
@@ -1183,11 +1262,23 @@ public:
                 D2D1_BITMAP_OPTIONS_NONE,
                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
             ComOwner<ID2D1Bitmap1> desktopBitmap;
-            FailureReason failure = RequiredResourceResult(context->CreateBitmapFromDxgiSurface(
-                desktopSurface.Get(), &properties, desktopBitmap.Put()));
+            HRESULT createDesktopBitmap = context->CreateBitmapFromDxgiSurface(
+                desktopSurface.Get(), &properties, desktopBitmap.Put());
+#if defined(LLP_MATERIAL_TESTING)
+            createDesktopBitmap = InjectRequiredResourceFailure(
+                injectedFailure_, RequiredResourceOperation::MaterialDesktopBitmap,
+                createDesktopBitmap, injectedFailureHitCount_);
+#endif
+            FailureReason failure = RequiredResourceResult(createDesktopBitmap);
             if (failure != FailureReason::None) return failure;
             ComOwner<ID2D1Effect> blur;
-            failure = RequiredResourceResult(context->CreateEffect(CLSID_D2D1GaussianBlur, blur.Put()));
+            HRESULT createBlur = context->CreateEffect(CLSID_D2D1GaussianBlur, blur.Put());
+#if defined(LLP_MATERIAL_TESTING)
+            createBlur = InjectRequiredResourceFailure(
+                injectedFailure_, RequiredResourceOperation::MaterialBlurEffect,
+                createBlur, injectedFailureHitCount_);
+#endif
+            failure = RequiredResourceResult(createBlur);
             if (failure != FailureReason::None) return failure;
             blur.Get()->SetInput(0, desktopBitmap.Get());
             failure = RequiredResourceResult(blur.Get()->SetValue(
@@ -1218,22 +1309,17 @@ public:
             parameters.geometricMask = boundary.Get();
             context->PushLayer(parameters, layer.Get());
 
-            const D2D1_MATRIX_3X2_F cropTransform = CropTransform(currentCrop_, currentRotation_);
-            const D2D1_MATRIX_3X2_F baseTransform = cropTransform * atlasTransform;
+            const DesktopSourceCommand sourceCommand = BuildDesktopSourceCommand(
+                currentCrop_, currentRotation_);
+            const D2D1_MATRIX_3X2_F& cropTransform = sourceCommand.sourceToUpright;
             const D2D1_RECT_F desktopSource = D2D1::RectF(
-                static_cast<float>(currentCrop_.left),
-                static_cast<float>(currentCrop_.top),
-                static_cast<float>(currentCrop_.right),
-                static_cast<float>(currentCrop_.bottom));
+                static_cast<float>(sourceCommand.source.left),
+                static_cast<float>(sourceCommand.source.top),
+                static_cast<float>(sourceCommand.source.right),
+                static_cast<float>(sourceCommand.source.bottom));
             if (plan.drawBlur)
             {
-                context->SetTransform(baseTransform);
-                context->DrawImage(
-                    blur.Get(),
-                    D2D1::Point2F(0.0f, 0.0f),
-                    desktopSource,
-                    D2D1_INTERPOLATION_MODE_LINEAR,
-                    D2D1_COMPOSITE_MODE_SOURCE_COPY);
+                DrawDesktopSource(context, blur.Get(), sourceCommand, atlasTransform);
             }
             context->SetTransform(atlasTransform);
 
@@ -1280,7 +1366,9 @@ public:
                         case SearchEdgeOperation::DrawImage:
                             context->DrawImage(
                                 blur.Get(),
-                                D2D1::Point2F(0.0f, 0.0f),
+                                D2D1::Point2F(
+                                    static_cast<float>(sourceCommand.source.left),
+                                    static_cast<float>(sourceCommand.source.top)),
                                 desktopSource,
                                 D2D1_INTERPOLATION_MODE_LINEAR,
                                 D2D1_COMPOSITE_MODE_SOURCE_COPY);
@@ -1445,10 +1533,16 @@ public:
             ComOwner<IDWriteTextFormat> searchFormat;
             ComOwner<IDWriteTextFormat> titleFormat;
             ComOwner<IDWriteTextFormat> subtitleFormat;
-            failure = RequiredResourceResult(resources_.dwriteFactory.Get()->CreateTextFormat(
+            HRESULT createSearchFormat = resources_.dwriteFactory.Get()->CreateTextFormat(
                 L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(std::max(1, scene.metrics.searchFontPx)),
-                L"", searchFormat.Put()));
+                L"", searchFormat.Put());
+#if defined(LLP_MATERIAL_TESTING)
+            createSearchFormat = InjectRequiredResourceFailure(
+                injectedFailure_, RequiredResourceOperation::ContentTextFormat,
+                createSearchFormat, injectedFailureHitCount_);
+#endif
+            failure = RequiredResourceResult(createSearchFormat);
             if (failure != FailureReason::None) return failure;
             if (!scene.items.empty())
             {
@@ -1548,14 +1642,20 @@ public:
                         D2D1_BITMAP_OPTIONS_NONE,
                         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
                     ComOwner<ID2D1Bitmap1> iconBitmap;
-                    failure = RequiredResourceResult(context->CreateBitmap(
+                    HRESULT createIconBitmap = context->CreateBitmap(
                         D2D1::SizeU(
                             static_cast<UINT32>(item.icon->width),
                             static_cast<UINT32>(item.icon->height)),
                         item.icon->premultipliedBgra.data(),
                         static_cast<UINT32>(item.icon->stride),
                         &iconProperties,
-                        iconBitmap.Put()));
+                        iconBitmap.Put());
+#if defined(LLP_MATERIAL_TESTING)
+                    createIconBitmap = InjectRequiredResourceFailure(
+                        injectedFailure_, RequiredResourceOperation::ContentIconBitmap,
+                        createIconBitmap, injectedFailureHitCount_);
+#endif
+                    failure = RequiredResourceResult(createIconBitmap);
                     if (failure != FailureReason::None) return failure;
                     const float left = static_cast<float>(item.bounds.left
                         + std::max(0, (item.bounds.right - item.bounds.left - item.icon->width) / 2));
@@ -1581,6 +1681,9 @@ public:
 
     FailureReason Commit() override
     {
+#if defined(LLP_MATERIAL_TESTING)
+        ++commitCallCount_;
+#endif
         return SUCCEEDED(resources_.compositionDevice.Get()->Commit())
             ? FailureReason::None
             : FailureReason::CompositionUnavailable;
@@ -1774,6 +1877,11 @@ private:
     ComOwner<IDCompositionVisual> rootVisual_;
     std::array<ComOwner<IDCompositionVisual>, 3> visuals_;
     std::array<ComOwner<IDCompositionSurface>, 3> surfaces_;
+#if defined(LLP_MATERIAL_TESTING)
+    RequiredResourceOperation injectedFailure_ = static_cast<RequiredResourceOperation>(-1);
+    int injectedFailureHitCount_ = 0;
+    int commitCallCount_ = 0;
+#endif
 };
 
 class CaptureLifecycle final
@@ -2675,6 +2783,30 @@ enum MaterialCompositionFailureValue : std::size_t
     MaterialCompositionFailureValueCount
 };
 
+enum LuminanceRotationValue : std::size_t
+{
+    LuminanceOutputLeft,
+    LuminanceOutputTop,
+    LuminanceSourceWidth,
+    LuminanceSourceHeight,
+    LuminanceUprightWidth,
+    LuminanceUprightHeight,
+    LuminanceGridTopLeft,
+    LuminanceGridTopRight,
+    LuminanceGridBottomLeft,
+    LuminanceGridBottomRight,
+    LuminanceRotationValueCount
+};
+
+enum RealRequiredResourceFailureValue : std::size_t
+{
+    RealFailureReason,
+    RealFailureCommittedFrames,
+    RealFailurePresentedFrames,
+    RealFailureNamedOperationCalls,
+    RealRequiredResourceFailureValueCount
+};
+
 static_assert(sizeof(std::int64_t) == 8, "The private fake ABI requires 64-bit values.");
 
 namespace
@@ -3124,6 +3256,217 @@ public:
     LuminanceGrid luminanceGrid = {};
     std::vector<FrameCommand> commands;
 };
+}
+
+extern "C" int LLP_MaterialRunLuminanceRotationScenario(
+    int rotation,
+    std::int64_t* values,
+    std::size_t valueCount)
+{
+    if (!values || valueCount != LuminanceRotationValueCount
+        || rotation < 0 || rotation > 3) return 2;
+    std::fill(values, values + valueCount, 0);
+    constexpr std::array<OutputRotation, 4> rotations = {
+        OutputRotation::Identity,
+        OutputRotation::Rotate90,
+        OutputRotation::Rotate180,
+        OutputRotation::Rotate270
+    };
+    const PixelRect outputDesktop = { -1920, -100, 0, 980 };
+    const PixelRect windowDesktop = { -1800, 20, -820, 740 };
+    const PixelRect crop = MapWindowCrop(
+        outputDesktop, windowDesktop, rotations[static_cast<std::size_t>(rotation)]);
+    const DesktopSourceCommand command = BuildDesktopSourceCommand(
+        crop, rotations[static_cast<std::size_t>(rotation)]);
+    DeviceResources resources;
+    if (InitializeDevice(resources, nullptr) != FailureReason::None) return 3;
+
+    const UINT sourceWidth = static_cast<UINT>(std::max(1, crop.right));
+    const UINT sourceHeight = static_cast<UINT>(std::max(1, crop.bottom));
+    const UINT sourceStride = sourceWidth * 4;
+    std::vector<std::uint8_t> sourcePixels(
+        static_cast<std::size_t>(sourceStride) * sourceHeight, 0);
+    constexpr std::array<std::uint8_t, 4> quadrantValues = { 32, 96, 160, 224 };
+    const int cropMidX = crop.left + (crop.right - crop.left) / 2;
+    const int cropMidY = crop.top + (crop.bottom - crop.top) / 2;
+    for (int y = crop.top; y < crop.bottom; ++y)
+    {
+        for (int x = crop.left; x < crop.right; ++x)
+        {
+            const std::size_t quadrant = (y >= cropMidY ? 2 : 0) + (x >= cropMidX ? 1 : 0);
+            const std::size_t offset = static_cast<std::size_t>(y) * sourceStride
+                + static_cast<std::size_t>(x) * 4;
+            sourcePixels[offset] = quadrantValues[quadrant];
+            sourcePixels[offset + 1] = quadrantValues[quadrant];
+            sourcePixels[offset + 2] = quadrantValues[quadrant];
+            sourcePixels[offset + 3] = 255;
+        }
+    }
+
+    D2D1_BITMAP_PROPERTIES1 sourceProperties = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_NONE,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+    ComOwner<ID2D1Bitmap1> sourceBitmap;
+    if (FAILED(resources.d2dContext.Get()->CreateBitmap(
+            D2D1::SizeU(sourceWidth, sourceHeight),
+            sourcePixels.data(),
+            sourceStride,
+            &sourceProperties,
+            sourceBitmap.Put()))) return 3;
+
+    D3D11_TEXTURE2D_DESC targetDescription = {};
+    targetDescription.Width = 16;
+    targetDescription.Height = 12;
+    targetDescription.MipLevels = 1;
+    targetDescription.ArraySize = 1;
+    targetDescription.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    targetDescription.SampleDesc.Count = 1;
+    targetDescription.Usage = D3D11_USAGE_DEFAULT;
+    targetDescription.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ComOwner<ID3D11Texture2D> targetTexture;
+    if (FAILED(resources.d3dDevice.Get()->CreateTexture2D(
+            &targetDescription, nullptr, targetTexture.Put()))) return 3;
+    D3D11_TEXTURE2D_DESC stagingDescription = targetDescription;
+    stagingDescription.Usage = D3D11_USAGE_STAGING;
+    stagingDescription.BindFlags = 0;
+    stagingDescription.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComOwner<ID3D11Texture2D> stagingTexture;
+    if (FAILED(resources.d3dDevice.Get()->CreateTexture2D(
+            &stagingDescription, nullptr, stagingTexture.Put()))) return 3;
+    ComOwner<IDXGISurface> targetSurface;
+    if (FAILED(targetTexture.Get()->QueryInterface(
+            __uuidof(IDXGISurface), targetSurface.PutVoid()))) return 3;
+    D2D1_BITMAP_PROPERTIES1 targetProperties = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+    ComOwner<ID2D1Bitmap1> targetBitmap;
+    if (FAILED(resources.d2dContext.Get()->CreateBitmapFromDxgiSurface(
+            targetSurface.Get(), &targetProperties, targetBitmap.Put()))) return 3;
+
+    resources.d2dContext.Get()->SetTarget(targetBitmap.Get());
+    resources.d2dContext.Get()->BeginDraw();
+    resources.d2dContext.Get()->Clear(D2D1::ColorF(0.0f, 0.0f));
+    DrawDesktopSource(
+        resources.d2dContext.Get(),
+        sourceBitmap.Get(),
+        command,
+        D2D1::Matrix3x2F::Scale(
+            16.0f / static_cast<float>(command.uprightWidth),
+            12.0f / static_cast<float>(command.uprightHeight)));
+    const HRESULT drawResult = resources.d2dContext.Get()->EndDraw();
+    resources.d2dContext.Get()->SetTarget(nullptr);
+    if (FAILED(drawResult)) return 3;
+    resources.d3dContext.Get()->CopyResource(stagingTexture.Get(), targetTexture.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (FAILED(resources.d3dContext.Get()->Map(
+            stagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return 3;
+    constexpr std::array<std::pair<int, int>, 4> gridSamples = { {
+        { 4, 3 }, { 12, 3 }, { 4, 9 }, { 12, 9 }
+    } };
+    for (std::size_t quadrant = 0; quadrant < gridSamples.size(); ++quadrant)
+    {
+        const auto [x, y] = gridSamples[quadrant];
+        const auto* pixel = static_cast<const std::uint8_t*>(mapped.pData)
+            + static_cast<std::size_t>(y) * mapped.RowPitch
+            + static_cast<std::size_t>(x) * 4;
+        const auto closest = std::min_element(
+            quadrantValues.begin(), quadrantValues.end(), [&](std::uint8_t first, std::uint8_t second) {
+                return std::abs(static_cast<int>(pixel[0]) - first)
+                    < std::abs(static_cast<int>(pixel[0]) - second);
+            });
+        values[LuminanceGridTopLeft + quadrant]
+            = static_cast<std::int64_t>(std::distance(quadrantValues.begin(), closest) + 1);
+    }
+    resources.d3dContext.Get()->Unmap(stagingTexture.Get(), 0);
+    values[LuminanceOutputLeft] = outputDesktop.left;
+    values[LuminanceOutputTop] = outputDesktop.top;
+    values[LuminanceSourceWidth] = crop.right - crop.left;
+    values[LuminanceSourceHeight] = crop.bottom - crop.top;
+    values[LuminanceUprightWidth] = command.uprightWidth;
+    values[LuminanceUprightHeight] = command.uprightHeight;
+    return 0;
+}
+
+extern "C" int LLP_MaterialRunRealRequiredResourceFailureScenario(
+    int operation,
+    std::int64_t* values,
+    std::size_t valueCount)
+{
+    if (!values || valueCount != RealRequiredResourceFailureValueCount
+        || operation < 0 || operation > 3) return 2;
+    std::fill(values, values + valueCount, 0);
+    const HRESULT apartment = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) return 3;
+    HWND window = CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        L"STATIC",
+        L"LightLaunchpad material required resource probe",
+        WS_POPUP,
+        80,
+        80,
+        400,
+        320,
+        nullptr,
+        nullptr,
+        GetModuleHandleW(nullptr),
+        nullptr);
+    if (!window)
+    {
+        if (apartment == S_OK || apartment == S_FALSE) CoUninitialize();
+        return 3;
+    }
+    DesktopDuplicationBackend backend;
+    ShowRequest request;
+    request.window = window;
+    request.monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+    RECT rect = {};
+    GetWindowRect(window, &rect);
+    request.windowDesktop = { rect.left, rect.top, rect.right, rect.bottom };
+    FailureReason result = backend.Start(request);
+    if (result == FailureReason::None)
+    {
+        std::uint64_t identity = 0;
+        AcquireResult acquired = AcquireResult::Timeout;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        do
+        {
+            acquired = backend.Acquire(16, identity);
+        } while (acquired == AcquireResult::Timeout
+            && std::chrono::steady_clock::now() < deadline);
+        if (acquired != AcquireResult::Frame)
+        {
+            result = FailureReason::DuplicationUnavailable;
+        }
+    }
+    bool presented = false;
+    if (result == FailureReason::None)
+    {
+        SceneSnapshot scene;
+        scene.generation = 1;
+        scene.metrics.dpi = 96;
+        scene.metrics.cornerRadiusPx = 34;
+        scene.metrics.search = { 40, 40, 360, 100 };
+        scene.metrics.searchText = { 60, 45, 340, 95 };
+        scene.metrics.searchFontPx = 24;
+        scene.metrics.tileFontPx = 16;
+        scene.policy = llp::adaptive::ResolvePolicy({});
+        auto icon = std::make_shared<IconRaster>();
+        icon->width = 1;
+        icon->height = 1;
+        icon->stride = 4;
+        icon->premultipliedBgra = { 20, 30, 40, 255 };
+        scene.items.push_back({ { 20, 100, 148, 228 }, L"Result", L"", icon, true, false });
+        backend.InjectFailure(static_cast<RequiredResourceOperation>(operation));
+        result = backend.Compose(request, &scene, true, true, false, presented);
+        values[RealFailureNamedOperationCalls] = backend.InjectedFailureHitCount();
+        values[RealFailureCommittedFrames] = backend.CommitCallCount();
+    }
+    values[RealFailureReason] = static_cast<std::int64_t>(result);
+    values[RealFailurePresentedFrames] = presented ? 1 : 0;
+    backend.Stop();
+    DestroyWindow(window);
+    if (apartment == S_OK || apartment == S_FALSE) CoUninitialize();
+    return 0;
 }
 
 extern "C" int LLP_MaterialRunFakeLifecycleScenario(

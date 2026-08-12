@@ -62,6 +62,16 @@ extern "C" int LLP_MaterialRunFakeCompositionFailureScenario(
 
 extern "C" int LLP_MaterialClassifyRequiredOperation(long result);
 
+extern "C" int LLP_MaterialRunLuminanceRotationScenario(
+    int rotation,
+    std::int64_t* values,
+    std::size_t valueCount);
+
+extern "C" int LLP_MaterialRunRealRequiredResourceFailureScenario(
+    int operation,
+    std::int64_t* values,
+    std::size_t valueCount);
+
 namespace
 {
 using llp::material::AdvanceLifecycle;
@@ -101,6 +111,30 @@ enum MaterialLifecycleValue : std::size_t
     PartialCropRejected,
     SelectionOperationCalls,
     MaterialLifecycleValueCount
+};
+
+enum LuminanceRotationValue : std::size_t
+{
+    LuminanceOutputLeft,
+    LuminanceOutputTop,
+    LuminanceSourceWidth,
+    LuminanceSourceHeight,
+    LuminanceUprightWidth,
+    LuminanceUprightHeight,
+    LuminanceGridTopLeft,
+    LuminanceGridTopRight,
+    LuminanceGridBottomLeft,
+    LuminanceGridBottomRight,
+    LuminanceRotationValueCount
+};
+
+enum RealRequiredResourceFailureValue : std::size_t
+{
+    RealFailureReason,
+    RealFailureCommittedFrames,
+    RealFailurePresentedFrames,
+    RealFailureNamedOperationCalls,
+    RealRequiredResourceFailureValueCount
 };
 
 static_assert(sizeof(std::int64_t) == 8, "The private fake ABI requires 64-bit values.");
@@ -314,6 +348,44 @@ void TestWindowCropUsesOutputRelativePhysicalCoordinates()
                 == llp::material::PixelRect{},
         "Degenerate window produced a crop.");
     Pass("MaterialRenderer_CropClampsAndMapsEveryRotation");
+}
+
+void TestLuminanceGridUsesTheUprightMaterialRotation()
+{
+    constexpr std::array<std::array<std::int64_t, 4>, 4> expectedGridQuadrants = { {
+        { 1, 2, 3, 4 },
+        { 3, 1, 4, 2 },
+        { 4, 3, 2, 1 },
+        { 2, 4, 1, 3 }
+    } };
+    for (std::size_t rotation = 0; rotation < expectedGridQuadrants.size(); ++rotation)
+    {
+        std::array<std::int64_t, LuminanceRotationValueCount> values = {};
+        Require(LLP_MaterialRunLuminanceRotationScenario(
+                    static_cast<int>(rotation), values.data(), values.size()) == 0,
+            "The production luminance rotation operation rejected a valid rotation.");
+        Require(values[LuminanceOutputLeft] == -1920
+                && values[LuminanceOutputTop] == -100,
+            "The luminance rotation scenario discarded the negative desktop origin.");
+        const bool quarterTurn = rotation == 1 || rotation == 3;
+        Require(values[LuminanceSourceWidth] == (quarterTurn ? 720 : 980)
+                && values[LuminanceSourceHeight] == (quarterTurn ? 980 : 720)
+                && values[LuminanceUprightWidth] == 980
+                && values[LuminanceUprightHeight] == 720,
+            "Source and upright window dimensions did not follow the output rotation.");
+        std::cout << "METRIC MaterialLuminanceRotation rotation=" << rotation
+                  << " quadrants=" << values[LuminanceGridTopLeft] << ','
+                  << values[LuminanceGridTopRight] << ','
+                  << values[LuminanceGridBottomLeft] << ','
+                  << values[LuminanceGridBottomRight] << "\n";
+        for (std::size_t quadrant = 0; quadrant < 4; ++quadrant)
+        {
+            Require(values[LuminanceGridTopLeft + quadrant]
+                    == expectedGridQuadrants[rotation][quadrant],
+                "A quadrant-coded desktop source reached the wrong upright luminance grid quadrant.");
+        }
+    }
+    Pass("MaterialRenderer_LuminanceGridMatchesUprightMaterialRotation");
 }
 
 void TestPixelAndSearchCoordinatesStayInDipSpace()
@@ -960,6 +1032,31 @@ void TestRequiredCompositionResourceFailuresStopBeforeCommit()
     Pass("MaterialRenderer_RequiredResourceFailuresStopBeforeCommit");
 }
 
+void TestActualRequiredResourceFailuresStopTheProductionFrame()
+{
+    constexpr std::array<const char*, 4> operations = {
+        "material desktop bitmap",
+        "material blur effect",
+        "content text format",
+        "content icon bitmap"
+    };
+    for (std::size_t operation = 0; operation < operations.size(); ++operation)
+    {
+        std::array<std::int64_t, RealRequiredResourceFailureValueCount> values = {};
+        Require(LLP_MaterialRunRealRequiredResourceFailureScenario(
+                    static_cast<int>(operation), values.data(), values.size()) == 0,
+            "The production DirectComposition failure scenario did not run.");
+        Require(values[RealFailureNamedOperationCalls] == 1,
+            "The requested actual production Create* operation was not reached exactly once.");
+        Require(values[RealFailureReason]
+                    == static_cast<int>(llp::material::FailureReason::CompositionUnavailable)
+                && values[RealFailureCommittedFrames] == 0
+                && values[RealFailurePresentedFrames] == 0,
+            operations[operation]);
+    }
+    Pass("MaterialRenderer_ActualResourceFailuresStopBeforeCommit");
+}
+
 void TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport()
 {
     const llp::material::PixelRect output = { -1920, -100, 0, 980 };
@@ -1194,6 +1291,7 @@ int main()
     try
     {
         TestWindowCropUsesOutputRelativePhysicalCoordinates();
+        TestLuminanceGridUsesTheUprightMaterialRotation();
         TestPixelAndSearchCoordinatesStayInDipSpace();
         TestMaterialToneKeepsPolicyContrastAndBoundedCoolTint();
         TestLifecycleStartsFallsBackAndConsumesOneRebuild();
@@ -1208,6 +1306,7 @@ int main()
         TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit();
         TestCompositionContractRejectsDiscardedCommands();
         TestRequiredCompositionResourceFailuresStopBeforeCommit();
+        TestActualRequiredResourceFailuresStopTheProductionFrame();
         TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport();
         TestFirstFrameDeadlineAndTimeoutDoNotRedraw();
         TestFramesReleaseBeforeReacquireRebuildAndHide();
@@ -1220,7 +1319,7 @@ int main()
         TestAcquireDeviceRemovalUsesOneBoundedRebuild();
         TestReleaseGenericFailureFallsBackWithoutRebuild();
         TestHideRequestRemainsAsynchronous();
-        constexpr int expected = 27;
+        constexpr int expected = 29;
         std::cout << passed << "/" << expected << " tests passed\n";
         return passed == expected ? 0 : 1;
     }
