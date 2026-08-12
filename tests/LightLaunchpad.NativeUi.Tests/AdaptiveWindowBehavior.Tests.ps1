@@ -203,7 +203,7 @@ function Invoke-LlpAdaptiveCase {
         $llpRestoreRect.Right = [int]$llpReady.windowRect.right
         $llpRestoreRect.Bottom = [int]$llpReady.windowRect.bottom
         [void][LightLaunchpadAdaptiveProbeNative]::SendDpiChanged($llpWindow, [uint32]$llpOriginalDpi, $llpRestoreRect)
-        [void][LightLaunchpadAdaptiveProbeNative]::SetForegroundWindow($llpWindow)
+        Assert-True ([LightLaunchpadAdaptiveProbeNative]::SetForegroundWindowForTest($llpWindow)) 'Could not request the NativeUi window as foreground before WM_DISPLAYCHANGE.'
         Wait-LlpCondition { [LightLaunchpadAdaptiveProbeNative]::GetForegroundWindow() -eq $llpWindow } 3000 'Could not establish the NativeUi window as foreground before WM_DISPLAYCHANGE.'
         $llpCursor = [LightLaunchpadAdaptiveProbeNative+POINT]::new()
         Assert-True ([LightLaunchpadAdaptiveProbeNative]::GetCursorPos([ref]$llpCursor)) 'Could not read the cursor position before WM_DISPLAYCHANGE.'
@@ -291,13 +291,29 @@ public static class LightLaunchpadAdaptiveProbeNative {
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] public static extern bool UpdateWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr hwnd, IntPtr updateRect, IntPtr updateRegion, uint flags);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, IntPtr processId);
+    [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint attach, uint attachTo, bool value);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
     [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(POINT point, uint flags);
     [DllImport("user32.dll", ExactSpelling = true)] public static extern bool GetMonitorInfoW(IntPtr monitor, ref MONITORINFO info);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
+    public static bool SetForegroundWindowForTest(IntPtr hwnd) {
+        uint currentThread = GetCurrentThreadId();
+        uint targetThread = GetWindowThreadProcessId(hwnd, IntPtr.Zero);
+        IntPtr foreground = GetForegroundWindow();
+        uint foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, IntPtr.Zero);
+        bool attachedForeground = foregroundThread != 0 && foregroundThread != currentThread && AttachThreadInput(currentThread, foregroundThread, true);
+        bool attachedTarget = targetThread != 0 && targetThread != currentThread && targetThread != foregroundThread && AttachThreadInput(currentThread, targetThread, true);
+        try { return SetForegroundWindow(hwnd); }
+        finally {
+            if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
+            if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
+        }
+    }
     public static IntPtr SendDpiChanged(IntPtr hwnd, uint dpi, RECT suggested) {
         IntPtr memory = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(RECT)));
         try {
