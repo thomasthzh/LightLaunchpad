@@ -119,6 +119,13 @@ struct SearchVisual
     bool composing = false;
 };
 
+struct AuxiliaryVisual
+{
+    llp::geometry::Rect bounds;
+    std::wstring text;
+    bool focused = false;
+};
+
 struct SceneSnapshot
 {
     std::uint64_t generation = 0;
@@ -126,7 +133,7 @@ struct SceneSnapshot
     llp::adaptive::Policy policy;
     SearchVisual search;
     std::vector<SceneItem> items;
-    bool auxiliaryFocused = false;
+    AuxiliaryVisual auxiliary;
 };
 
 struct ShowRequest
@@ -154,6 +161,11 @@ struct Diagnostics
     double firstFrameMs = 0.0;
     double frameP95Ms = 0.0;
     bool evidenceFrozen = false;
+    bool auxiliaryRendered = false;
+    std::uint64_t auxiliarySceneGeneration = 0;
+    llp::geometry::Rect auxiliaryBounds;
+    std::wstring auxiliaryText;
+    bool auxiliaryFocused = false;
 };
 
 class LatestSceneSlot

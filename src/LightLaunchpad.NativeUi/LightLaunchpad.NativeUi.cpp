@@ -2144,9 +2144,12 @@ std::shared_ptr<const llp::material::SceneSnapshot> BuildMaterialSceneSnapshot(c
     snapshot->search.horizontalOffsetPx = g_searchTextOffset;
     snapshot->search.active = g_spotlightState.Focus() == llp::interaction::FocusArea::Search;
     snapshot->search.composing = g_searchInput.IsComposing();
-    snapshot->auxiliaryFocused = g_spotlightState.Focus() == llp::interaction::FocusArea::Auxiliary;
+    snapshot->auxiliary.bounds = snapshot->metrics.auxiliary;
+    snapshot->auxiliary.text = L"...";
+    snapshot->auxiliary.focused = g_spotlightState.Focus() == llp::interaction::FocusArea::Auxiliary;
 
     const auto content = BuildCurrentSceneGeometry(client);
+    g_contentHeight = content.contentHeight;
     const RECT contentClip = WinRect(snapshot->metrics.contentClip);
     g_hits.clear();
     g_regionHits.clear();
@@ -3231,6 +3234,11 @@ bool WriteSpotlightFlowReadyState()
         { "materialPath", MaterialRenderPathName(material.path) },
         { "materialFailure", MaterialFailureName(material.failure) },
         { "materialState", MaterialStateName(material.state) },
+        { "materialAuxiliaryRendered", material.auxiliaryRendered },
+        { "materialAuxiliarySceneGeneration", material.auxiliarySceneGeneration },
+        { "materialAuxiliaryBounds", jsonRect(material.auxiliaryBounds) },
+        { "materialAuxiliaryText", llp::persistence::WideToUtf8(material.auxiliaryText) },
+        { "materialAuxiliaryFocused", material.auxiliaryFocused },
         { "hitCount", g_hits.size() },
         { "firstHit", firstHit },
         { "windowRect", Json{
@@ -9291,7 +9299,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             UpdateSelectionBox(point);
             return 0;
         }
-        InvalidateRect(hwnd, nullptr, FALSE);
+        RequestSearchRepaint(hwnd, false);
         return 0;
     case WM_LBUTTONDOWN:
     {

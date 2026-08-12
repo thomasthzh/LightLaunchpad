@@ -287,6 +287,17 @@ struct DesktopSourceCommand
     D2D1_MATRIX_3X2_F sourceToUpright = D2D1::Matrix3x2F::Identity();
 };
 
+struct AuxiliaryPresentationEvidence
+{
+    bool overlayDrawn = false;
+    bool contentDrawn = false;
+    bool rendered = false;
+    std::uint64_t sceneGeneration = 0;
+    llp::geometry::Rect bounds;
+    std::wstring text;
+    bool focused = false;
+};
+
 using LuminanceGrid = std::array<float, 16 * 12>;
 
 bool IsValidRect(llp::geometry::Rect rect)
@@ -840,6 +851,11 @@ public:
     int CommitCallCount() const { return commitCallCount_; }
 #endif
 
+    const AuxiliaryPresentationEvidence& LastPresentedAuxiliary() const
+    {
+        return lastPresentedAuxiliary_;
+    }
+
     ~DesktopDuplicationBackend() override
     {
         Stop();
@@ -1135,6 +1151,7 @@ public:
 
     FailureReason ClearTransparent() override
     {
+        pendingAuxiliary_ = {};
         for (std::size_t index = 0; index < surfaces_.size(); ++index)
         {
             const FailureReason result = DrawSurface(index, [](ID2D1DeviceContext* context, const D2D1_MATRIX_3X2_F&) {
@@ -1475,7 +1492,8 @@ public:
 
     FailureReason DrawOverlay(const SceneSnapshot& scene) override
     {
-        return DrawSurface(1, [&](ID2D1DeviceContext* context, const D2D1_MATRIX_3X2_F& atlasTransform) {
+        bool drewAuxiliary = false;
+        const FailureReason result = DrawSurface(1, [&](ID2D1DeviceContext* context, const D2D1_MATRIX_3X2_F& atlasTransform) {
             context->SetTransform(atlasTransform);
             const auto& search = scene.metrics.search;
             FailureReason failure = FailureReason::None;
@@ -1518,13 +1536,46 @@ public:
                 if (failure != FailureReason::None) return failure;
                 context->DrawRoundedRectangle(tile, focusRim.Get(), 2.0f);
             }
+            if (IsValidRect(scene.auxiliary.bounds))
+            {
+                const float radius = static_cast<float>(
+                    std::max(1, (scene.auxiliary.bounds.bottom - scene.auxiliary.bounds.top) / 2));
+                ComOwner<ID2D1SolidColorBrush> auxiliaryFill;
+                failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                    D2DColor(
+                        scene.auxiliary.focused ? scene.policy.focus : scene.policy.surface,
+                        scene.auxiliary.focused ? 0.90f : 0.76f),
+                    auxiliaryFill.Put()));
+                if (failure != FailureReason::None) return failure;
+                context->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2DRect(scene.auxiliary.bounds), radius, radius),
+                    auxiliaryFill.Get());
+                ComOwner<ID2D1SolidColorBrush> auxiliaryRim;
+                failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                    D2DColor(scene.policy.boundary, scene.auxiliary.focused ? 1.0f : 0.84f),
+                    auxiliaryRim.Put()));
+                if (failure != FailureReason::None) return failure;
+                context->DrawRoundedRectangle(
+                    D2D1::RoundedRect(D2DRect(scene.auxiliary.bounds), radius, radius),
+                    auxiliaryRim.Get(), scene.auxiliary.focused ? 2.0f : 1.0f);
+                drewAuxiliary = true;
+            }
             return FailureReason::None;
         });
+        if (result == FailureReason::None && drewAuxiliary)
+        {
+            pendingAuxiliary_.overlayDrawn = true;
+            pendingAuxiliary_.sceneGeneration = scene.generation;
+            pendingAuxiliary_.bounds = scene.auxiliary.bounds;
+            pendingAuxiliary_.focused = scene.auxiliary.focused;
+        }
+        return result;
     }
 
     FailureReason DrawContent(const SceneSnapshot& scene) override
     {
-        return DrawSurface(2, [&](ID2D1DeviceContext* context, const D2D1_MATRIX_3X2_F& atlasTransform) {
+        bool drewAuxiliaryText = false;
+        const FailureReason result = DrawSurface(2, [&](ID2D1DeviceContext* context, const D2D1_MATRIX_3X2_F& atlasTransform) {
             context->SetTransform(atlasTransform);
             ComOwner<ID2D1SolidColorBrush> textBrush;
             FailureReason failure = RequiredResourceResult(context->CreateSolidColorBrush(
@@ -1533,6 +1584,7 @@ public:
             ComOwner<IDWriteTextFormat> searchFormat;
             ComOwner<IDWriteTextFormat> titleFormat;
             ComOwner<IDWriteTextFormat> subtitleFormat;
+            ComOwner<IDWriteTextFormat> auxiliaryFormat;
             HRESULT createSearchFormat = resources_.dwriteFactory.Get()->CreateTextFormat(
                 L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(std::max(1, scene.metrics.searchFontPx)),
@@ -1562,6 +1614,23 @@ public:
                     L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(std::max(1, scene.metrics.tileFontPx - 2)),
                     L"", subtitleFormat.Put()));
+                if (failure != FailureReason::None) return failure;
+            }
+            if (IsValidRect(scene.auxiliary.bounds) && !scene.auxiliary.text.empty())
+            {
+                failure = RequiredResourceResult(resources_.dwriteFactory.Get()->CreateTextFormat(
+                    L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(std::max(1, scene.metrics.tileFontPx)),
+                    L"", auxiliaryFormat.Put()));
+                if (failure != FailureReason::None) return failure;
+                failure = RequiredResourceResult(auxiliaryFormat.Get()->SetTextAlignment(
+                    DWRITE_TEXT_ALIGNMENT_CENTER));
+                if (failure != FailureReason::None) return failure;
+                failure = RequiredResourceResult(auxiliaryFormat.Get()->SetParagraphAlignment(
+                    DWRITE_PARAGRAPH_ALIGNMENT_CENTER));
+                if (failure != FailureReason::None) return failure;
+                failure = RequiredResourceResult(auxiliaryFormat.Get()->SetWordWrapping(
+                    DWRITE_WORD_WRAPPING_NO_WRAP));
                 if (failure != FailureReason::None) return failure;
             }
 
@@ -1675,8 +1744,32 @@ public:
                         static_cast<float>(item.bounds.right), static_cast<float>(item.bounds.bottom)),
                     textBrush.Get());
             }
+            if (auxiliaryFormat.Get())
+            {
+                ComOwner<ID2D1SolidColorBrush> auxiliaryText;
+                failure = RequiredResourceResult(context->CreateSolidColorBrush(
+                    D2DColor(scene.auxiliary.focused ? scene.policy.focusText : scene.policy.text),
+                    auxiliaryText.Put()));
+                if (failure != FailureReason::None) return failure;
+                context->DrawText(
+                    scene.auxiliary.text.c_str(),
+                    static_cast<UINT32>(scene.auxiliary.text.size()),
+                    auxiliaryFormat.Get(),
+                    D2DRect(scene.auxiliary.bounds),
+                    auxiliaryText.Get());
+                drewAuxiliaryText = true;
+            }
             return FailureReason::None;
         });
+        if (result == FailureReason::None && drewAuxiliaryText)
+        {
+            pendingAuxiliary_.contentDrawn = true;
+            pendingAuxiliary_.sceneGeneration = scene.generation;
+            pendingAuxiliary_.bounds = scene.auxiliary.bounds;
+            pendingAuxiliary_.text = scene.auxiliary.text;
+            pendingAuxiliary_.focused = scene.auxiliary.focused;
+        }
+        return result;
     }
 
     FailureReason Commit() override
@@ -1684,9 +1777,20 @@ public:
 #if defined(LLP_MATERIAL_TESTING)
         ++commitCallCount_;
 #endif
-        return SUCCEEDED(resources_.compositionDevice.Get()->Commit())
-            ? FailureReason::None
-            : FailureReason::CompositionUnavailable;
+        if (FAILED(resources_.compositionDevice.Get()->Commit()))
+        {
+            return FailureReason::CompositionUnavailable;
+        }
+        if (pendingAuxiliary_.overlayDrawn && pendingAuxiliary_.contentDrawn)
+        {
+            pendingAuxiliary_.rendered = true;
+            lastPresentedAuxiliary_ = pendingAuxiliary_;
+        }
+        else
+        {
+            lastPresentedAuxiliary_ = {};
+        }
+        return FailureReason::None;
     }
 
     void Freeze() override
@@ -1715,6 +1819,8 @@ public:
         outputDesktop_ = {};
         outputRotation_ = OutputRotation::Identity;
         lastSceneGeneration_ = std::numeric_limits<std::uint64_t>::max();
+        pendingAuxiliary_ = {};
+        lastPresentedAuxiliary_ = {};
     }
 
     std::int64_t Counter() const override
@@ -1858,6 +1964,8 @@ private:
     UINT surfaceWidth_ = 0;
     UINT surfaceHeight_ = 0;
     std::uint64_t lastSceneGeneration_ = std::numeric_limits<std::uint64_t>::max();
+    AuxiliaryPresentationEvidence pendingAuxiliary_;
+    AuxiliaryPresentationEvidence lastPresentedAuxiliary_;
     float relativeLuminance_ = 0.5f;
     std::array<float, 16 * 12> luminanceGrid_ = {};
     std::int64_t lastLuminanceCounter_ = 0;
@@ -2244,16 +2352,31 @@ public:
     }
 
 private:
-    void PublishDiagnostics(const CaptureLifecycle& lifecycle)
+    void PublishDiagnostics(
+        const CaptureLifecycle& lifecycle,
+        const AuxiliaryPresentationEvidence& auxiliary)
     {
         const std::uint64_t droppedScenes = diagnostics_.droppedScenes;
         Diagnostics updated = lifecycle.CurrentDiagnostics();
         updated.droppedScenes = droppedScenes;
+        updated.auxiliaryRendered = auxiliary.rendered;
+        updated.auxiliarySceneGeneration = auxiliary.sceneGeneration;
+        updated.auxiliaryBounds = auxiliary.bounds;
+        updated.auxiliaryText = auxiliary.text;
+        updated.auxiliaryFocused = auxiliary.focused;
         const bool notifyHost = updated.path != diagnostics_.path
             || updated.failure != diagnostics_.failure
             || updated.state != diagnostics_.state
             || updated.deviceRebuilds != diagnostics_.deviceRebuilds
-            || updated.evidenceFrozen != diagnostics_.evidenceFrozen;
+            || updated.evidenceFrozen != diagnostics_.evidenceFrozen
+            || updated.auxiliaryRendered != diagnostics_.auxiliaryRendered
+            || updated.auxiliarySceneGeneration != diagnostics_.auxiliarySceneGeneration
+            || updated.auxiliaryBounds.left != diagnostics_.auxiliaryBounds.left
+            || updated.auxiliaryBounds.top != diagnostics_.auxiliaryBounds.top
+            || updated.auxiliaryBounds.right != diagnostics_.auxiliaryBounds.right
+            || updated.auxiliaryBounds.bottom != diagnostics_.auxiliaryBounds.bottom
+            || updated.auxiliaryText != diagnostics_.auxiliaryText
+            || updated.auxiliaryFocused != diagnostics_.auxiliaryFocused;
         diagnostics_ = updated;
         if (notifyHost && request_.window && request_.statusMessage)
         {
@@ -2296,7 +2419,7 @@ private:
                 lock.lock();
                 pendingScene_.reset();
                 currentScene_.reset();
-                PublishDiagnostics(lifecycle);
+                PublishDiagnostics(lifecycle, backend.LastPresentedAuxiliary());
                 hideRequested_ = false;
                 hiddenCondition_.notify_all();
                 continue;
@@ -2321,7 +2444,7 @@ private:
                         backend, request, FailureReason::CompositionUnavailable);
                 }
                 lock.lock();
-                PublishDiagnostics(lifecycle);
+                PublishDiagnostics(lifecycle, backend.LastPresentedAuxiliary());
             }
 
             if (freezeRequested_)
@@ -2330,7 +2453,7 @@ private:
                 lock.unlock();
                 lifecycle.Freeze(backend, currentScene_.get());
                 lock.lock();
-                PublishDiagnostics(lifecycle);
+                PublishDiagnostics(lifecycle, backend.LastPresentedAuxiliary());
                 continue;
             }
 
@@ -2339,7 +2462,7 @@ private:
                 lock.unlock();
                 lifecycle.Step(backend, currentScene_.get(), sceneChanged);
                 lock.lock();
-                PublishDiagnostics(lifecycle);
+                PublishDiagnostics(lifecycle, backend.LastPresentedAuxiliary());
             }
         }
 

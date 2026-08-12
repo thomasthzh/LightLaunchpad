@@ -163,6 +163,9 @@ public static class LightLaunchpadSpotlightProbeNative {
     Copy-Item -LiteralPath $llpTarget -Destination (Join-Path $llpLaunchpad 'Beta.exe')
     Copy-Item -LiteralPath $llpTarget -Destination (Join-Path $llpLaunchpad 'Flow Alpha.exe')
     Copy-Item -LiteralPath $llpTarget -Destination (Join-Path $llpLaunchpad 'Flow Beta.exe')
+    foreach ($llpIndex in 1..48) {
+        Copy-Item -LiteralPath $llpTarget -Destination (Join-Path $llpLaunchpad ("Scroll Item {0:D2}.exe" -f $llpIndex))
+    }
 
     $llpSettings = [ordered]@{
         SchemaVersion = 2
@@ -210,7 +213,7 @@ public static class LightLaunchpadSpotlightProbeNative {
 
     Wait-LlpCondition { Test-Path -LiteralPath $llpReadyPath } 12000 'The Spotlight probe catalog did not become ready.'
     $llpReady = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpReadyPath | ConvertFrom-Json
-    Assert-Equal 3 ([int]$llpReady.itemCount) 'Spotlight probe catalog item count mismatch.'
+    Assert-Equal 51 ([int]$llpReady.itemCount) 'Spotlight probe catalog item count mismatch.'
     Assert-Equal 'Spotlight' ([string]$llpReady.displayMode) 'Spotlight probe did not load Spotlight mode.'
     $llpCatalogGeneration = [uint64]$llpReady.catalogGeneration
     $llpWindow = [LightLaunchpadSpotlightProbeNative]::FindWindowForProcess([uint32]$llpProcess.Id)
@@ -232,6 +235,20 @@ public static class LightLaunchpadSpotlightProbeNative {
         return [string]$script:llpMaterialReady.materialPath -eq 'fallback' -and [string]$script:llpMaterialReady.materialState -eq 'fallback' -and [string]$script:llpMaterialReady.materialFailure -eq 'ForcedForTest'
     } 10000 'Spotlight did not publish the expected normal-host material path before accepting input.'
     $llpInitialMaterialGeneration = [uint64]$llpMaterialReady.materialSceneGeneration
+    if ($MaterialFailure -eq 'None') {
+        Wait-LlpCondition {
+            $script:llpInitialAuxiliary = Get-LlpReadyState
+            $null -ne $script:llpInitialAuxiliary -and
+                [bool]$script:llpInitialAuxiliary.materialAuxiliaryRendered -and
+                [uint64]$script:llpInitialAuxiliary.materialAuxiliarySceneGeneration -gt 0
+        } 3000 'High-fidelity Spotlight did not present the immutable auxiliary control.'
+        Assert-Equal '...' ([string]$llpInitialAuxiliary.materialAuxiliaryText) 'High-fidelity auxiliary label mismatch.'
+        Assert-Equal $false ([bool]$llpInitialAuxiliary.materialAuxiliaryFocused) 'Auxiliary control was focused on initial open.'
+        Assert-Equal ([int]$llpInitialAuxiliary.scene.auxiliary.left) ([int]$llpInitialAuxiliary.materialAuxiliaryBounds.left) 'Auxiliary presented left bound mismatch.'
+        Assert-Equal ([int]$llpInitialAuxiliary.scene.auxiliary.top) ([int]$llpInitialAuxiliary.materialAuxiliaryBounds.top) 'Auxiliary presented top bound mismatch.'
+        Assert-Equal ([int]$llpInitialAuxiliary.scene.auxiliary.right) ([int]$llpInitialAuxiliary.materialAuxiliaryBounds.right) 'Auxiliary presented right bound mismatch.'
+        Assert-Equal ([int]$llpInitialAuxiliary.scene.auxiliary.bottom) ([int]$llpInitialAuxiliary.materialAuxiliaryBounds.bottom) 'Auxiliary presented bottom bound mismatch.'
+    }
     Send-LlpText $llpWindow 'Beta'
     Assert-Equal 'Beta' $llpValue.Current.Value 'First canonical path did not enter its query.'
     Wait-LlpCondition {
@@ -349,16 +366,57 @@ public static class LightLaunchpadSpotlightProbeNative {
     Send-LlpKey $llpWindow 0x1B
 
     [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
-    Send-LlpText $llpWindow 'Flow'
+    $llpTabQuery = if ($MaterialFailure -eq 'None') { 'Scroll' } else { 'Flow' }
+    Send-LlpText $llpWindow $llpTabQuery
+    if ($MaterialFailure -eq 'None') {
+        Wait-LlpCondition {
+            $script:llpBeforeWheel = Get-LlpReadyState
+            $null -ne $script:llpBeforeWheel -and
+                [string]$script:llpBeforeWheel.materialPath -eq 'high-fidelity' -and
+                [int]$script:llpBeforeWheel.hitCount -gt 0
+        } 3000 'High-fidelity Spotlight did not publish pre-wheel visible geometry.'
+        $llpBeforeWheelGeneration = [uint64]$llpBeforeWheel.materialSceneGeneration
+        $llpBeforeWheelTop = [int]$llpBeforeWheel.firstHit.top
+        $llpWheelDownWParam = [Convert]::ToUInt64('FF880000', 16)
+        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x020A, [UIntPtr]::new($llpWheelDownWParam), [IntPtr]::Zero)
+        Wait-LlpCondition {
+            $script:llpAfterWheel = Get-LlpReadyState
+            $null -ne $script:llpAfterWheel -and
+                [uint64]$script:llpAfterWheel.materialSceneGeneration -gt $llpBeforeWheelGeneration -and
+                [int]$script:llpAfterWheel.firstHit.top -ne $llpBeforeWheelTop
+        } 3000 'Wheel scrolling did not submit advanced high-fidelity scene geometry.'
+        Assert-Equal $true $llpElement.Current.HasKeyboardFocus 'Wheel scrolling stole search keyboard focus.'
+        Assert-Equal 'Scroll' $llpValue.Current.Value 'Wheel scrolling changed the search query.'
+    }
     Send-LlpKey $llpWindow 0x09
     Assert-Equal $false $llpElement.Current.HasKeyboardFocus 'Tab did not move from search to results.'
+    $llpAuxiliaryBeforeFocusGeneration = if ($MaterialFailure -eq 'None') { [uint64](Get-LlpReadyState).materialAuxiliarySceneGeneration } else { 0 }
     Send-LlpKey $llpWindow 0x09
     Assert-Equal $false $llpElement.Current.HasKeyboardFocus 'Tab did not retain non-search focus on the auxiliary control.'
+    if ($MaterialFailure -eq 'None') {
+        Wait-LlpCondition {
+            $script:llpFocusedAuxiliary = Get-LlpReadyState
+            $null -ne $script:llpFocusedAuxiliary -and
+                [bool]$script:llpFocusedAuxiliary.materialAuxiliaryRendered -and
+                [bool]$script:llpFocusedAuxiliary.materialAuxiliaryFocused -and
+                [uint64]$script:llpFocusedAuxiliary.materialAuxiliarySceneGeneration -gt $llpAuxiliaryBeforeFocusGeneration
+        } 3000 'High-fidelity Spotlight did not present the focused auxiliary control state.'
+    }
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
         Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '03-auxiliary-focus.png')
     }
+    $llpFocusedAuxiliaryGeneration = if ($MaterialFailure -eq 'None') { [uint64]$llpFocusedAuxiliary.materialAuxiliarySceneGeneration } else { 0 }
     Send-LlpKey $llpWindow 0x09
     Assert-Equal $true $llpElement.Current.HasKeyboardFocus 'Tab did not wrap from auxiliary control to search.'
+    if ($MaterialFailure -eq 'None') {
+        Wait-LlpCondition {
+            $script:llpUnfocusedAuxiliary = Get-LlpReadyState
+            $null -ne $script:llpUnfocusedAuxiliary -and
+                [bool]$script:llpUnfocusedAuxiliary.materialAuxiliaryRendered -and
+                -not [bool]$script:llpUnfocusedAuxiliary.materialAuxiliaryFocused -and
+                [uint64]$script:llpUnfocusedAuxiliary.materialAuxiliarySceneGeneration -gt $llpFocusedAuxiliaryGeneration
+        } 3000 'High-fidelity Spotlight did not present the unfocused auxiliary control state after focus wrap.'
+    }
     Send-LlpKey $llpWindow 0x1B
     Send-LlpKey $llpWindow 0x1B
 
