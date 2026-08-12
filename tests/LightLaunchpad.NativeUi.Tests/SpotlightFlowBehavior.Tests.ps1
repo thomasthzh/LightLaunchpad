@@ -1,5 +1,8 @@
 param(
-    [string]$EvidenceDirectory = ''
+    [string]$EvidenceDirectory = '',
+
+    [ValidateSet('None', 'initialization')]
+    [string]$MaterialFailure = 'None'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,6 +44,9 @@ function Wait-LlpCondition {
 
 function Send-LlpText {
     param([IntPtr]$Window, [string]$Text)
+    # Direct WM_CHAR injection represents committed text, so cancel any ambient
+    # desktop IME composition that began when the real window took focus.
+    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($Window, 0x010E, [UIntPtr]::Zero, [IntPtr]::Zero)
     foreach ($llpCharacter in $Text.ToCharArray()) {
         [void][LightLaunchpadSpotlightProbeNative]::SendMessage($Window, 0x0102, [UIntPtr]::new([uint64]$llpCharacter), [IntPtr]::Zero)
     }
@@ -189,7 +195,11 @@ public static class LightLaunchpadSpotlightProbeNative {
         $env:LOCALAPPDATA = $llpLocalAppData
         $env:USERPROFILE = $llpUserProfile
         $env:LLP_FLOW_MARKER = $llpMarker
-        $llpProcess = Start-Process -FilePath $llpExecutable -ArgumentList @('--spotlight-flow-probe-file', $llpProbePath, '--spotlight-flow-ready-file', $llpReadyPath, '--diagnostics-log-file', $llpLogPath) -PassThru
+        $llpArguments = @('--spotlight-flow-probe-file', $llpProbePath, '--spotlight-flow-ready-file', $llpReadyPath, '--diagnostics-log-file', $llpLogPath)
+        if ($MaterialFailure -ne 'None') {
+            $llpArguments += @('--material-force-failure', $MaterialFailure)
+        }
+        $llpProcess = Start-Process -FilePath $llpExecutable -ArgumentList $llpArguments -PassThru
     }
     finally {
         $env:APPDATA = $llpPriorAppData
@@ -213,8 +223,22 @@ public static class LightLaunchpadSpotlightProbeNative {
     Assert-True ($llpElement.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$llpValueObject)) 'Spotlight search Value pattern is unavailable.'
     $llpValue = [System.Windows.Automation.ValuePattern]$llpValueObject
     Assert-Equal $true $llpElement.Current.HasKeyboardFocus 'Search was not the only focus after Alt+D.'
+    Wait-LlpCondition {
+        $script:llpMaterialReady = Get-LlpReadyState
+        if ($null -eq $script:llpMaterialReady -or [uint64]$script:llpMaterialReady.materialSceneGeneration -eq 0) { return $false }
+        if ($MaterialFailure -eq 'None') {
+            return [string]$script:llpMaterialReady.materialPath -eq 'high-fidelity' -and [string]$script:llpMaterialReady.materialState -eq 'live'
+        }
+        return [string]$script:llpMaterialReady.materialPath -eq 'fallback' -and [string]$script:llpMaterialReady.materialState -eq 'fallback' -and [string]$script:llpMaterialReady.materialFailure -eq 'ForcedForTest'
+    } 10000 'Spotlight did not publish the expected normal-host material path before accepting input.'
+    $llpInitialMaterialGeneration = [uint64]$llpMaterialReady.materialSceneGeneration
     Send-LlpText $llpWindow 'Beta'
     Assert-Equal 'Beta' $llpValue.Current.Value 'First canonical path did not enter its query.'
+    Wait-LlpCondition {
+        $script:llpMaterialAfterSearch = Get-LlpReadyState
+        $null -ne $script:llpMaterialAfterSearch -and [uint64]$script:llpMaterialAfterSearch.materialSceneGeneration -gt $llpInitialMaterialGeneration
+    } 3000 'Typing did not advance the immutable material scene generation.'
+    $llpSearchMaterialGeneration = [uint64]$llpMaterialAfterSearch.materialSceneGeneration
     Send-LlpKey $llpWindow 0x0D
     Wait-LlpCondition { (Get-LlpMarkerNames).Count -ge 1 } 10000 'Search Enter did not launch the first exact result.'
     $llpMarkerNames = @(Get-LlpMarkerNames)
@@ -229,15 +253,29 @@ public static class LightLaunchpadSpotlightProbeNative {
         Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '00-empty-search.png')
     }
     Send-LlpText $llpWindow 'Flow'
+    Wait-LlpCondition {
+        $script:llpMaterialBeforeNavigation = Get-LlpReadyState
+        $null -ne $script:llpMaterialBeforeNavigation -and [uint64]$script:llpMaterialBeforeNavigation.materialSceneGeneration -gt $llpSearchMaterialGeneration
+    } 3000 'Second-query submission did not advance the immutable material scene generation.'
+    $llpBeforeDownGeneration = [uint64]$llpMaterialBeforeNavigation.materialSceneGeneration
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
         Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '01-search-focus.png')
     }
     Send-LlpKey $llpWindow 0x28
     Assert-Equal $false $llpElement.Current.HasKeyboardFocus 'Down did not move focus from search into results.'
+    Wait-LlpCondition {
+        $script:llpMaterialAfterDown = Get-LlpReadyState
+        $null -ne $script:llpMaterialAfterDown -and [uint64]$script:llpMaterialAfterDown.materialSceneGeneration -gt $llpBeforeDownGeneration
+    } 3000 'Down did not advance the immutable material scene generation.'
+    $llpAfterDownGeneration = [uint64]$llpMaterialAfterDown.materialSceneGeneration
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
         Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '02-result-focus.png')
     }
     Send-LlpKey $llpWindow 0x27
+    Wait-LlpCondition {
+        $script:llpMaterialAfterRight = Get-LlpReadyState
+        $null -ne $script:llpMaterialAfterRight -and [uint64]$script:llpMaterialAfterRight.materialSceneGeneration -gt $llpAfterDownGeneration
+    } 3000 'Right did not advance the immutable material scene generation.'
     Send-LlpKey $llpWindow 0x0D
     Wait-LlpCondition { (Get-LlpMarkerNames).Count -ge 2 } 10000 'Result navigation Enter did not launch.'
     $llpMarkerNames = @(Get-LlpMarkerNames)
@@ -348,6 +386,15 @@ public static class LightLaunchpadSpotlightProbeNative {
     Assert-Equal 1 ([int]$llpProbe.searchEnterLaunches) 'Search Enter launch count mismatch.'
     Assert-Equal 1 ([int]$llpProbe.resultEnterLaunches) 'Focused-result Enter launch count mismatch.'
     Assert-Equal 2 ([int]$llpProbe.successfulLaunches) 'Shell broker did not report both launches successful.'
+    if ($MaterialFailure -eq 'None') {
+        Assert-Equal 'high-fidelity' ([string]$llpProbe.materialPath) 'Normal Spotlight host did not finish on the high-fidelity material path.'
+        Assert-True ([uint64]$llpProbe.materialPresentedFrames -gt 0) 'Normal Spotlight host did not present a composed material frame.'
+    }
+    else {
+        Assert-Equal 'fallback' ([string]$llpProbe.materialPath) 'Forced initialization failure did not retain the single material fallback.'
+        Assert-Equal 'ForcedForTest' ([string]$llpProbe.materialFailure) 'Forced initialization failure did not retain its stable reason.'
+    }
+    Assert-True ([uint64]$llpProbe.materialSceneGeneration -ge [uint64]$llpMaterialAfterRight.materialSceneGeneration) 'Final Spotlight probe lost the latest immutable material scene generation.'
     $llpFocusedNames = @($llpProbe.focusedResultPaths | ForEach-Object { [System.IO.Path]::GetFileName([string]$_) })
     Assert-True ($llpFocusedNames.Count -ge 2) 'The real EXE did not report both Down and Right result-focus states.'
     Assert-Equal 'Flow Beta.exe' $llpFocusedNames[0] 'Down did not focus the first ranked Flow result.'
@@ -357,7 +404,7 @@ public static class LightLaunchpadSpotlightProbeNative {
     $llpP95 = $llpReadySamples[[Math]::Min($llpReadySamples.Count - 1, [Math]::Floor($llpReadySamples.Count * 0.95))]
     Write-Output "METRIC SpotlightFlow inputReadySamplesMs=$($llpReadySamples -join ',')"
     Assert-True ($llpP95 -le 180) "Hotkey-to-input-ready P95 exceeded 180 ms: $llpP95 ms."
-    Write-Output "METRIC SpotlightFlow hotkeyToInputReadyP95Ms=$llpP95 launches=$([int]$llpProbe.successfulLaunches) opens=$([int]$llpProbe.hotkeyMessages)"
+    Write-Output "METRIC SpotlightFlow hotkeyToInputReadyP95Ms=$llpP95 launches=$([int]$llpProbe.successfulLaunches) opens=$([int]$llpProbe.hotkeyMessages) materialFailure=$MaterialFailure materialPath=$([string]$llpProbe.materialPath) materialSceneGeneration=$([uint64]$llpProbe.materialSceneGeneration) materialPresentedFrames=$([uint64]$llpProbe.materialPresentedFrames)"
     Write-Output 'PASS SpotlightFlow_AltDSearchEnterAndResultNavigationLaunchExactTargets'
 }
 finally {

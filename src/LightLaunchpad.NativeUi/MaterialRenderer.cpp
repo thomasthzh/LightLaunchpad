@@ -2294,6 +2294,8 @@ private:
                 lock.unlock();
                 lifecycle.Hide(backend);
                 lock.lock();
+                pendingScene_.reset();
+                currentScene_.reset();
                 PublishDiagnostics(lifecycle);
                 hideRequested_ = false;
                 hiddenCondition_.notify_all();
@@ -2539,43 +2541,51 @@ std::shared_ptr<const SceneSnapshot> LatestSceneSlot::Take()
     return scene;
 }
 
-MaterialRenderer::MaterialRenderer() : impl_(std::make_unique<Impl>()) {}
+MaterialRenderer::MaterialRenderer() = default;
 
 MaterialRenderer::~MaterialRenderer() = default;
 
 void MaterialRenderer::Show(ShowRequest request)
 {
+    if (!impl_) impl_ = std::make_unique<Impl>();
     impl_->Show(std::move(request));
 }
 
 void MaterialRenderer::Submit(std::shared_ptr<const SceneSnapshot> scene)
 {
+    if (!impl_) impl_ = std::make_unique<Impl>();
     impl_->Submit(std::move(scene));
 }
 
 void MaterialRenderer::Rebuild(ShowRequest request)
 {
+    if (!impl_) impl_ = std::make_unique<Impl>();
     impl_->Rebuild(std::move(request));
 }
 
 void MaterialRenderer::Hide()
 {
-    impl_->Hide();
+    if (impl_) impl_->Hide();
+}
+
+void MaterialRenderer::Shutdown()
+{
+    impl_.reset();
 }
 
 void MaterialRenderer::FreezeEvidence()
 {
-    impl_->FreezeEvidence();
+    if (impl_) impl_->FreezeEvidence();
 }
 
 Diagnostics MaterialRenderer::SnapshotDiagnostics() const
 {
-    return impl_->SnapshotDiagnostics();
+    return impl_ ? impl_->SnapshotDiagnostics() : Diagnostics{};
 }
 
 bool MaterialRenderer::WaitUntilHiddenForTest(std::uint32_t timeoutMs) const
 {
-    return impl_->WaitUntilHiddenForTest(timeoutMs);
+    return !impl_ || impl_->WaitUntilHiddenForTest(timeoutMs);
 }
 
 bool RendererDependenciesAvailable(

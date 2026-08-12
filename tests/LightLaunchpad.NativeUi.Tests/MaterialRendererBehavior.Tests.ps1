@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Lifecycle')]
+    [ValidateSet('Lifecycle', 'Host')]
     [string]$Mode = 'Lifecycle'
 )
 
@@ -46,6 +46,36 @@ function Wait-LlpFile {
 }
 
 try {
+    if ($Mode -eq 'Host') {
+        $llpHostSourcePath = Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp'
+        $llpRendererSourcePath = Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\MaterialRenderer.cpp'
+        $llpBuildSourcePath = Join-Path $llpRepoRoot 'tools\build-native-ui.ps1'
+        $llpHostSource = Get-Content -Raw -LiteralPath $llpHostSourcePath
+        $llpRendererSource = Get-Content -Raw -LiteralPath $llpRendererSourcePath
+        $llpBuildSource = Get-Content -Raw -LiteralPath $llpBuildSourcePath
+        foreach ($llpLibrary in @('-ld3d11', '-ldxgi', '-ldcomp')) {
+            Assert-True $llpBuildSource.Contains($llpLibrary) "ARCHITECTURE production build does not link $llpLibrary."
+        }
+        foreach ($llpLegacyName in @('SpotlightBackdropSourceRectForLens', 'SpotlightBackdropSourceRectForLensGdi', 'DrawSearchEdgeRefraction', 'DrawLiquidGlassFocusLens', 'DrawFocusedTileLens')) {
+            Assert-True (-not $llpHostSource.Contains($llpLegacyName)) "ARCHITECTURE legacy nested material function remains: $llpLegacyName."
+        }
+        Assert-True $llpHostSource.Contains('const bool allowSystemBackdrop = !spotlight && !g_adaptivePolicy.solidSurface;') 'ARCHITECTURE Spotlight system-backdrop exclusion is absent.'
+        Assert-True $llpHostSource.Contains('DWMSBT_NONE') 'ARCHITECTURE Spotlight does not explicitly disable the DWM system backdrop.'
+        Assert-True (-not $llpRendererSource.Contains('Sleep(')) 'ARCHITECTURE MaterialRenderer contains a blocking Sleep call.'
+        $llpShowHideStart = $llpHostSource.IndexOf('void ShowNativeUi()')
+        $llpShowHideEnd = $llpHostSource.IndexOf('void ToggleNativeUi()', $llpShowHideStart)
+        Assert-True ($llpShowHideStart -ge 0 -and $llpShowHideEnd -gt $llpShowHideStart) 'ARCHITECTURE could not locate the show/hide host boundary.'
+        Assert-True (-not $llpHostSource.Substring($llpShowHideStart, $llpShowHideEnd - $llpShowHideStart).Contains('Sleep(')) 'ARCHITECTURE Spotlight show/hide contains a blocking Sleep call.'
+
+        $llpSpotlightScript = Join-Path $PSScriptRoot 'SpotlightFlowBehavior.Tests.ps1'
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $llpSpotlightScript
+        Assert-Equal 0 $LASTEXITCODE 'Normal high-fidelity Spotlight host flow failed.'
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $llpSpotlightScript -MaterialFailure initialization
+        Assert-Equal 0 $LASTEXITCODE 'Forced-initialization fallback Spotlight host flow failed.'
+        Write-Output 'PASS MaterialRendererBehavior_HostHighFidelityAndFallbackCanonicalFlows'
+        return
+    }
+
     Assert-Equal 'Lifecycle' $Mode 'Unsupported material behavior mode.'
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes

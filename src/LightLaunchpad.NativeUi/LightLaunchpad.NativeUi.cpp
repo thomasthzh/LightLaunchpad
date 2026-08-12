@@ -38,6 +38,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
@@ -103,7 +104,7 @@ constexpr UINT WmTray = WM_APP + 72;
 constexpr UINT WmActivateInstance = WM_APP + 73;
 constexpr UINT WmShellBrokerResult = WM_APP + 74;
 constexpr UINT WmAdaptiveSnapshot = WM_APP + 75;
-constexpr UINT WmMaterialProbeStatus = WM_APP + 76;
+constexpr UINT WmMaterialRendererStatus = WM_APP + 76;
 constexpr UINT WmMaterialProbeControl = WM_APP + 77;
 constexpr wchar_t MaterialProbeProperty[] = L"LightLaunchpad.MaterialProbe";
 constexpr wchar_t WindowClassName[] = LLP_WINDOW_CLASS_NAME_WIDE;
@@ -346,6 +347,9 @@ llp::organization::State g_organizationState;
 OrganizationFeedback g_organizationFeedback;
 llp::adaptive::Environment g_adaptiveEnvironment;
 llp::adaptive::Policy g_adaptivePolicy;
+llp::material::MaterialRenderer g_materialRenderer;
+std::uint64_t g_materialSceneGeneration = 0;
+std::unordered_map<std::uint64_t, std::weak_ptr<const llp::material::IconRaster>> g_materialIconRasters;
 UINT g_windowDpi = 96;
 UINT g_settingsDpi = 96;
 UINT g_testDpiOverride = 0;
@@ -490,6 +494,11 @@ struct SpotlightFlowProbeState
     std::vector<uint64_t> inputReadyMilliseconds;
     std::vector<std::wstring> requestedPaths;
     std::vector<std::wstring> focusedResultPaths;
+    std::uint64_t materialSceneGeneration = 0;
+    std::uint64_t materialPresentedFrames = 0;
+    std::string materialPath = "fallback";
+    std::string materialFailure = "None";
+    std::string materialState = "hidden";
 };
 
 struct LaunchpadFlowProbeState
@@ -601,6 +610,10 @@ void RequestOrganizationUndo();
 bool ProbeFileExists(const std::wstring& path);
 void RefreshAdaptiveEnvironment();
 void ResetScaleSensitiveResources();
+std::shared_ptr<const llp::material::SceneSnapshot> BuildMaterialSceneSnapshot(const RECT& client);
+void SubmitMaterialSceneIfVisible();
+void RebuildVisibleMaterialRenderer();
+bool WriteSpotlightFlowReadyState();
 bool WriteMaterialProbeState(HWND hwnd);
 bool WriteMaterialProbeState(MaterialProbeHostState& state);
 
@@ -1694,6 +1707,7 @@ void ForgetIconBounds(HICON icon)
 void ReleaseItemIcon(LaunchItem& item)
 {
     if (!item.icon) return;
+    g_materialIconRasters.clear();
     ForgetIconBounds(item.icon);
     DestroyIcon(item.icon);
     item.icon = nullptr;
@@ -1702,6 +1716,7 @@ void ReleaseItemIcon(LaunchItem& item)
 
 void ReleaseAllResidentIcons()
 {
+    g_materialIconRasters.clear();
     for (auto& item : g_items)
     {
         ReleaseItemIcon(item);
@@ -2112,6 +2127,84 @@ std::vector<HitTile> BuildContentHitTiles()
     for (const auto& item : scene.items) hits.push_back({ WinRect(item.contentBounds), item.filteredIndex });
 
     return hits;
+}
+
+std::shared_ptr<const llp::material::SceneSnapshot> BuildMaterialSceneSnapshot(const RECT& client)
+{
+    auto snapshot = std::make_shared<llp::material::SceneSnapshot>();
+    snapshot->generation = ++g_materialSceneGeneration;
+    snapshot->metrics = CurrentSceneMetrics(client);
+    snapshot->policy = g_adaptivePolicy;
+    snapshot->search.displayText = g_searchInput.DisplayText();
+    snapshot->search.caret = g_searchInput.DisplayCaret();
+    snapshot->search.selectionStart = g_searchInput.SelectionStart();
+    snapshot->search.selectionEnd = g_searchInput.SelectionEnd();
+    snapshot->search.compositionStart = g_searchInput.CompositionStart();
+    snapshot->search.compositionEnd = g_searchInput.CompositionEnd();
+    snapshot->search.horizontalOffsetPx = g_searchTextOffset;
+    snapshot->search.active = g_spotlightState.Focus() == llp::interaction::FocusArea::Search;
+    snapshot->search.composing = g_searchInput.IsComposing();
+    snapshot->auxiliaryFocused = g_spotlightState.Focus() == llp::interaction::FocusArea::Auxiliary;
+
+    const auto content = BuildCurrentSceneGeometry(client);
+    const RECT contentClip = WinRect(snapshot->metrics.contentClip);
+    g_hits.clear();
+    g_regionHits.clear();
+    snapshot->items.reserve(content.items.size());
+    for (const auto& slot : content.items)
+    {
+        if (slot.filteredIndex < 0 || slot.filteredIndex >= static_cast<int>(g_filtered.size())) continue;
+        const int itemIndex = g_filtered[slot.filteredIndex];
+        if (itemIndex < 0 || itemIndex >= static_cast<int>(g_items.size())) continue;
+        const RECT bounds = WinRect(slot.viewportBounds);
+        if (!RectsIntersect(bounds, contentClip)) continue;
+        g_hits.push_back({ bounds, slot.filteredIndex });
+
+        auto& source = g_items[itemIndex];
+        QueueItemIcon(source);
+        std::shared_ptr<const llp::material::IconRaster> icon;
+        if (source.icon)
+        {
+            const auto pointer = static_cast<std::uint64_t>(
+                reinterpret_cast<std::uintptr_t>(source.icon));
+            const std::uint64_t key = (pointer * 1099511628211ull)
+                ^ static_cast<std::uint32_t>(IconSizePx());
+            auto found = g_materialIconRasters.find(key);
+            if (found != g_materialIconRasters.end()) icon = found->second.lock();
+            if (!icon)
+            {
+                try
+                {
+                    icon = llp::material::RasterizeIcon(source.icon, IconSizePx());
+                }
+                catch (...)
+                {
+                    icon.reset();
+                }
+                if (icon) g_materialIconRasters[key] = icon;
+            }
+        }
+
+        llp::material::SceneItem item;
+        item.bounds = slot.viewportBounds;
+        item.title = source.displayName;
+        item.subtitle = source.subtitle;
+        item.icon = std::move(icon);
+        item.focused = g_spotlightState.Focus() == llp::interaction::FocusArea::Results
+            && slot.filteredIndex == g_spotlightState.FocusedResultIndex();
+        item.favorite = g_searchHistory.Get(source.stableId).favorite;
+        snapshot->items.push_back(std::move(item));
+    }
+    return snapshot;
+}
+
+void SubmitMaterialSceneIfVisible()
+{
+    if (!g_hwnd || !IsSpotlightMode() || !IsWindowVisible(g_hwnd)) return;
+    RECT client = {};
+    if (!GetClientRect(g_hwnd, &client)) return;
+    g_materialRenderer.Submit(BuildMaterialSceneSnapshot(client));
+    if (g_spotlightFlowProbe.active) WriteSpotlightFlowReadyState();
 }
 
 void BeginSelectionBox(HWND hwnd, POINT point, bool additive)
@@ -3024,6 +3117,11 @@ std::string BuildSpotlightFlowProbeJson()
         { "searchEnterLaunches", g_spotlightFlowProbe.searchEnterLaunches },
         { "resultEnterLaunches", g_spotlightFlowProbe.resultEnterLaunches },
         { "successfulLaunches", g_spotlightFlowProbe.successfulLaunches },
+        { "materialSceneGeneration", g_spotlightFlowProbe.materialSceneGeneration },
+        { "materialPresentedFrames", g_spotlightFlowProbe.materialPresentedFrames },
+        { "materialPath", g_spotlightFlowProbe.materialPath },
+        { "materialFailure", g_spotlightFlowProbe.materialFailure },
+        { "materialState", g_spotlightFlowProbe.materialState },
         { "requestedPaths", requestedPaths },
         { "focusedResultPaths", focusedResultPaths },
         { "finalFocus", g_spotlightState.Focus() == llp::interaction::FocusArea::Search
@@ -3061,6 +3159,20 @@ std::string BuildLaunchpadFlowProbeJson()
 bool WriteSpotlightFlowReadyState()
 {
     if (!g_spotlightFlowProbe.active || g_spotlightFlowProbe.readyPath.empty()) return false;
+    const auto material = g_materialRenderer.SnapshotDiagnostics();
+    if (g_materialSceneGeneration > 0
+        && (material.state == llp::material::LifecycleState::Live
+            || material.state == llp::material::LifecycleState::Fallback
+            || material.state == llp::material::LifecycleState::FrozenEvidence))
+    {
+        g_spotlightFlowProbe.materialSceneGeneration = g_materialSceneGeneration;
+        g_spotlightFlowProbe.materialPresentedFrames = std::max(
+            g_spotlightFlowProbe.materialPresentedFrames,
+            material.presentedFrames);
+        g_spotlightFlowProbe.materialPath = MaterialRenderPathName(material.path);
+        g_spotlightFlowProbe.materialFailure = MaterialFailureName(material.failure);
+        g_spotlightFlowProbe.materialState = MaterialStateName(material.state);
+    }
     std::string focus = "search";
     if (g_spotlightState.Focus() == llp::interaction::FocusArea::Results) focus = "results";
     else if (g_spotlightState.Focus() == llp::interaction::FocusArea::Auxiliary) focus = "auxiliary";
@@ -3114,6 +3226,11 @@ bool WriteSpotlightFlowReadyState()
         { "solidSurface", g_adaptivePolicy.solidSurface },
         { "reducedMotion", g_adaptivePolicy.reducedMotion },
         { "testOverridesActive", g_adaptiveTestOverridesActive },
+        { "materialSceneGeneration", g_materialSceneGeneration },
+        { "materialPresentedFrames", material.presentedFrames },
+        { "materialPath", MaterialRenderPathName(material.path) },
+        { "materialFailure", MaterialFailureName(material.failure) },
+        { "materialState", MaterialStateName(material.state) },
         { "hitCount", g_hits.size() },
         { "firstHit", firstHit },
         { "windowRect", Json{
@@ -3426,7 +3543,7 @@ void HandleShellBrokerResult(LPARAM lParam)
                 found->icon = result->icon;
                 found->iconLastUsed = ++g_iconUseCounter;
                 result->icon = nullptr;
-                InvalidateRect(g_hwnd, nullptr, FALSE);
+                RequestSearchRepaint(g_hwnd, false);
             }
             else if (result->iconSize != IconSizePx())
             {
@@ -4394,6 +4511,58 @@ void PrewarmNativeUiForShow()
     }
 }
 
+llp::material::FailureReason MaterialForcedFailureFromCommandLine()
+{
+    if (CompareStringOrdinal(
+            LLP_BUILD_CHANNEL_WIDE, -1, L"development", -1, TRUE) != CSTR_EQUAL)
+    {
+        return llp::material::FailureReason::None;
+    }
+    const std::wstring value = CommandLineValue(L"--material-force-failure");
+    if (CompareStringOrdinal(value.c_str(), -1, L"initialization", -1, TRUE) == CSTR_EQUAL)
+    {
+        return llp::material::FailureReason::CompositionUnavailable;
+    }
+    if (CompareStringOrdinal(value.c_str(), -1, L"duplication", -1, TRUE) == CSTR_EQUAL)
+    {
+        return llp::material::FailureReason::DuplicationUnavailable;
+    }
+    if (CompareStringOrdinal(value.c_str(), -1, L"access-lost", -1, TRUE) == CSTR_EQUAL)
+    {
+        return llp::material::FailureReason::AccessLost;
+    }
+    return llp::material::FailureReason::None;
+}
+
+llp::material::ShowRequest CurrentMaterialShowRequest()
+{
+    llp::material::ShowRequest request;
+    RECT windowRect = {};
+    GetWindowRect(g_hwnd, &windowRect);
+    request.window = g_hwnd;
+    request.monitor = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+    request.windowDesktop = {
+        windowRect.left, windowRect.top, windowRect.right, windowRect.bottom
+    };
+    request.dpi = static_cast<int>(g_windowDpi);
+    request.policy = g_adaptivePolicy;
+    request.forcedFailure = MaterialForcedFailureFromCommandLine();
+    request.statusMessage = WmMaterialRendererStatus;
+    return request;
+}
+
+void RebuildVisibleMaterialRenderer()
+{
+    if (!g_hwnd || !IsSpotlightMode() || !IsWindowVisible(g_hwnd)) return;
+    RECT client = {};
+    if (GetClientRect(g_hwnd, &client))
+    {
+        g_materialRenderer.Submit(BuildMaterialSceneSnapshot(client));
+    }
+    g_materialRenderer.Rebuild(CurrentMaterialShowRequest());
+    if (g_spotlightFlowProbe.active) WriteSpotlightFlowReadyState();
+}
+
 void ShowSpotlightImmediately()
 {
     if (!g_hwnd) return;
@@ -4434,11 +4603,16 @@ void ShowNativeUi()
     ResetSearchForOpen();
     RebuildFiltered();
     PositionWindow();
-    if (IsSpotlightMode() && !g_adaptivePolicy.solidSurface)
+    if (IsSpotlightMode())
     {
         RECT windowRect = {};
         GetWindowRect(g_hwnd, &windowRect);
-        CaptureSpotlightBackdrop(windowRect);
+        if (!g_adaptivePolicy.solidSurface) CaptureSpotlightBackdrop(windowRect);
+        else ReleaseSpotlightBackdrop();
+        RECT client = {};
+        GetClientRect(g_hwnd, &client);
+        g_materialRenderer.Submit(BuildMaterialSceneSnapshot(client));
+        g_materialRenderer.Show(CurrentMaterialShowRequest());
     }
     else
     {
@@ -4476,6 +4650,7 @@ void HideNativeUi()
     if (GetCapture() == g_hwnd) ReleaseCapture();
     if (IsSpotlightMode())
     {
+        g_materialRenderer.Hide();
         HideSpotlightImmediately();
     }
     else
@@ -5579,58 +5754,6 @@ void DrawRoundedRectDirect(ID2D1DCRenderTarget* target, const RECT& rect, COLORR
     SafeRelease(strokeBrush);
 }
 
-D2D1_RECT_F SpotlightBackdropSourceRectForLens(const RECT& rect, float magnification, float shiftX, float shiftY)
-{
-    const float dstWidth = static_cast<float>(std::max(1L, rect.right - rect.left));
-    const float dstHeight = static_cast<float>(std::max(1L, rect.bottom - rect.top));
-    const float sourceWidth = std::max(1.0f, std::min(static_cast<float>(g_spotlightBackdrop.width), dstWidth / std::max(1.0f, magnification)));
-    const float sourceHeight = std::max(1.0f, std::min(static_cast<float>(g_spotlightBackdrop.height), dstHeight / std::max(1.0f, magnification)));
-    const float centerX = (static_cast<float>(rect.left + rect.right) * 0.5f) + shiftX;
-    const float centerY = (static_cast<float>(rect.top + rect.bottom) * 0.5f) + shiftY;
-    const float maxLeft = std::max(0.0f, static_cast<float>(g_spotlightBackdrop.width) - sourceWidth);
-    const float maxTop = std::max(0.0f, static_cast<float>(g_spotlightBackdrop.height) - sourceHeight);
-    const float left = std::clamp(centerX - sourceWidth * 0.5f, 0.0f, maxLeft);
-    const float top = std::clamp(centerY - sourceHeight * 0.5f, 0.0f, maxTop);
-    return D2D1::RectF(left, top, left + sourceWidth, top + sourceHeight);
-}
-
-RECT SpotlightBackdropSourceRectForLensGdi(const RECT& rect, float magnification, int shiftX, int shiftY)
-{
-    const int dstWidth = std::max<LONG>(1, rect.right - rect.left);
-    const int dstHeight = std::max<LONG>(1, rect.bottom - rect.top);
-    const int sourceWidth = std::max(1, std::min(g_spotlightBackdrop.width, static_cast<int>(std::round(dstWidth / std::max(1.0f, magnification)))));
-    const int sourceHeight = std::max(1, std::min(g_spotlightBackdrop.height, static_cast<int>(std::round(dstHeight / std::max(1.0f, magnification)))));
-    const int centerX = ((rect.left + rect.right) / 2) + shiftX;
-    const int centerY = ((rect.top + rect.bottom) / 2) + shiftY;
-    const int maxLeft = std::max(0, g_spotlightBackdrop.width - sourceWidth);
-    const int maxTop = std::max(0, g_spotlightBackdrop.height - sourceHeight);
-    const int left = std::clamp(centerX - (sourceWidth / 2), 0, maxLeft);
-    const int top = std::clamp(centerY - (sourceHeight / 2), 0, maxTop);
-    return { left, top, left + sourceWidth, top + sourceHeight };
-}
-
-D2D1_RECT_F SpotlightBackdropAlignedSourceRect(const RECT& rect, float offsetX = 0.0f, float offsetY = 0.0f)
-{
-    const float width = static_cast<float>(std::max(1L, rect.right - rect.left));
-    const float height = static_cast<float>(std::max(1L, rect.bottom - rect.top));
-    const float maxLeft = std::max(0.0f, static_cast<float>(g_spotlightBackdrop.width) - width);
-    const float maxTop = std::max(0.0f, static_cast<float>(g_spotlightBackdrop.height) - height);
-    const float left = std::clamp(static_cast<float>(rect.left) + offsetX, 0.0f, maxLeft);
-    const float top = std::clamp(static_cast<float>(rect.top) + offsetY, 0.0f, maxTop);
-    return D2D1::RectF(left, top, left + width, top + height);
-}
-
-RECT SpotlightBackdropAlignedSourceRectGdi(const RECT& rect, int offsetX = 0, int offsetY = 0)
-{
-    const int width = std::max<LONG>(1, rect.right - rect.left);
-    const int height = std::max<LONG>(1, rect.bottom - rect.top);
-    const int maxLeft = std::max(0, g_spotlightBackdrop.width - width);
-    const int maxTop = std::max(0, g_spotlightBackdrop.height - height);
-    const int left = std::clamp(static_cast<int>(rect.left) + offsetX, 0, maxLeft);
-    const int top = std::clamp(static_cast<int>(rect.top) + offsetY, 0, maxTop);
-    return { left, top, left + width, top + height };
-}
-
 ID2D1Bitmap* GetSpotlightBackdropD2dBitmap(ID2D1DCRenderTarget* target)
 {
     if (!target || !g_spotlightBackdrop.bits || g_spotlightBackdrop.width <= 0 || g_spotlightBackdrop.height <= 0)
@@ -5653,77 +5776,6 @@ ID2D1Bitmap* GetSpotlightBackdropD2dBitmap(ID2D1DCRenderTarget* target)
         bitmapProps,
         &g_spotlightBackdropD2dBitmap);
     return g_spotlightBackdropD2dBitmap;
-}
-
-void DrawRoundedBackdropBitmap(ID2D1DCRenderTarget* target, ID2D1Bitmap* bitmap, const D2D1_ROUNDED_RECT& rounded, const RECT& dest, const D2D1_RECT_F& source, float opacity)
-{
-    if (!target || !bitmap || !g_d2dFactory) return;
-
-    ID2D1RoundedRectangleGeometry* mask = nullptr;
-    ID2D1Layer* layer = nullptr;
-    if (SUCCEEDED(g_d2dFactory->CreateRoundedRectangleGeometry(rounded, &mask))
-        && SUCCEEDED(target->CreateLayer(nullptr, &layer))
-        && mask
-        && layer)
-    {
-        target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), mask), layer);
-        const auto destRect = D2DRect(dest);
-        target->DrawBitmap(bitmap, &destRect, opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &source);
-        target->PopLayer();
-    }
-
-    SafeRelease(layer);
-    SafeRelease(mask);
-}
-
-void DrawAlignedSearchBackdrop(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, bool active)
-{
-    ID2D1Bitmap* bitmap = GetSpotlightBackdropD2dBitmap(target);
-    if (!bitmap) return;
-
-    DrawRoundedBackdropBitmap(
-        target,
-        bitmap,
-        rounded,
-        rect,
-        SpotlightBackdropAlignedSourceRect(rect),
-        active ? 0.035f : 0.020f);
-}
-
-void DrawAlignedSearchBackdrop(HDC dc, const RECT& rect, bool active)
-{
-    if (!dc || !g_spotlightBackdrop.dc || g_spotlightBackdrop.width <= 0 || g_spotlightBackdrop.height <= 0)
-    {
-        return;
-    }
-
-    const int saved = SaveDC(dc);
-    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, ScaleDip(SpotlightSearchCornerRadius) * 2, ScaleDip(SpotlightSearchCornerRadius) * 2);
-    if (clip)
-    {
-        SelectClipRgn(dc, clip);
-    }
-
-    const RECT source = SpotlightBackdropAlignedSourceRectGdi(rect);
-    BLENDFUNCTION blend = { AC_SRC_OVER, 0, static_cast<BYTE>(active ? 9 : 5), 0 };
-    AlphaBlend(
-        dc,
-        rect.left,
-        rect.top,
-        rect.right - rect.left,
-        rect.bottom - rect.top,
-        g_spotlightBackdrop.dc,
-        source.left,
-        source.top,
-        source.right - source.left,
-        source.bottom - source.top,
-        blend);
-
-    if (clip)
-    {
-        DeleteObject(clip);
-    }
-    RestoreDC(dc, saved);
 }
 
 void DrawSearchLiquidMaterialWash(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, bool active)
@@ -5819,99 +5871,6 @@ void DrawSearchLiquidMaterialWash(HDC dc, const RECT& rect, bool active)
     SelectObject(washDc, oldBitmap);
     DeleteObject(washBitmap);
     DeleteDC(washDc);
-}
-
-void DrawSearchEdgeRefraction(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, bool active)
-{
-    ID2D1Bitmap* bitmap = GetSpotlightBackdropD2dBitmap(target);
-    if (!bitmap || !g_d2dFactory) return;
-
-    const int rectHeight = static_cast<int>(rect.bottom - rect.top);
-    const int edge = std::max(12, std::min(20, rectHeight / 3));
-    const float opacity = active ? 0.18f : 0.12f;
-    const float sideShift = active ? 2.0f : 1.0f;
-
-    ID2D1RoundedRectangleGeometry* mask = nullptr;
-    ID2D1Layer* layer = nullptr;
-    if (SUCCEEDED(g_d2dFactory->CreateRoundedRectangleGeometry(rounded, &mask))
-        && SUCCEEDED(target->CreateLayer(nullptr, &layer))
-        && mask
-        && layer)
-    {
-        target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), mask), layer);
-
-        const RECT leftBand = { rect.left, rect.top, rect.left + edge, rect.bottom };
-        const RECT rightBand = { rect.right - edge, rect.top, rect.right, rect.bottom };
-
-        auto drawBand = [&](const RECT& band, float offsetX, float offsetY, float bandOpacity) {
-            if (band.right <= band.left || band.bottom <= band.top) return;
-            const auto source = SpotlightBackdropAlignedSourceRect(band, offsetX, offsetY);
-            const auto destRect = D2DRect(band);
-            target->DrawBitmap(bitmap, &destRect, bandOpacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &source);
-        };
-
-        drawBand(leftBand, -sideShift, 0.0f, opacity * 0.76f);
-        drawBand(rightBand, sideShift, 0.0f, opacity * 0.76f);
-
-        target->PopLayer();
-    }
-
-    SafeRelease(layer);
-    SafeRelease(mask);
-}
-
-void DrawSearchEdgeRefraction(HDC dc, const RECT& rect, bool active)
-{
-    if (!dc || !g_spotlightBackdrop.dc || g_spotlightBackdrop.width <= 0 || g_spotlightBackdrop.height <= 0)
-    {
-        return;
-    }
-
-    const int saved = SaveDC(dc);
-    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, ScaleDip(SpotlightSearchCornerRadius) * 2, ScaleDip(SpotlightSearchCornerRadius) * 2);
-    if (clip)
-    {
-        SelectClipRgn(dc, clip);
-    }
-
-    const int rectHeight = static_cast<int>(rect.bottom - rect.top);
-    const int edge = std::max(12, std::min(20, rectHeight / 3));
-    const int sideShift = active ? 2 : 1;
-    const BYTE alpha = static_cast<BYTE>(active ? 44 : 30);
-    BLENDFUNCTION blend = { AC_SRC_OVER, 0, alpha, 0 };
-    const RECT bands[] = {
-        { rect.left, rect.top, rect.left + edge, rect.bottom },
-        { rect.right - edge, rect.top, rect.right, rect.bottom }
-    };
-    const POINT offsets[] = {
-        { -sideShift, 0 },
-        { sideShift, 0 }
-    };
-
-    for (int i = 0; i < 2; ++i)
-    {
-        const RECT& band = bands[i];
-        if (band.right <= band.left || band.bottom <= band.top) continue;
-        const RECT source = SpotlightBackdropAlignedSourceRectGdi(band, offsets[i].x, offsets[i].y);
-        AlphaBlend(
-            dc,
-            band.left,
-            band.top,
-            band.right - band.left,
-            band.bottom - band.top,
-            g_spotlightBackdrop.dc,
-            source.left,
-            source.top,
-            source.right - source.left,
-            source.bottom - source.top,
-            blend);
-    }
-
-    if (clip)
-    {
-        DeleteObject(clip);
-    }
-    RestoreDC(dc, saved);
 }
 
 void DrawSearchHorizontalGlassRim(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, bool active)
@@ -6048,91 +6007,39 @@ void DrawSearchFocusGlow(HDC dc, const RECT& rect, bool active)
     DeleteObject(haloPen);
 }
 
-void DrawLiquidGlassFocusLens(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, float magnification, float opacity, float shiftX, float shiftY)
-{
-    ID2D1Bitmap* bitmap = GetSpotlightBackdropD2dBitmap(target);
-    if (!bitmap)
-    {
-        return;
-    }
-
-    ID2D1RoundedRectangleGeometry* mask = nullptr;
-    ID2D1Layer* layer = nullptr;
-    if (g_d2dFactory
-        && SUCCEEDED(g_d2dFactory->CreateRoundedRectangleGeometry(rounded, &mask))
-        && SUCCEEDED(target->CreateLayer(nullptr, &layer))
-        && mask
-        && layer)
-    {
-        const auto sourceRect = SpotlightBackdropSourceRectForLens(rect, magnification, shiftX, shiftY);
-        const auto destRect = D2DRect(rect);
-        target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), mask), layer);
-        target->DrawBitmap(bitmap, &destRect, opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &sourceRect);
-        target->PopLayer();
-    }
-
-    SafeRelease(layer);
-    SafeRelease(mask);
-}
-
-void DrawLiquidGlassFocusLens(HDC dc, const RECT& rect, int radius, float magnification, int shiftX, int shiftY)
-{
-    if (!dc || !g_spotlightBackdrop.dc || g_spotlightBackdrop.width <= 0 || g_spotlightBackdrop.height <= 0)
-    {
-        return;
-    }
-
-    const int saved = SaveDC(dc);
-    HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1, radius * 2, radius * 2);
-    if (clip)
-    {
-        SelectClipRgn(dc, clip);
-    }
-
-    const RECT source = SpotlightBackdropSourceRectForLensGdi(rect, magnification, shiftX, shiftY);
-    const int previousMode = SetStretchBltMode(dc, HALFTONE);
-    SetBrushOrgEx(dc, 0, 0, nullptr);
-    StretchBlt(
-        dc,
-        rect.left,
-        rect.top,
-        rect.right - rect.left,
-        rect.bottom - rect.top,
-        g_spotlightBackdrop.dc,
-        source.left,
-        source.top,
-        source.right - source.left,
-        source.bottom - source.top,
-        SRCCOPY);
-    SetStretchBltMode(dc, previousMode);
-
-    if (clip)
-    {
-        DeleteObject(clip);
-    }
-    RestoreDC(dc, saved);
-}
-
 void DrawSearchFocusLens(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, bool active)
 {
-    DrawAlignedSearchBackdrop(target, rounded, rect, active);
-    DrawSearchEdgeRefraction(target, rounded, rect, active);
+    ID2D1SolidColorBrush* shadow = nullptr;
+    ID2D1SolidColorBrush* fill = nullptr;
+    ID2D1SolidColorBrush* rim = nullptr;
+    target->CreateSolidColorBrush(D2DColorAlpha(RGB(4, 12, 24), active ? 0.20f : 0.13f), &shadow);
+    target->CreateSolidColorBrush(D2DColorAlpha(RGB(210, 238, 255), active ? 0.16f : 0.10f), &fill);
+    target->CreateSolidColorBrush(D2DColorAlpha(RGB(226, 248, 255), active ? 0.50f : 0.28f), &rim);
+    if (shadow)
+    {
+        auto shadowBounds = rounded;
+        shadowBounds.rect.top += 2.0f;
+        shadowBounds.rect.bottom += 2.0f;
+        target->FillRoundedRectangle(shadowBounds, shadow);
+    }
+    if (fill) target->FillRoundedRectangle(rounded, fill);
+    if (rim) target->DrawRoundedRectangle(rounded, rim, active ? 1.2f : 0.9f);
+    SafeRelease(rim);
+    SafeRelease(fill);
+    SafeRelease(shadow);
 }
 
 void DrawSearchFocusLens(HDC dc, const RECT& rect, bool active)
 {
-    DrawAlignedSearchBackdrop(dc, rect, active);
-    DrawSearchEdgeRefraction(dc, rect, active);
-}
-
-void DrawFocusedTileLens(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect)
-{
-    DrawLiquidGlassFocusLens(target, rounded, rect, 1.0f, 0.30f, 0.0f, 0.0f);
-}
-
-void DrawFocusedTileLens(HDC dc, const RECT& rect)
-{
-    DrawLiquidGlassFocusLens(dc, rect, 14, 1.0f, 0, 0);
+    RECT shadowRect = rect;
+    OffsetRect(&shadowRect, 0, ScaleDip(2));
+    DrawRoundedRect(dc, shadowRect, RGB(28, 42, 58), RGB(28, 42, 58), ScaleDip(SpotlightSearchCornerRadius));
+    DrawRoundedRect(
+        dc,
+        rect,
+        active ? RGB(198, 230, 250) : RGB(172, 204, 226),
+        active ? RGB(232, 250, 255) : RGB(198, 230, 246),
+        ScaleDip(SpotlightSearchCornerRadius));
 }
 
 void DrawSearchLiquidSpecular(ID2D1DCRenderTarget* target, const D2D1_ROUNDED_RECT& rounded, const RECT& rect, bool active)
@@ -6337,7 +6244,6 @@ void DrawAppTileSurface(ID2D1DCRenderTarget* target, const RECT& rect, TileVisua
     }
 
     const auto rounded = D2D1::RoundedRect(D2DRect(rect), 14.0f, 14.0f);
-    DrawFocusedTileLens(target, rounded, rect);
 
     ID2D1GradientStopCollection* fillStops = nullptr;
     ID2D1LinearGradientBrush* fillBrush = nullptr;
@@ -6456,7 +6362,6 @@ void DrawAppTileSurface(HDC dc, const RECT& rect, TileVisualState state)
     }
     if (state == TileVisualState::KeyboardFocus)
     {
-        DrawFocusedTileLens(dc, rect);
         DrawRoundedRect(dc, rect, RGB(42, 82, 118), RGB(130, 190, 255), 12);
         return;
     }
@@ -7602,6 +7507,15 @@ void RequestSearchRepaint(HWND hwnd, bool erase)
 {
     if (IsSpotlightMode() && IsWindowVisible(hwnd))
     {
+        SubmitMaterialSceneIfVisible();
+        const auto diagnostics = g_materialRenderer.SnapshotDiagnostics();
+        if (diagnostics.path == llp::material::RenderPath::HighFidelity
+            && (diagnostics.state == llp::material::LifecycleState::Live
+                || diagnostics.state == llp::material::LifecycleState::FrozenEvidence))
+        {
+            InvalidateRect(hwnd, nullptr, erase ? TRUE : FALSE);
+            return;
+        }
         g_spotlightLayerDirty = true;
         PaintSpotlightLayeredWindow(true);
         return;
@@ -7614,6 +7528,16 @@ void PaintWindow(HWND hwnd)
 {
     if (IsSpotlightMode())
     {
+        const auto diagnostics = g_materialRenderer.SnapshotDiagnostics();
+        if (diagnostics.path == llp::material::RenderPath::HighFidelity
+            && (diagnostics.state == llp::material::LifecycleState::Live
+                || diagnostics.state == llp::material::LifecycleState::FrozenEvidence))
+        {
+            PAINTSTRUCT ps = {};
+            BeginPaint(hwnd, &ps);
+            EndPaint(hwnd, &ps);
+            return;
+        }
         PAINTSTRUCT ps = {};
         BeginPaint(hwnd, &ps);
         EndPaint(hwnd, &ps);
@@ -8299,6 +8223,10 @@ bool ApplySettingsFromWindow(HWND hwnd)
         g_hotkeyRegistered = true;
     }
     g_settings = candidate;
+    if (candidate.iconSize != previous.iconSize)
+    {
+        g_materialIconRasters.clear();
+    }
     g_settingsStatus = L"Settings saved. Active hotkey: " + g_settings.hotkey + L".";
     AppendStartupLog(L"settings-apply", true, g_settingsStatus);
     ReloadData();
@@ -9087,9 +9015,25 @@ void AccessibilitySelectionChanged(void*)
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
-    if (message == WmMaterialProbeStatus)
+    if (message == WmMaterialRendererStatus)
     {
         WriteMaterialProbeState(hwnd);
+        if (IsSpotlightMode() && IsWindowVisible(hwnd))
+        {
+            if (g_spotlightFlowProbe.active) WriteSpotlightFlowReadyState();
+            const auto diagnostics = g_materialRenderer.SnapshotDiagnostics();
+            if (diagnostics.path == llp::material::RenderPath::HighFidelity
+                && (diagnostics.state == llp::material::LifecycleState::Live
+                    || diagnostics.state == llp::material::LifecycleState::FrozenEvidence))
+            {
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            else
+            {
+                g_spotlightLayerDirty = true;
+                PaintSpotlightLayeredWindow(true);
+            }
+        }
         return 0;
     }
     if (message == WmMaterialProbeControl)
@@ -9257,7 +9201,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             {
                 SetOrganizationFeedback(L"Adaptive status announced", false, true, 8000);
             }
-            if (IsSpotlightMode()) PaintSpotlightLayeredWindow(true);
+            if (IsSpotlightMode()) RequestSearchRepaint(hwnd, false);
             else RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
             WriteSpotlightFlowReadyState();
         }
@@ -9289,27 +9233,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             suggested ? suggested->right - suggested->left : 1,
             suggested ? suggested->bottom - suggested->top : 1);
         ApplyGlassBackdrop();
-        if (IsSpotlightMode() && !g_adaptivePolicy.solidSurface && IsWindowVisible(hwnd))
-        {
-            RECT windowRect = {};
-            GetWindowRect(hwnd, &windowRect);
-            CaptureSpotlightBackdrop(windowRect);
-        }
         ClampScroll();
-        InvalidateRect(hwnd, nullptr, TRUE);
+        if (IsSpotlightMode() && IsWindowVisible(hwnd)) RebuildVisibleMaterialRenderer();
+        RequestSearchRepaint(hwnd, true);
         return 0;
     }
     case WM_DISPLAYCHANGE:
         if (IsWindowVisible(hwnd))
         {
             PositionWindow();
-            if (IsSpotlightMode() && !g_adaptivePolicy.solidSurface)
-            {
-                RECT windowRect = {};
-                GetWindowRect(hwnd, &windowRect);
-                CaptureSpotlightBackdrop(windowRect);
-            }
-            InvalidateRect(hwnd, nullptr, TRUE);
+            if (IsSpotlightMode()) RebuildVisibleMaterialRenderer();
+            RequestSearchRepaint(hwnd, true);
         }
         return 0;
     case WM_THEMECHANGED:
@@ -9318,7 +9252,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         RefreshAdaptiveEnvironment();
         ApplyGlassBackdrop();
         if (IsWindowVisible(hwnd)) PositionWindow();
-        InvalidateRect(hwnd, nullptr, TRUE);
+        if (IsSpotlightMode() && IsWindowVisible(hwnd)) RebuildVisibleMaterialRenderer();
+        RequestSearchRepaint(hwnd, true);
         return 0;
     case WM_TIMER:
         if (wParam == OrganizationFeedbackTimerId)
@@ -9955,6 +9890,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (!g_textInputProbePath.empty()) WriteFileUtf8(g_textInputProbePath, BuildTextInputProbeJson());
         if (g_spotlightFlowProbe.active) WriteFileUtf8(g_spotlightFlowProbe.outputPath, BuildSpotlightFlowProbeJson());
         if (g_launchpadFlowProbe.active) WriteFileUtf8(g_launchpadFlowProbe.outputPath, BuildLaunchpadFlowProbeJson());
+        g_materialRenderer.Hide();
+        g_materialRenderer.Shutdown();
         g_searchAccessibility.Shutdown();
         g_shellBroker.Stop();
         MSG pendingBrokerResult = {};
@@ -10000,13 +9937,14 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     g_instance = instance;
     const bool materialProbeArgument = CommandLineHasArgument(L"--material-probe-file");
     const bool materialFailureArgument = CommandLineHasArgument(L"--material-force-failure");
+    const bool spotlightFlowArgument = CommandLineHasArgument(L"--spotlight-flow-probe-file");
     const bool anyMaterialTestArgument = materialProbeArgument || materialFailureArgument;
     const bool developmentBuild = CompareStringOrdinal(
         LLP_BUILD_CHANNEL_WIDE, -1, L"development", -1, TRUE) == CSTR_EQUAL;
     if (anyMaterialTestArgument && !developmentBuild) return 2;
     const std::wstring materialProbePath = CommandLineValue(L"--material-probe-file");
     const std::wstring materialFailureText = CommandLineValue(L"--material-force-failure");
-    if (anyMaterialTestArgument && materialProbePath.empty()) return 2;
+    if (anyMaterialTestArgument && materialProbePath.empty() && !spotlightFlowArgument) return 2;
     llp::material::FailureReason materialForcedFailure = llp::material::FailureReason::None;
     if (materialFailureArgument)
     {
@@ -10027,7 +9965,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
             return 2;
         }
     }
-    const bool materialProbeActive = anyMaterialTestArgument;
+    const bool materialProbeActive = materialProbeArgument;
     std::unique_ptr<llp::material::MaterialRenderer> materialProbeRenderer;
     MaterialProbeHostState materialProbeState;
     g_startupLogPath = CommandLineValue(L"--diagnostics-log-file");
@@ -10288,7 +10226,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         request.dpi = static_cast<int>(g_windowDpi);
         request.policy = g_adaptivePolicy;
         request.forcedFailure = materialForcedFailure;
-        request.statusMessage = WmMaterialProbeStatus;
+        request.statusMessage = WmMaterialRendererStatus;
         materialProbeRenderer->Show(std::move(request));
     }
 

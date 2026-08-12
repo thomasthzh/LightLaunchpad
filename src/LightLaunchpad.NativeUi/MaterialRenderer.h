@@ -178,6 +178,7 @@ public:
     void Submit(std::shared_ptr<const SceneSnapshot> scene);
     void Rebuild(ShowRequest request);
     void Hide();
+    void Shutdown();
     void FreezeEvidence();
     Diagnostics SnapshotDiagnostics() const;
     bool WaitUntilHiddenForTest(std::uint32_t timeoutMs) const;
