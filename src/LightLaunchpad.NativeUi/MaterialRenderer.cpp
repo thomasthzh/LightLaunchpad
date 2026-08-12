@@ -243,19 +243,6 @@ struct MaterialFramePlan
     std::vector<ContrastGuardCommand> contrastGuards;
 };
 
-struct FocusOverlayCommand
-{
-    llp::geometry::Rect bounds;
-    float displacementXDip = 0.0f;
-    float displacementYDip = 0.0f;
-    float scale = 1.0f;
-};
-
-struct OverlayFramePlan
-{
-    std::vector<FocusOverlayCommand> focusedItems;
-};
-
 bool IsValidRect(llp::geometry::Rect rect)
 {
     return rect.right > rect.left && rect.bottom > rect.top;
@@ -321,19 +308,6 @@ MaterialFramePlan BuildMaterialFramePlan(
     return plan;
 }
 
-OverlayFramePlan BuildOverlayFramePlan(const SceneSnapshot& scene)
-{
-    OverlayFramePlan plan;
-    for (const auto& item : scene.items)
-    {
-        if (item.focused && IsValidRect(item.bounds))
-        {
-            plan.focusedItems.push_back({ item.bounds, 0.0f, 0.0f, 1.0f });
-        }
-    }
-    return plan;
-}
-
 class CompositionBackend
 {
 public:
@@ -352,9 +326,7 @@ public:
         const SceneSnapshot& scene,
         const MaterialTone& tone,
         const MaterialFramePlan& plan) = 0;
-    virtual FailureReason DrawOverlay(
-        const SceneSnapshot& scene,
-        const OverlayFramePlan& plan) = 0;
+    virtual FailureReason DrawOverlay(const SceneSnapshot& scene) = 0;
     virtual FailureReason DrawContent(const SceneSnapshot& scene) = 0;
     virtual FailureReason Commit() = 0;
 };
@@ -399,10 +371,9 @@ FailureReason ComposeUnifiedFrame(
     const MaterialTone tone = ResolveMaterialTone(
         backend.RelativeLuminance(), scene.policy.darkMode);
     const MaterialFramePlan materialPlan = BuildMaterialFramePlan(scene, tone);
-    const OverlayFramePlan overlayPlan = BuildOverlayFramePlan(scene);
     failure = backend.DrawMaterial(scene, tone, materialPlan);
     if (failure != FailureReason::None) return failure;
-    failure = backend.DrawOverlay(scene, overlayPlan);
+    failure = backend.DrawOverlay(scene);
     if (failure != FailureReason::None) return failure;
     failure = backend.DrawContent(scene);
     if (failure != FailureReason::None) return failure;
@@ -1162,9 +1133,7 @@ public:
         });
     }
 
-    FailureReason DrawOverlay(
-        const SceneSnapshot& scene,
-        const OverlayFramePlan& plan) override
+    FailureReason DrawOverlay(const SceneSnapshot& scene) override
     {
         return DrawSurface(1, [&](ID2D1DeviceContext* context) {
             const auto& search = scene.metrics.search;
@@ -1177,18 +1146,11 @@ public:
             context->CreateSolidColorBrush(D2D1::ColorF(1.0f, scene.search.active ? 0.55f : 0.28f), edge.Put());
             if (edge.Get()) context->DrawRoundedRectangle(
                 D2D1::RoundedRect(D2DRect(search), searchRadius, searchRadius), edge.Get(), 1.0f);
-            const float pixelsPerDip = static_cast<float>(std::max(1, scene.metrics.dpi)) / 96.0f;
-            for (const auto& focused : plan.focusedItems)
+            for (const auto& item : scene.items)
             {
-                const float centerX = (focused.bounds.left + focused.bounds.right) * 0.5f
-                    + focused.displacementXDip * pixelsPerDip;
-                const float centerY = (focused.bounds.top + focused.bounds.bottom) * 0.5f
-                    + focused.displacementYDip * pixelsPerDip;
-                const float halfWidth = (focused.bounds.right - focused.bounds.left) * 0.5f * focused.scale;
-                const float halfHeight = (focused.bounds.bottom - focused.bounds.top) * 0.5f * focused.scale;
+                if (!item.focused || !IsValidRect(item.bounds)) continue;
                 const D2D1_ROUNDED_RECT tile = D2D1::RoundedRect(
-                    D2D1::RectF(centerX - halfWidth, centerY - halfHeight,
-                        centerX + halfWidth, centerY + halfHeight),
+                    D2DRect(item.bounds),
                     18.0f, 18.0f);
                 ComOwner<ID2D1SolidColorBrush> focusShadow;
                 context->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.20f), focusShadow.Put());
@@ -2395,8 +2357,6 @@ enum MaterialCompositionValue : std::size_t
     CompositionStagingBufferCount,
     CompositionDoNotWaitMaps,
     CompositionMinimumReadbackIntervalMs,
-    CompositionFocusedDisplacementMilli,
-    CompositionFocusedScaleDeltaMilli,
     CompositionCopiedBgraIcons,
     CompositionHiconReferences,
     CompositionPresentedAfterDesktop,
@@ -2727,21 +2687,9 @@ public:
         return FailureReason::None;
     }
 
-    FailureReason DrawOverlay(
-        const SceneSnapshot&,
-        const OverlayFramePlan& plan) override
+    FailureReason DrawOverlay(const SceneSnapshot&) override
     {
         commands.push_back(FrameCommand::OverlayPass);
-        for (const auto& item : plan.focusedItems)
-        {
-            focusedDisplacementMilli = std::max(
-                focusedDisplacementMilli,
-                static_cast<int>(std::lround(std::hypot(
-                    item.displacementXDip, item.displacementYDip) * 1000.0f)));
-            focusedScaleDeltaMilli = std::max(
-                focusedScaleDeltaMilli,
-                static_cast<int>(std::lround(std::abs(item.scale - 1.0f) * 1000.0f)));
-        }
         return FailureReason::None;
     }
 
@@ -2793,8 +2741,6 @@ public:
     int stagingBufferCount = 0;
     int doNotWaitMaps = 0;
     int minimumIntervalMs = 0;
-    int focusedDisplacementMilli = 0;
-    int focusedScaleDeltaMilli = 0;
     int copiedBgraIcons = 0;
     int hiconReferences = 0;
     int presentedFrames = 0;
@@ -2997,8 +2943,6 @@ extern "C" int LLP_MaterialRunFakeCompositionScenario(
     values[CompositionStagingBufferCount] = recorded.stagingBufferCount;
     values[CompositionDoNotWaitMaps] = recorded.doNotWaitMaps;
     values[CompositionMinimumReadbackIntervalMs] = recorded.minimumIntervalMs;
-    values[CompositionFocusedDisplacementMilli] = recorded.focusedDisplacementMilli;
-    values[CompositionFocusedScaleDeltaMilli] = recorded.focusedScaleDeltaMilli;
     values[CompositionCopiedBgraIcons] = recorded.copiedBgraIcons;
     values[CompositionHiconReferences] = recorded.hiconReferences;
 

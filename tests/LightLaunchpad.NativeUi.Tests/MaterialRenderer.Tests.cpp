@@ -137,8 +137,6 @@ enum MaterialCompositionValue : std::size_t
     CompositionStagingBufferCount,
     CompositionDoNotWaitMaps,
     CompositionMinimumReadbackIntervalMs,
-    CompositionFocusedDisplacementMilli,
-    CompositionFocusedScaleDeltaMilli,
     CompositionCopiedBgraIcons,
     CompositionHiconReferences,
     CompositionPresentedAfterDesktop,
@@ -783,9 +781,7 @@ bool SatisfiesOpticalMaterialContract(
         && values[CompositionClarityEdgeOpacityMilli] <= 250
         && values[CompositionLocalContrastGuards] == 2
         && values[CompositionRimPasses] == 1
-        && values[CompositionShadowPasses] == 1
-        && values[CompositionFocusedDisplacementMilli] == 0
-        && values[CompositionFocusedScaleDeltaMilli] == 0;
+        && values[CompositionShadowPasses] == 1;
 }
 
 void TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit()
@@ -832,7 +828,7 @@ void TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit()
     Pass("MaterialRenderer_UnifiedCompositionUsesThreeIsolatedLayersAndOneCommit");
 }
 
-void TestCompositionContractRejectsDiscardedAndTransformedCommands()
+void TestCompositionContractRejectsDiscardedCommands()
 {
     const auto valid = RunCompositionScenario();
     auto discardedSearch = valid;
@@ -847,12 +843,7 @@ void TestCompositionContractRejectsDiscardedAndTransformedCommands()
     discardedGuards[CompositionLocalContrastGuards] = 0;
     Require(!SatisfiesOpticalMaterialContract(discardedGuards),
         "The composition test accepted a backend that discarded local contrast guards.");
-    auto transformedFocus = valid;
-    transformedFocus[CompositionFocusedDisplacementMilli] = 750;
-    transformedFocus[CompositionFocusedScaleDeltaMilli] = 100;
-    Require(!SatisfiesOpticalMaterialContract(transformedFocus),
-        "The composition test accepted a focused tile displacement or scale transform.");
-    Pass("MaterialRenderer_CompositionContractRejectsDiscardedAndTransformedCommands");
+    Pass("MaterialRenderer_CompositionContractRejectsDiscardedCommands");
 }
 
 void TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport()
@@ -1101,7 +1092,7 @@ int main()
         TestRendererImmediateShowHideStress();
         TestPrivateFakeAbiIsExplicitAndBounded();
         TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit();
-        TestCompositionContractRejectsDiscardedAndTransformedCommands();
+        TestCompositionContractRejectsDiscardedCommands();
         TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport();
         TestFirstFrameDeadlineAndTimeoutDoNotRedraw();
         TestFramesReleaseBeforeReacquireRebuildAndHide();
