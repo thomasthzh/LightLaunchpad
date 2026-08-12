@@ -214,6 +214,32 @@ enum class FrameCommand : std::int64_t
     Commit = 6
 };
 
+enum class SearchEdgeOperation : std::int64_t
+{
+    SetAtlasBeforeClip = 1,
+    PushClip = 2,
+    SetDisplacedTransform = 3,
+    DrawImage = 4,
+    PopClip = 5,
+    RestoreAtlas = 6
+};
+
+enum class SearchEdgeTransformState : std::int64_t
+{
+    Atlas = 1,
+    Displaced = 2
+};
+
+struct SearchEdgeCommand
+{
+    SearchEdgeOperation operation;
+    std::size_t edgeIndex;
+    SearchEdgeTransformState transformState;
+    std::size_t activeClipEdge;
+    D2D1_RECT_F clip;
+    D2D1_MATRIX_3X2_F transform;
+};
+
 struct SearchOpticalPoint
 {
     float destinationXDip = 0.0f;
@@ -513,6 +539,74 @@ D2D1_POINT_2F TransformPoint(D2D1_POINT_2F point, const D2D1_MATRIX_3X2_F& trans
     return D2D1::Point2F(
         point.x * transform._11 + point.y * transform._21 + transform._31,
         point.x * transform._12 + point.y * transform._22 + transform._32);
+}
+
+template<typename Submit>
+void SubmitSearchEdgeCommands(
+    const MaterialFramePlan& plan,
+    int dpi,
+    const D2D1_MATRIX_3X2_F& cropTransform,
+    const D2D1_MATRIX_3X2_F& atlasTransform,
+    Submit&& submit)
+{
+    const float edgeBandPx = std::max(
+        1.0f, 13.0f * static_cast<float>(std::max(1, dpi)) / 96.0f);
+    const std::array<D2D1_RECT_F, 4> edgeBands = { {
+        D2D1::RectF(
+            static_cast<float>(plan.searchBoundsPx.left),
+            static_cast<float>(plan.searchBoundsPx.top),
+            std::min(static_cast<float>(plan.searchBoundsPx.right),
+                static_cast<float>(plan.searchBoundsPx.left) + edgeBandPx),
+            static_cast<float>(plan.searchBoundsPx.bottom)),
+        D2D1::RectF(
+            std::max(static_cast<float>(plan.searchBoundsPx.left),
+                static_cast<float>(plan.searchBoundsPx.right) - edgeBandPx),
+            static_cast<float>(plan.searchBoundsPx.top),
+            static_cast<float>(plan.searchBoundsPx.right),
+            static_cast<float>(plan.searchBoundsPx.bottom)),
+        D2D1::RectF(
+            static_cast<float>(plan.searchBoundsPx.left),
+            static_cast<float>(plan.searchBoundsPx.top),
+            static_cast<float>(plan.searchBoundsPx.right),
+            std::min(static_cast<float>(plan.searchBoundsPx.bottom),
+                static_cast<float>(plan.searchBoundsPx.top) + edgeBandPx)),
+        D2D1::RectF(
+            static_cast<float>(plan.searchBoundsPx.left),
+            std::max(static_cast<float>(plan.searchBoundsPx.top),
+                static_cast<float>(plan.searchBoundsPx.bottom) - edgeBandPx),
+            static_cast<float>(plan.searchBoundsPx.right),
+            static_cast<float>(plan.searchBoundsPx.bottom))
+    } };
+    const float pixelsPerDip = static_cast<float>(std::max(1, dpi)) / 96.0f;
+    for (std::size_t edge = 0; edge < edgeBands.size(); ++edge)
+    {
+        const auto& point = plan.searchOpticalPoints[edge + 1];
+        const float deltaX = (point.sample.sourceXDip - point.destinationXDip) * pixelsPerDip;
+        const float deltaY = (point.sample.sourceYDip - point.destinationYDip) * pixelsPerDip;
+        const D2D1_MATRIX_3X2_F displacedTransform = cropTransform
+            * D2D1::Matrix3x2F::Translation(-deltaX, -deltaY)
+            * atlasTransform;
+        const auto emit = [&](SearchEdgeOperation operation,
+                              SearchEdgeTransformState transformState,
+                              std::size_t activeClipEdge,
+                              const D2D1_MATRIX_3X2_F& transform) {
+            submit(SearchEdgeCommand{
+                operation, edge, transformState, activeClipEdge, edgeBands[edge], transform
+            });
+        };
+        emit(SearchEdgeOperation::SetAtlasBeforeClip,
+            SearchEdgeTransformState::Atlas, 0, atlasTransform);
+        emit(SearchEdgeOperation::PushClip,
+            SearchEdgeTransformState::Atlas, edge + 1, atlasTransform);
+        emit(SearchEdgeOperation::SetDisplacedTransform,
+            SearchEdgeTransformState::Displaced, edge + 1, displacedTransform);
+        emit(SearchEdgeOperation::DrawImage,
+            SearchEdgeTransformState::Displaced, edge + 1, displacedTransform);
+        emit(SearchEdgeOperation::PopClip,
+            SearchEdgeTransformState::Displaced, edge + 1, displacedTransform);
+        emit(SearchEdgeOperation::RestoreAtlas,
+            SearchEdgeTransformState::Atlas, 0, atlasTransform);
+    }
 }
 
 FailureReason InitializeDevice(
@@ -1166,48 +1260,36 @@ public:
                 D2D1_LAYER_PARAMETERS1 searchParameters = D2D1::LayerParameters1();
                 searchParameters.geometricMask = searchBoundary.Get();
                 context->PushLayer(searchParameters, searchLayer.Get());
-                const float edgeBandPx = std::max(1.0f, 13.0f * static_cast<float>(std::max(1, scene.metrics.dpi)) / 96.0f);
-                const std::array<D2D1_RECT_F, 4> edgeBands = { {
-                    D2D1::RectF(
-                        static_cast<float>(plan.searchBoundsPx.left),
-                        static_cast<float>(plan.searchBoundsPx.top),
-                        std::min(static_cast<float>(plan.searchBoundsPx.right), static_cast<float>(plan.searchBoundsPx.left) + edgeBandPx),
-                        static_cast<float>(plan.searchBoundsPx.bottom)),
-                    D2D1::RectF(
-                        std::max(static_cast<float>(plan.searchBoundsPx.left), static_cast<float>(plan.searchBoundsPx.right) - edgeBandPx),
-                        static_cast<float>(plan.searchBoundsPx.top),
-                        static_cast<float>(plan.searchBoundsPx.right),
-                        static_cast<float>(plan.searchBoundsPx.bottom)),
-                    D2D1::RectF(
-                        static_cast<float>(plan.searchBoundsPx.left),
-                        static_cast<float>(plan.searchBoundsPx.top),
-                        static_cast<float>(plan.searchBoundsPx.right),
-                        std::min(static_cast<float>(plan.searchBoundsPx.bottom), static_cast<float>(plan.searchBoundsPx.top) + edgeBandPx)),
-                    D2D1::RectF(
-                        static_cast<float>(plan.searchBoundsPx.left),
-                        std::max(static_cast<float>(plan.searchBoundsPx.top), static_cast<float>(plan.searchBoundsPx.bottom) - edgeBandPx),
-                        static_cast<float>(plan.searchBoundsPx.right),
-                        static_cast<float>(plan.searchBoundsPx.bottom))
-                } };
-                const float pixelsPerDip = static_cast<float>(std::max(1, scene.metrics.dpi)) / 96.0f;
-                for (std::size_t index = 1; index < plan.searchOpticalPoints.size(); ++index)
-                {
-                    const auto& point = plan.searchOpticalPoints[index];
-                    const float deltaX = (point.sample.sourceXDip - point.destinationXDip) * pixelsPerDip;
-                    const float deltaY = (point.sample.sourceYDip - point.destinationYDip) * pixelsPerDip;
-                    context->PushAxisAlignedClip(edgeBands[index - 1], D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                    context->SetTransform(cropTransform
-                        * D2D1::Matrix3x2F::Translation(-deltaX, -deltaY)
-                        * atlasTransform);
-                    context->DrawImage(
-                        blur.Get(),
-                        D2D1::Point2F(0.0f, 0.0f),
-                        desktopSource,
-                        D2D1_INTERPOLATION_MODE_LINEAR,
-                        D2D1_COMPOSITE_MODE_SOURCE_COPY);
-                    context->PopAxisAlignedClip();
-                }
-                context->SetTransform(atlasTransform);
+                SubmitSearchEdgeCommands(
+                    plan,
+                    scene.metrics.dpi,
+                    cropTransform,
+                    atlasTransform,
+                    [&](const SearchEdgeCommand& command) {
+                        switch (command.operation)
+                        {
+                        case SearchEdgeOperation::SetAtlasBeforeClip:
+                        case SearchEdgeOperation::SetDisplacedTransform:
+                        case SearchEdgeOperation::RestoreAtlas:
+                            context->SetTransform(command.transform);
+                            break;
+                        case SearchEdgeOperation::PushClip:
+                            context->PushAxisAlignedClip(
+                                command.clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                            break;
+                        case SearchEdgeOperation::DrawImage:
+                            context->DrawImage(
+                                blur.Get(),
+                                D2D1::Point2F(0.0f, 0.0f),
+                                desktopSource,
+                                D2D1_INTERPOLATION_MODE_LINEAR,
+                                D2D1_COMPOSITE_MODE_SOURCE_COPY);
+                            break;
+                        case SearchEdgeOperation::PopClip:
+                            context->PopAxisAlignedClip();
+                            break;
+                        }
+                    });
                 context->PopLayer();
             }
 
@@ -2556,6 +2638,9 @@ enum MaterialCompositionValue : std::size_t
     CompositionSearchEdgeMaximumDisplacementMilli,
     CompositionSearchSourceOutOfBounds,
     CompositionSearchVerticalBiasMilli,
+    CompositionSearchEdgeCommandCount,
+    CompositionSearchEdgeCommand0,
+    CompositionSearchEdgeCommand23 = CompositionSearchEdgeCommand0 + 23,
     CompositionReducedMotionMaximumDisplacementMilli,
     CompositionClarityShapePasses,
     CompositionClarityCenterOpacityMilli,
@@ -2868,9 +2953,11 @@ public:
         {
             return RequiredResourceResult(E_FAIL);
         }
+        const D2D1_MATRIX_3X2_F cropTransform = CropTransform(currentCrop, currentRotation);
+        const D2D1_MATRIX_3X2_F atlasTransform = SurfaceAtlasTransform(surfaceOffset);
         const auto origin = TransformPoint(
             D2D1::Point2F(static_cast<float>(currentCrop.left), static_cast<float>(currentCrop.top)),
-            CropTransform(currentCrop, currentRotation) * SurfaceAtlasTransform(surfaceOffset));
+            cropTransform * atlasTransform);
         materialAtlasOffsetX = static_cast<int>(std::lround(origin.x));
         materialAtlasOffsetY = static_cast<int>(std::lround(origin.y));
         blurPasses += plan.drawBlur ? 1 : 0;
@@ -2932,6 +3019,21 @@ public:
                     maximum = std::max(maximum, point.sample.displacementDip);
                 }
                 reducedMotionMaximumDisplacementMilli = static_cast<int>(std::lround(maximum * 1000.0f));
+            }
+            if (plan.searchOpticalPoints.size() == 5 && IsValidRect(plan.searchBoundsPx))
+            {
+                SubmitSearchEdgeCommands(
+                    plan,
+                    scene.metrics.dpi,
+                    cropTransform,
+                    atlasTransform,
+                    [&](const SearchEdgeCommand& command) {
+                        searchEdgeCommands.push_back(
+                            static_cast<std::int64_t>(command.operation)
+                            | (static_cast<std::int64_t>(command.edgeIndex + 1) << 8)
+                            | (static_cast<std::int64_t>(command.transformState) << 16)
+                            | (static_cast<std::int64_t>(command.activeClipEdge) << 24));
+                    });
             }
         }
         return FailureReason::None;
@@ -2998,6 +3100,7 @@ public:
     int searchEdgeMaximumDisplacementMilli = 0;
     int searchSourceOutOfBounds = 0;
     int searchVerticalBiasMilli = 0;
+    std::vector<std::int64_t> searchEdgeCommands;
     int reducedMotionMaximumDisplacementMilli = 0;
     int clarityShapePasses = 0;
     int clarityCenterOpacityMilli = 0;
@@ -3229,6 +3332,12 @@ extern "C" int LLP_MaterialRunFakeCompositionScenario(
     values[CompositionSearchEdgeMaximumDisplacementMilli] = recorded.searchEdgeMaximumDisplacementMilli;
     values[CompositionSearchSourceOutOfBounds] = recorded.searchSourceOutOfBounds;
     values[CompositionSearchVerticalBiasMilli] = recorded.searchVerticalBiasMilli;
+    values[CompositionSearchEdgeCommandCount] = static_cast<std::int64_t>(
+        recorded.searchEdgeCommands.size());
+    for (std::size_t index = 0; index < recorded.searchEdgeCommands.size() && index < 24; ++index)
+    {
+        values[CompositionSearchEdgeCommand0 + index] = recorded.searchEdgeCommands[index];
+    }
     values[CompositionReducedMotionMaximumDisplacementMilli] = recorded.reducedMotionMaximumDisplacementMilli;
     values[CompositionClarityShapePasses] = recorded.clarityShapePasses;
     values[CompositionClarityCenterOpacityMilli] = recorded.clarityCenterOpacityMilli;

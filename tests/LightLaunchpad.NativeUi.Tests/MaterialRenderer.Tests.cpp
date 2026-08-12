@@ -138,6 +138,9 @@ enum MaterialCompositionValue : std::size_t
     CompositionSearchEdgeMaximumDisplacementMilli,
     CompositionSearchSourceOutOfBounds,
     CompositionSearchVerticalBiasMilli,
+    CompositionSearchEdgeCommandCount,
+    CompositionSearchEdgeCommand0,
+    CompositionSearchEdgeCommand23 = CompositionSearchEdgeCommand0 + 23,
     CompositionReducedMotionMaximumDisplacementMilli,
     CompositionClarityShapePasses,
     CompositionClarityCenterOpacityMilli,
@@ -785,10 +788,38 @@ std::array<std::int64_t, MaterialCompositionValueCount> RunCompositionScenario()
     return values;
 }
 
+bool SatisfiesSearchEdgeSequence(
+    const std::array<std::int64_t, MaterialCompositionValueCount>& values)
+{
+    constexpr std::array<std::int64_t, 6> edgeOperations = { 1, 2, 3, 4, 5, 6 };
+    constexpr std::array<std::int64_t, 6> transformStates = { 1, 1, 2, 2, 2, 1 };
+    if (values[CompositionSearchEdgeCommandCount] != 24) return false;
+    for (std::size_t edge = 0; edge < 4; ++edge)
+    {
+        for (std::size_t step = 0; step < edgeOperations.size(); ++step)
+        {
+            const std::int64_t expected = edgeOperations[step]
+                | (static_cast<std::int64_t>(edge + 1) << 8)
+                | (transformStates[step] << 16)
+                | ((step > 0 && step < 5
+                        ? static_cast<std::int64_t>(edge + 1)
+                        : 0)
+                    << 24);
+            if (values[CompositionSearchEdgeCommand0 + edge * edgeOperations.size() + step]
+                != expected)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool SatisfiesOpticalMaterialContract(
     const std::array<std::int64_t, MaterialCompositionValueCount>& values)
 {
-    return values[CompositionBlurPasses] == 1
+    return SatisfiesSearchEdgeSequence(values)
+        && values[CompositionBlurPasses] == 1
         && values[CompositionTintPasses] == 1
         && values[CompositionSearchOpticalPasses] == 1
         && values[CompositionSearchOpticalSamples] == 5
@@ -840,6 +871,8 @@ void TestUnifiedCompositionUsesThreeIsolatedLayersAndOneCommit()
             && values[CompositionContentAtlasOffsetX] == values[CompositionMaterialAtlasOffsetX]
             && values[CompositionContentAtlasOffsetY] == values[CompositionMaterialAtlasOffsetY],
         "A nonzero DirectComposition atlas offset did not align material, overlay, and content.");
+    Require(SatisfiesSearchEdgeSequence(values),
+        "A search edge clip was pushed under the previous edge transform.");
     Require(SatisfiesOpticalMaterialContract(values),
         "The shared production orchestration omitted a bounded optical, clarity, guard, or focus command.");
     Require(values[CompositionLuminanceWidth] == 16
@@ -879,6 +912,11 @@ void TestCompositionContractRejectsDiscardedCommands()
     discardedSearch[CompositionSearchOpticalPasses] = 0;
     Require(!SatisfiesOpticalMaterialContract(discardedSearch),
         "The composition test accepted a backend that discarded the search optical response.");
+    auto leakedEdgeTransform = valid;
+    leakedEdgeTransform[CompositionSearchEdgeCommand0 + 6] =
+        leakedEdgeTransform[CompositionSearchEdgeCommand0 + 8];
+    Require(!SatisfiesOpticalMaterialContract(leakedEdgeTransform),
+        "The composition test accepted a later search clip under the previous edge transform.");
     auto discardedClarity = valid;
     discardedClarity[CompositionClarityShapePasses] = 0;
     Require(!SatisfiesOpticalMaterialContract(discardedClarity),
