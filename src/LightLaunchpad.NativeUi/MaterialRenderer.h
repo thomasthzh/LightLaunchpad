@@ -104,6 +104,8 @@ struct SceneItem
     std::shared_ptr<const IconRaster> icon;
     bool focused = false;
     bool favorite = false;
+    std::wstring stableId;
+    std::wstring sourcePath;
 };
 
 struct SearchVisual
@@ -146,6 +148,8 @@ struct ShowRequest
     bool developmentEvidence = false;
     FailureReason forcedFailure = FailureReason::None;
     UINT statusMessage = 0;
+    std::uint64_t activation = 0;
+    std::uint64_t requiredSceneGeneration = 0;
 };
 
 struct Diagnostics
@@ -166,6 +170,10 @@ struct Diagnostics
     llp::geometry::Rect auxiliaryBounds;
     std::wstring auxiliaryText;
     bool auxiliaryFocused = false;
+    std::vector<std::wstring> presentedItemStableIds;
+    std::vector<std::wstring> presentedItemSourcePaths;
+    std::uint64_t committedActivation = 0;
+    std::uint64_t presentedSceneGeneration = 0;
 };
 
 class LatestSceneSlot

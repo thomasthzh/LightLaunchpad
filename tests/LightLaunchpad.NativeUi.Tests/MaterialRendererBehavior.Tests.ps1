@@ -19,6 +19,7 @@ $llpLogPath = Join-Path $llpTempRoot 'material-startup.log'
 $llpStableSource = Join-Path $llpTempRoot 'stable-source'
 $llpStableOutput = Join-Path $llpTempRoot 'stable-output'
 $llpProcess = $null
+$llpTestMonitorDevice = '\\.\DISPLAY1'
 $llpCapturedProcesses = @()
 $llpRunKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $llpRunBefore = $null
@@ -189,7 +190,7 @@ public static class LightLaunchpadMaterialProbeNative {
         $env:APPDATA = $llpAppData
         $env:LOCALAPPDATA = $llpLocalAppData
         $env:USERPROFILE = $llpUserProfile
-        $llpProcess = Start-Process -FilePath $llpExecutable -ArgumentList @('--material-probe-file', $llpProbePath, '--material-force-failure', 'duplication', '--diagnostics-log-file', $llpLogPath) -PassThru -WindowStyle Hidden
+        $llpProcess = Start-Process -FilePath $llpExecutable -ArgumentList @('--material-probe-file', $llpProbePath, '--material-force-failure', 'duplication', '--diagnostics-log-file', $llpLogPath, '--test-monitor-device', $llpTestMonitorDevice) -PassThru -WindowStyle Hidden
         $llpCapturedProcesses += $llpProcess
     }
     finally {
@@ -210,6 +211,15 @@ public static class LightLaunchpadMaterialProbeNative {
     Assert-True ($llpWindow -ne [IntPtr]::Zero) 'Development material probe did not create a real NativeUi window.'
 
     [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
+    Wait-LlpFile $llpProbePath
+    $llpProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpProbePath | ConvertFrom-Json
+    Assert-Equal $llpTestMonitorDevice ([string]$llpProbe.monitorDevice) 'Visible fallback material probe was not fixed to DISPLAY1.'
+    Assert-True (
+        [int]$llpProbe.windowRect.left -ge [int]$llpProbe.monitorBounds.left -and
+        [int]$llpProbe.windowRect.top -ge [int]$llpProbe.monitorBounds.top -and
+        [int]$llpProbe.windowRect.right -le [int]$llpProbe.monitorBounds.right -and
+        [int]$llpProbe.windowRect.bottom -le [int]$llpProbe.monitorBounds.bottom
+    ) 'Visible fallback material probe escaped the requested DISPLAY1 bounds.'
     $llpElement = [System.Windows.Automation.AutomationElement]::FromHandle($llpWindow)
     Assert-True ($null -ne $llpElement) 'UI Automation could not discover the material-probe search element.'
     $llpValueObject = $null
@@ -223,8 +233,6 @@ public static class LightLaunchpadMaterialProbeNative {
     [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpWindow, 0x0000, [UIntPtr]::Zero, [IntPtr]::Zero)
     Assert-True ((([DateTime]::UtcNow - $llpPingStarted).TotalMilliseconds) -lt 500) 'Forced material fallback did not remain responsive.'
 
-    Wait-LlpFile $llpProbePath
-    $llpProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpProbePath | ConvertFrom-Json
     Assert-Equal 'fallback' ([string]$llpProbe.path) 'Forced duplication failure did not select fallback.'
     Assert-Equal 'ForcedForTest' ([string]$llpProbe.failure) 'Forced duplication failure did not publish its stable reason.'
 
@@ -259,6 +267,7 @@ public static class LightLaunchpadMaterialProbeNative {
 
     foreach ($llpBadArguments in @(
         @('--material-force-failure', 'duplication'),
+        @('--test-monitor-device', $llpTestMonitorDevice),
         @('--material-probe-file', (Join-Path $llpTempRoot 'invalid.json'), '--material-force-failure', 'not-valid')
     )) {
         $llpBadProcess = Start-Process -FilePath $llpExecutable -ArgumentList ([string[]]$llpBadArguments) -PassThru -WindowStyle Hidden
@@ -274,7 +283,7 @@ public static class LightLaunchpadMaterialProbeNative {
         $env:APPDATA = $llpAppData
         $env:LOCALAPPDATA = $llpLocalAppData
         $env:USERPROFILE = $llpUserProfile
-        $llpNormalProcess = Start-Process -FilePath $llpExecutable -ArgumentList @('--material-probe-file', $llpNormalProbePath) -PassThru -WindowStyle Hidden
+        $llpNormalProcess = Start-Process -FilePath $llpExecutable -ArgumentList @('--material-probe-file', $llpNormalProbePath, '--test-monitor-device', $llpTestMonitorDevice) -PassThru -WindowStyle Hidden
         $llpCapturedProcesses += $llpNormalProcess
     }
     finally {
@@ -298,6 +307,13 @@ public static class LightLaunchpadMaterialProbeNative {
         Start-Sleep -Milliseconds 25
         $llpNormalProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpNormalProbePath | ConvertFrom-Json
     } while ([string]$llpNormalProbe.state -notin @('live', 'fallback') -and [DateTime]::UtcNow -lt $llpNormalStateDeadline)
+    Assert-Equal $llpTestMonitorDevice ([string]$llpNormalProbe.monitorDevice) 'Visible normal material probe was not fixed to DISPLAY1.'
+    Assert-True (
+        [int]$llpNormalProbe.windowRect.left -ge [int]$llpNormalProbe.monitorBounds.left -and
+        [int]$llpNormalProbe.windowRect.top -ge [int]$llpNormalProbe.monitorBounds.top -and
+        [int]$llpNormalProbe.windowRect.right -le [int]$llpNormalProbe.monitorBounds.right -and
+        [int]$llpNormalProbe.windowRect.bottom -le [int]$llpNormalProbe.monitorBounds.bottom
+    ) 'Visible normal material probe escaped the requested DISPLAY1 bounds.'
     Assert-True (([string]$llpNormalProbe.state -eq 'live' -and [string]$llpNormalProbe.path -eq 'high-fidelity' -and [uint64]$llpNormalProbe.acquiredFrames -gt 0) -or ([string]$llpNormalProbe.state -eq 'fallback' -and [string]$llpNormalProbe.path -eq 'fallback' -and [string]$llpNormalProbe.failure -ne 'None')) 'Normal material probe reported neither a captured frame nor a stable machine-specific fallback.'
     [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpNormalWindow, 0x804D, [UIntPtr]::new([uint64]1), [IntPtr]::Zero)
     [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpNormalWindow, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)
@@ -334,7 +350,8 @@ public static class LightLaunchpadMaterialProbeNative {
     $llpStableWindowEvents = 0
     foreach ($llpStableArguments in @(
         @('--material-probe-file', (Join-Path $llpTempRoot 'stable-probe.json')),
-        @('--material-force-failure', 'duplication')
+        @('--material-force-failure', 'duplication'),
+        @('--test-monitor-device', $llpTestMonitorDevice)
     )) {
         $llpStableProcess = $null
         [LightLaunchpadMaterialProbeNative]::StartWindowEventMonitor()

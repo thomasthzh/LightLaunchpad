@@ -296,6 +296,8 @@ struct AuxiliaryPresentationEvidence
     llp::geometry::Rect bounds;
     std::wstring text;
     bool focused = false;
+    std::vector<std::wstring> itemStableIds;
+    std::vector<std::wstring> itemSourcePaths;
 };
 
 using LuminanceGrid = std::array<float, 16 * 12>;
@@ -1768,6 +1770,15 @@ public:
             pendingAuxiliary_.bounds = scene.auxiliary.bounds;
             pendingAuxiliary_.text = scene.auxiliary.text;
             pendingAuxiliary_.focused = scene.auxiliary.focused;
+            pendingAuxiliary_.itemStableIds.clear();
+            pendingAuxiliary_.itemSourcePaths.clear();
+            pendingAuxiliary_.itemStableIds.reserve(scene.items.size());
+            pendingAuxiliary_.itemSourcePaths.reserve(scene.items.size());
+            for (const auto& item : scene.items)
+            {
+                pendingAuxiliary_.itemStableIds.push_back(item.stableId);
+                pendingAuxiliary_.itemSourcePaths.push_back(item.sourcePath);
+            }
         }
         return result;
     }
@@ -1778,6 +1789,10 @@ public:
         ++commitCallCount_;
 #endif
         if (FAILED(resources_.compositionDevice.Get()->Commit()))
+        {
+            return FailureReason::CompositionUnavailable;
+        }
+        if (FAILED(resources_.compositionDevice.Get()->WaitForCommitCompletion()))
         {
             return FailureReason::CompositionUnavailable;
         }
@@ -2018,6 +2033,8 @@ public:
         diagnostics_.path = RenderPath::Fallback;
         diagnostics_.failure = FailureReason::None;
         diagnostics_.evidenceFrozen = false;
+        diagnostics_.committedActivation = 0;
+        diagnostics_.presentedSceneGeneration = 0;
 
         if (IsDevelopmentBuild() && request_.forcedFailure != FailureReason::None
             && request_.forcedFailure != FailureReason::AccessLost)
@@ -2108,6 +2125,7 @@ public:
                     return;
                 }
                 if (presented) ++diagnostics_.presentedFrames;
+                if (presented) AcknowledgePresentation(scene);
             }
             return;
         }
@@ -2146,7 +2164,11 @@ public:
                 EnterFallback(backend, composition);
                 return;
             }
-            if (presented) ++diagnostics_.presentedFrames;
+            if (presented)
+            {
+                ++diagnostics_.presentedFrames;
+                AcknowledgePresentation(scene);
+            }
             return;
         }
 
@@ -2170,6 +2192,8 @@ public:
         diagnostics_.path = RenderPath::Fallback;
         diagnostics_.failure = FailureReason::None;
         diagnostics_.evidenceFrozen = false;
+        diagnostics_.committedActivation = 0;
+        diagnostics_.presentedSceneGeneration = 0;
     }
 
     void Freeze(CaptureBackend& backend, const SceneSnapshot* scene = nullptr)
@@ -2181,6 +2205,7 @@ public:
             == FailureReason::None && presented)
         {
             ++diagnostics_.presentedFrames;
+            AcknowledgePresentation(scene);
         }
         (void)ReleaseHeldFrame(backend);
         backend.Freeze();
@@ -2200,6 +2225,13 @@ public:
     const Diagnostics& CurrentDiagnostics() const { return diagnostics_; }
 
 private:
+    void AcknowledgePresentation(const SceneSnapshot* scene)
+    {
+        if (!scene || scene->generation < request_.requiredSceneGeneration) return;
+        diagnostics_.committedActivation = request_.activation;
+        diagnostics_.presentedSceneGeneration = scene->generation;
+    }
+
     ReleaseResult ReleaseHeldFrame(CaptureBackend& backend)
     {
         if (!frameHeld_) return ReleaseResult::Released;
@@ -2249,6 +2281,8 @@ private:
         diagnostics_.state = LifecycleState::Fallback;
         diagnostics_.path = RenderPath::Fallback;
         diagnostics_.failure = failure;
+        diagnostics_.committedActivation = 0;
+        diagnostics_.presentedSceneGeneration = 0;
     }
 
     ShowRequest request_;
@@ -2364,6 +2398,8 @@ private:
         updated.auxiliaryBounds = auxiliary.bounds;
         updated.auxiliaryText = auxiliary.text;
         updated.auxiliaryFocused = auxiliary.focused;
+        updated.presentedItemStableIds = auxiliary.itemStableIds;
+        updated.presentedItemSourcePaths = auxiliary.itemSourcePaths;
         const bool notifyHost = updated.path != diagnostics_.path
             || updated.failure != diagnostics_.failure
             || updated.state != diagnostics_.state
@@ -2376,7 +2412,9 @@ private:
             || updated.auxiliaryBounds.right != diagnostics_.auxiliaryBounds.right
             || updated.auxiliaryBounds.bottom != diagnostics_.auxiliaryBounds.bottom
             || updated.auxiliaryText != diagnostics_.auxiliaryText
-            || updated.auxiliaryFocused != diagnostics_.auxiliaryFocused;
+            || updated.auxiliaryFocused != diagnostics_.auxiliaryFocused
+            || updated.committedActivation != diagnostics_.committedActivation
+            || updated.presentedSceneGeneration != diagnostics_.presentedSceneGeneration;
         diagnostics_ = updated;
         if (notifyHost && request_.window && request_.statusMessage)
         {

@@ -314,6 +314,7 @@ struct SpotlightLayerBuffer
     HGDIOBJ oldFullBitmap = nullptr;
     void* baseBits = nullptr;
     void* fullBits = nullptr;
+    bool directPixelsTransparent = false;
 };
 
 struct SpotlightBackdropCapture
@@ -349,12 +350,16 @@ llp::adaptive::Environment g_adaptiveEnvironment;
 llp::adaptive::Policy g_adaptivePolicy;
 llp::material::MaterialRenderer g_materialRenderer;
 std::uint64_t g_materialSceneGeneration = 0;
+std::uint64_t g_materialActivation = 0;
+std::uint64_t g_requestedMaterialActivation = 0;
+std::uint64_t g_requestedMaterialSceneGeneration = 0;
 std::unordered_map<std::uint64_t, std::weak_ptr<const llp::material::IconRaster>> g_materialIconRasters;
 UINT g_windowDpi = 96;
 UINT g_settingsDpi = 96;
 UINT g_testDpiOverride = 0;
 bool g_adaptiveTestOverridesActive = false;
 llp::adaptive::MonitorSource g_lastMonitorSource = llp::adaptive::MonitorSource::Primary;
+std::wstring g_testMonitorDevice;
 bool g_searchInputActive = false;
 bool g_searchPointerSelecting = false;
 int g_searchTextOffset = 0;
@@ -575,6 +580,17 @@ struct MaterialProbeHostState
 CatalogBrokerProbeState g_catalogBrokerProbe;
 ShellImportProbeState g_shellImportProbe;
 SpotlightFlowProbeState g_spotlightFlowProbe;
+struct SpotlightFallbackPaintEvidence
+{
+    int regionHeaderCount = 0;
+    int favoriteBadgeCount = 0;
+    std::vector<std::wstring> itemStableIds;
+    std::vector<std::wstring> itemTitles;
+    std::vector<RECT> itemBounds;
+    std::vector<int> itemIconTops;
+    std::vector<int> itemTitleTops;
+};
+SpotlightFallbackPaintEvidence g_spotlightFallbackPaintEvidence;
 LaunchpadFlowProbeState g_launchpadFlowProbe;
 OrganizationProbeState g_organizationProbe;
 RegionUndoProbeState g_regionUndoProbe;
@@ -594,6 +610,9 @@ void ActivateSearchInput();
 bool InitializeDirectRenderer();
 bool IsSpotlightMode();
 bool PaintSpotlightLayeredWindow(bool repaint = true);
+bool PresentTransparentSpotlightDirectLayer();
+RECT SpotlightOwnershipProbeRect(int width, int height);
+bool SpotlightFallbackPaintEvidenceEnabled();
 void ReleaseSpotlightLayerBuffer();
 void ReleaseSpotlightBackdrop();
 bool CaptureSpotlightBackdrop(const RECT& windowRect);
@@ -616,6 +635,8 @@ void RebuildVisibleMaterialRenderer();
 bool WriteSpotlightFlowReadyState();
 bool WriteMaterialProbeState(HWND hwnd);
 bool WriteMaterialProbeState(MaterialProbeHostState& state);
+bool CommandLineHasArgument(const wchar_t* expected);
+HMONITOR SpotlightTargetMonitor();
 
 template <typename T>
 void SafeRelease(T*& value)
@@ -1596,6 +1617,7 @@ void SetFavoriteForPaths(const std::vector<std::wstring>& sourcePaths, bool favo
     if (changed == 0) return;
     RebuildSearchIndex();
     RebuildFiltered();
+    RequestSearchRepaint(g_hwnd, true);
     const bool saved = SaveSearchHistory();
     const std::wstring message = favorite
         ? Text(L"Added ", L"已将 ") + ItemCountText(changed) + Text(L" to Favorites.", L"加入收藏。")
@@ -2085,7 +2107,7 @@ llp::geometry::Scene BuildCurrentSceneGeometry(const RECT& client)
     request.initialContentTop = metrics.initialContentTopPx;
     request.regionHeaderHeight = metrics.regionHeaderHeightPx;
     request.scrollOffset = g_scrollOffset;
-    request.groupByRegion = SearchCommittedText().empty();
+    request.groupByRegion = !IsSpotlightMode() && SearchCommittedText().empty();
     request.items.reserve(g_filtered.size());
     std::vector<std::wstring> shownRegionIds;
     for (int filteredIndex = 0; filteredIndex < static_cast<int>(g_filtered.size()); ++filteredIndex)
@@ -2189,6 +2211,8 @@ std::shared_ptr<const llp::material::SceneSnapshot> BuildMaterialSceneSnapshot(c
         }
 
         llp::material::SceneItem item;
+        item.stableId = source.stableId;
+        item.sourcePath = source.sourcePath;
         item.bounds = slot.viewportBounds;
         item.title = source.displayName;
         item.subtitle = source.subtitle;
@@ -2387,8 +2411,8 @@ void ApplyCatalogSnapshot(
         std::remove_if(g_selectedRegionIds.begin(), g_selectedRegionIds.end(), [](const std::wstring& regionId) {
             return !RegionExists(regionId);
         }),
-        g_selectedRegionIds.end());
-    if (g_hwnd) InvalidateRect(g_hwnd, nullptr, TRUE);
+    g_selectedRegionIds.end());
+    if (g_hwnd) RequestSearchRepaint(g_hwnd, true);
 }
 
 void RequestCatalogRefresh(DWORD testDelayMilliseconds)
@@ -2411,6 +2435,7 @@ void RequestCatalogRefresh(DWORD testDelayMilliseconds)
         AddDefaultRegion();
         RebuildSearchIndex();
         RebuildFiltered();
+        if (g_hwnd) RequestSearchRepaint(g_hwnd, true);
     }
     const uint64_t generation = ++g_requestedCatalogGeneration;
     const auto requestId = g_shellBroker.RequestCatalog(
@@ -2755,6 +2780,14 @@ bool WriteMaterialProbeState(MaterialProbeHostState& state)
     if (!state.renderer || state.outputPath.empty()) return false;
     const auto diagnostics = state.renderer->SnapshotDiagnostics();
     const std::uint64_t generation = ++state.probeGeneration;
+    RECT window = {};
+    if (g_hwnd) GetWindowRect(g_hwnd, &window);
+    MONITORINFOEXW monitorInfo = {};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    const HMONITOR monitor = g_hwnd
+        ? MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST)
+        : nullptr;
+    if (monitor) GetMonitorInfoW(monitor, &monitorInfo);
     Json document = {
         { "probeGeneration", generation },
         { "path", MaterialRenderPathName(diagnostics.path) },
@@ -2766,6 +2799,19 @@ bool WriteMaterialProbeState(MaterialProbeHostState& state)
         { "deviceRebuilds", diagnostics.deviceRebuilds },
         { "lastFrameIdentity", diagnostics.lastFrameIdentity },
         { "firstFrameMs", diagnostics.firstFrameMs },
+        { "monitorDevice", llp::persistence::WideToUtf8(monitorInfo.szDevice) },
+        { "monitorBounds", Json{
+            { "left", monitorInfo.rcMonitor.left },
+            { "top", monitorInfo.rcMonitor.top },
+            { "right", monitorInfo.rcMonitor.right },
+            { "bottom", monitorInfo.rcMonitor.bottom }
+        } },
+        { "windowRect", Json{
+            { "left", window.left },
+            { "top", window.top },
+            { "right", window.right },
+            { "bottom", window.bottom }
+        } },
         { "hiddenAcquiredFrames", diagnostics.state == llp::material::LifecycleState::Hidden
             ? diagnostics.acquiredFrames : 0 },
         { "hiddenPresentedFrames", diagnostics.state == llp::material::LifecycleState::Hidden
@@ -3204,6 +3250,15 @@ bool WriteSpotlightFlowReadyState()
     const char* monitorSource = g_lastMonitorSource == llp::adaptive::MonitorSource::Foreground
         ? "foreground"
         : (g_lastMonitorSource == llp::adaptive::MonitorSource::Cursor ? "cursor" : "primary");
+    const HWND foregroundWindow = GetForegroundWindow();
+    DWORD foregroundProcessId = 0;
+    if (foregroundWindow) GetWindowThreadProcessId(foregroundWindow, &foregroundProcessId);
+    MONITORINFOEXW monitorInfo = {};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    const HMONITOR windowMonitor = g_testMonitorDevice.empty()
+        ? MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST)
+        : SpotlightTargetMonitor();
+    if (windowMonitor) GetMonitorInfoW(windowMonitor, &monitorInfo);
     Json firstHit = nullptr;
     if (!g_hits.empty())
     {
@@ -3215,16 +3270,58 @@ bool WriteSpotlightFlowReadyState()
             { "filteredIndex", g_hits.front().itemIndex }
         };
     }
+    const RECT ownershipProbe = SpotlightOwnershipProbeRect(
+        client.right - client.left,
+        client.bottom - client.top);
+    Json presentedItemStableIds = Json::array();
+    for (const auto& stableId : material.presentedItemStableIds)
+    {
+        presentedItemStableIds.push_back(llp::persistence::WideToUtf8(stableId));
+    }
+    Json presentedItemSourcePaths = Json::array();
+    for (const auto& sourcePath : material.presentedItemSourcePaths)
+    {
+        presentedItemSourcePaths.push_back(llp::persistence::WideToUtf8(sourcePath));
+    }
+    Json fallbackItemStableIds = Json::array();
+    for (const auto& stableId : g_spotlightFallbackPaintEvidence.itemStableIds)
+    {
+        fallbackItemStableIds.push_back(llp::persistence::WideToUtf8(stableId));
+    }
+    Json fallbackItemTitles = Json::array();
+    for (const auto& title : g_spotlightFallbackPaintEvidence.itemTitles)
+    {
+        fallbackItemTitles.push_back(llp::persistence::WideToUtf8(title));
+    }
+    Json fallbackItemBounds = Json::array();
+    for (const auto& bounds : g_spotlightFallbackPaintEvidence.itemBounds)
+    {
+        fallbackItemBounds.push_back(jsonRect({ bounds.left, bounds.top, bounds.right, bounds.bottom }));
+    }
+    Json fallbackItemIconTops = g_spotlightFallbackPaintEvidence.itemIconTops;
+    Json fallbackItemTitleTops = g_spotlightFallbackPaintEvidence.itemTitleTops;
     const Json ready = {
         { "itemCount", g_items.size() },
         { "filteredCount", g_filtered.size() },
         { "displayMode", llp::persistence::WideToUtf8(g_settings.displayMode) },
         { "catalogGeneration", g_catalogGeneration },
         { "focus", focus },
+        { "searchValue", llp::persistence::WideToUtf8(SearchCommittedText()) },
+        { "searchComposing", g_searchInput.IsComposing() },
+        { "windowVisible", g_hwnd && IsWindowVisible(g_hwnd) },
+        { "foregroundWindow", static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(foregroundWindow)) },
+        { "foregroundProcessId", foregroundProcessId },
         { "focusedResultPath", llp::persistence::WideToUtf8(focusedResultPath) },
         { "effectiveDpi", g_windowDpi },
         { "textScalePercent", g_adaptivePolicy.textScalePercent },
-        { "monitorSource", monitorSource },
+        { "monitorSource", g_testMonitorDevice.empty() ? monitorSource : "test-device" },
+        { "monitorDevice", llp::persistence::WideToUtf8(monitorInfo.szDevice) },
+        { "monitorBounds", Json{
+            { "left", monitorInfo.rcMonitor.left },
+            { "top", monitorInfo.rcMonitor.top },
+            { "right", monitorInfo.rcMonitor.right },
+            { "bottom", monitorInfo.rcMonitor.bottom }
+        } },
         { "highContrast", g_adaptivePolicy.highContrast },
         { "solidSurface", g_adaptivePolicy.solidSurface },
         { "reducedMotion", g_adaptivePolicy.reducedMotion },
@@ -3234,11 +3331,31 @@ bool WriteSpotlightFlowReadyState()
         { "materialPath", MaterialRenderPathName(material.path) },
         { "materialFailure", MaterialFailureName(material.failure) },
         { "materialState", MaterialStateName(material.state) },
+        { "materialRequestedActivation", g_requestedMaterialActivation },
+        { "materialRequestedSceneGeneration", g_requestedMaterialSceneGeneration },
+        { "materialCommittedActivation", material.committedActivation },
+        { "materialPresentedSceneGeneration", material.presentedSceneGeneration },
         { "materialAuxiliaryRendered", material.auxiliaryRendered },
         { "materialAuxiliarySceneGeneration", material.auxiliarySceneGeneration },
         { "materialAuxiliaryBounds", jsonRect(material.auxiliaryBounds) },
         { "materialAuxiliaryText", llp::persistence::WideToUtf8(material.auxiliaryText) },
         { "materialAuxiliaryFocused", material.auxiliaryFocused },
+        { "materialPresentedItemStableIds", presentedItemStableIds },
+        { "materialPresentedItemSourcePaths", presentedItemSourcePaths },
+        { "spotlightFallbackRegionHeaderCount", g_spotlightFallbackPaintEvidence.regionHeaderCount },
+        { "spotlightFallbackFavoriteBadgeCount", g_spotlightFallbackPaintEvidence.favoriteBadgeCount },
+        { "spotlightFallbackPresentedItemStableIds", fallbackItemStableIds },
+        { "spotlightFallbackPresentedItemTitles", fallbackItemTitles },
+        { "spotlightFallbackPresentedItemBounds", fallbackItemBounds },
+        { "spotlightFallbackPresentedItemIconTops", fallbackItemIconTops },
+        { "spotlightFallbackPresentedItemTitleTops", fallbackItemTitleTops },
+        { "materialDirectLayerTransparent", g_spotlightLayerBuffer.directPixelsTransparent },
+        { "materialOwnershipProbeBounds", Json{
+            { "left", ownershipProbe.left },
+            { "top", ownershipProbe.top },
+            { "right", ownershipProbe.right },
+            { "bottom", ownershipProbe.bottom }
+        } },
         { "hitCount", g_hits.size() },
         { "firstHit", firstHit },
         { "windowRect", Json{
@@ -3611,7 +3728,7 @@ void HandleShellBrokerResult(LPARAM lParam)
             SortItems();
             SaveLayout();
             RebuildFiltered();
-            InvalidateRect(g_hwnd, nullptr, TRUE);
+            RequestSearchRepaint(g_hwnd, true);
         }
         RequestCatalogRefresh();
         if (!completion.foundRequest)
@@ -3654,7 +3771,7 @@ void HandleShellBrokerResult(LPARAM lParam)
             SaveLayout();
             RebuildSearchIndex();
             RebuildFiltered();
-            InvalidateRect(g_hwnd, nullptr, TRUE);
+            RequestSearchRepaint(g_hwnd, true);
         }
         RequestCatalogRefresh();
         if (!completion.foundUndo)
@@ -4411,8 +4528,62 @@ UINT DpiForMonitor(HMONITOR monitor)
     return g_windowDpi > 0 ? g_windowDpi : 96;
 }
 
+struct TestMonitorLookup
+{
+    const std::wstring* requestedDevice = nullptr;
+    HMONITOR monitor = nullptr;
+    MONITORINFOEXW info = {};
+};
+
+BOOL CALLBACK FindRequestedTestMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM context)
+{
+    auto* lookup = reinterpret_cast<TestMonitorLookup*>(context);
+    if (!lookup || !lookup->requestedDevice) return FALSE;
+
+    MONITORINFOEXW info = {};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) return TRUE;
+    if (CompareStringOrdinal(
+            info.szDevice, -1, lookup->requestedDevice->c_str(), -1, TRUE) != CSTR_EQUAL)
+    {
+        return TRUE;
+    }
+
+    lookup->monitor = monitor;
+    lookup->info = info;
+    return FALSE;
+}
+
+bool ResolveRequestedTestMonitor(HMONITOR& monitor, MONITORINFOEXW* info = nullptr)
+{
+    monitor = nullptr;
+    if (g_testMonitorDevice.empty()) return false;
+    TestMonitorLookup lookup;
+    lookup.requestedDevice = &g_testMonitorDevice;
+    lookup.info.cbSize = sizeof(lookup.info);
+    EnumDisplayMonitors(
+        nullptr,
+        nullptr,
+        FindRequestedTestMonitor,
+        reinterpret_cast<LPARAM>(&lookup));
+    if (!lookup.monitor) return false;
+    monitor = lookup.monitor;
+    if (info) *info = lookup.info;
+    return true;
+}
+
 HMONITOR SpotlightTargetMonitor()
 {
+    if (!g_testMonitorDevice.empty())
+    {
+        HMONITOR testMonitor = nullptr;
+        if (ResolveRequestedTestMonitor(testMonitor)) return testMonitor;
+        AppendStartupLog(L"test-monitor", false, L"Requested monitor is no longer available: " + g_testMonitorDevice);
+        if (g_hwnd) ShowWindow(g_hwnd, SW_HIDE);
+        PostQuitMessage(2);
+        return nullptr;
+    }
+
     HWND foreground = GetForegroundWindow();
     const bool foregroundUsable = foreground
         && foreground != g_hwnd
@@ -4472,6 +4643,30 @@ void PositionWindow()
     }
     else
     {
+        if (!g_testMonitorDevice.empty())
+        {
+            HMONITOR monitor = nullptr;
+            MONITORINFOEXW info = {};
+            if (!ResolveRequestedTestMonitor(monitor, &info))
+            {
+                AppendStartupLog(L"test-monitor", false, L"Requested monitor is no longer available: " + g_testMonitorDevice);
+                ShowWindow(g_hwnd, SW_HIDE);
+                PostQuitMessage(2);
+                return;
+            }
+            const RECT bounds = info.rcMonitor;
+            const UINT targetDpi = g_testDpiOverride > 0 ? g_testDpiOverride : DpiForMonitor(monitor);
+            if (targetDpi != g_windowDpi)
+            {
+                g_windowDpi = targetDpi;
+                ResetScaleSensitiveResources();
+            }
+            const int width = bounds.right - bounds.left;
+            const int height = bounds.bottom - bounds.top;
+            ApplySpotlightWindowRegion(width, height);
+            SetWindowPos(g_hwnd, HWND_TOPMOST, bounds.left, bounds.top, width, height, SWP_NOACTIVATE);
+            return;
+        }
         using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
         const auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
             GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
@@ -4542,13 +4737,15 @@ llp::material::FailureReason MaterialForcedFailureFromCommandLine()
     return llp::material::FailureReason::None;
 }
 
-llp::material::ShowRequest CurrentMaterialShowRequest()
+llp::material::ShowRequest CurrentMaterialShowRequest(std::uint64_t requiredSceneGeneration)
 {
     llp::material::ShowRequest request;
     RECT windowRect = {};
     GetWindowRect(g_hwnd, &windowRect);
     request.window = g_hwnd;
-    request.monitor = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+    request.monitor = g_testMonitorDevice.empty()
+        ? MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST)
+        : SpotlightTargetMonitor();
     request.windowDesktop = {
         windowRect.left, windowRect.top, windowRect.right, windowRect.bottom
     };
@@ -4556,6 +4753,10 @@ llp::material::ShowRequest CurrentMaterialShowRequest()
     request.policy = g_adaptivePolicy;
     request.forcedFailure = MaterialForcedFailureFromCommandLine();
     request.statusMessage = WmMaterialRendererStatus;
+    request.activation = ++g_materialActivation;
+    request.requiredSceneGeneration = requiredSceneGeneration;
+    g_requestedMaterialActivation = request.activation;
+    g_requestedMaterialSceneGeneration = requiredSceneGeneration;
     return request;
 }
 
@@ -4563,11 +4764,14 @@ void RebuildVisibleMaterialRenderer()
 {
     if (!g_hwnd || !IsSpotlightMode() || !IsWindowVisible(g_hwnd)) return;
     RECT client = {};
+    std::shared_ptr<const llp::material::SceneSnapshot> scene;
     if (GetClientRect(g_hwnd, &client))
     {
-        g_materialRenderer.Submit(BuildMaterialSceneSnapshot(client));
+        scene = BuildMaterialSceneSnapshot(client);
+        g_materialRenderer.Submit(scene);
     }
-    g_materialRenderer.Rebuild(CurrentMaterialShowRequest());
+    PaintSpotlightLayeredWindow(g_spotlightLayerDirty);
+    g_materialRenderer.Rebuild(CurrentMaterialShowRequest(scene ? scene->generation : 0));
     if (g_spotlightFlowProbe.active) WriteSpotlightFlowReadyState();
 }
 
@@ -4619,8 +4823,10 @@ void ShowNativeUi()
         else ReleaseSpotlightBackdrop();
         RECT client = {};
         GetClientRect(g_hwnd, &client);
-        g_materialRenderer.Submit(BuildMaterialSceneSnapshot(client));
-        g_materialRenderer.Show(CurrentMaterialShowRequest());
+        auto scene = BuildMaterialSceneSnapshot(client);
+        PaintSpotlightLayeredWindow(true);
+        g_materialRenderer.Submit(scene);
+        g_materialRenderer.Show(CurrentMaterialShowRequest(scene->generation));
     }
     else
     {
@@ -7063,6 +7269,37 @@ void RenderDeferredIconOverlay(HDC dc, const RECT& client, const std::vector<Pen
     RestoreDC(dc, savedDc);
 }
 
+void DrawFavoriteBadge(ID2D1DCRenderTarget* target, const RECT& bounds)
+{
+    DrawTextDirect(
+        target,
+        g_iconTextFormat,
+        L"\xE735",
+        bounds,
+        RGB(255, 210, 92),
+        DWRITE_TEXT_ALIGNMENT_CENTER,
+        DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+        DWRITE_WORD_WRAPPING_NO_WRAP);
+    if (SpotlightFallbackPaintEvidenceEnabled())
+    {
+        ++g_spotlightFallbackPaintEvidence.favoriteBadgeCount;
+    }
+}
+
+void DrawFavoriteBadge(HDC dc, const RECT& bounds)
+{
+    DrawTextClipped(
+        dc,
+        L"\xE735",
+        bounds,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+        RGB(255, 210, 92));
+    if (SpotlightFallbackPaintEvidenceEnabled())
+    {
+        ++g_spotlightFallbackPaintEvidence.favoriteBadgeCount;
+    }
+}
+
 bool PaintContentDirect2D(HDC dc, const RECT& client)
 {
     if (!InitializeDirectRenderer()) return false;
@@ -7070,7 +7307,7 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
     if (!g_d2dDcRenderTarget)
     {
         auto props = D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            IsSpotlightMode() ? D2D1_RENDER_TARGET_TYPE_SOFTWARE : D2D1_RENDER_TARGET_TYPE_DEFAULT,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
         if (FAILED(g_d2dFactory->CreateDCRenderTarget(&props, &g_d2dDcRenderTarget)) || !g_d2dDcRenderTarget)
         {
@@ -7111,6 +7348,10 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
         }
         if (!baseLayerOnly)
         {
+            if (SpotlightFallbackPaintEvidenceEnabled())
+            {
+                ++g_spotlightFallbackPaintEvidence.regionHeaderCount;
+            }
             RECT headerRect = { bounds.left + ScaleDip(8), bounds.top, bounds.right, bounds.bottom };
             DrawTextDirect(target, g_headerTextFormat, RegionName(region.regionId), headerRect, g_adaptivePolicy.solidSurface ? WindowsColor(IsRegionSelected(region.regionId) ? g_adaptivePolicy.focusText : g_adaptivePolicy.text) : RGB(220, 232, 248), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
         }
@@ -7143,21 +7384,49 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
         if (!hideTileForDrag && regionHit != g_regionHits.end()) regionHit->bounds.bottom = std::max(regionHit->bounds.bottom, visualTileRect.bottom + metrics.gap);
         if (!hideTileForDrag && visualTileRect.bottom >= ContentClipTop() && visualTileRect.top <= client.bottom)
         {
-            const TileVisualState visualState = ResolveTileVisualState(item, slot.filteredIndex);
+            const TileVisualState visualState = IsSpotlightMode()
+                ? (g_spotlightState.Focus() == llp::interaction::FocusArea::Results
+                        && slot.filteredIndex == g_spotlightState.FocusedResultIndex()
+                    ? TileVisualState::KeyboardFocus
+                    : TileVisualState::Normal)
+                : ResolveTileVisualState(item, slot.filteredIndex);
             const bool emphasizedIcon = visualState != TileVisualState::Normal && visualState != TileVisualState::Hover;
-            DrawAppTileSurface(target, visualTileRect, visualState);
+            if (!IsSpotlightMode() || visualState == TileVisualState::KeyboardFocus)
+            {
+                DrawAppTileSurface(target, visualTileRect, visualState);
+            }
             if (!baseLayerOnly)
             {
-                DrawIconBackplateDirect(target, visualTileRect, emphasizedIcon);
+                if (SpotlightFallbackPaintEvidenceEnabled())
+                {
+                    g_spotlightFallbackPaintEvidence.itemStableIds.push_back(item.stableId);
+                    g_spotlightFallbackPaintEvidence.itemTitles.push_back(item.displayName);
+                    g_spotlightFallbackPaintEvidence.itemBounds.push_back(visualTileRect);
+                    g_spotlightFallbackPaintEvidence.itemIconTops.push_back(visualTileRect.top + 8);
+                    g_spotlightFallbackPaintEvidence.itemTitleTops.push_back(
+                        visualTileRect.bottom - std::max(36, CurrentSceneMetrics(client).tileFontPx * 2));
+                }
+                if (!IsSpotlightMode()) DrawIconBackplateDirect(target, visualTileRect, emphasizedIcon);
                 QueueItemIcon(item);
                 if (item.icon)
                 {
                     const int icon = IconSizePx();
                     const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
-                    const int iconY = visualTileRect.top + ScaleDip(14);
+                    const int iconY = visualTileRect.top + (IsSpotlightMode() ? 8 : ScaleDip(14));
                     pendingIcons.push_back({ item.icon, iconX, iconY, icon, DragIconAlphaForItem(item) });
                 }
-                RECT labelRect = { visualTileRect.left + ScaleDip(8), visualTileRect.top + IconSizePx() + ScaleDip(24), visualTileRect.right - ScaleDip(8), visualTileRect.bottom - ScaleDip(8) };
+                const auto sceneMetrics = CurrentSceneMetrics(client);
+                RECT labelRect = IsSpotlightMode()
+                    ? RECT{
+                        visualTileRect.left,
+                        visualTileRect.bottom - std::max(36, sceneMetrics.tileFontPx * 2),
+                        visualTileRect.right,
+                        visualTileRect.bottom }
+                    : RECT{
+                        visualTileRect.left + ScaleDip(8),
+                        visualTileRect.top + IconSizePx() + ScaleDip(24),
+                        visualTileRect.right - ScaleDip(8),
+                        visualTileRect.bottom - ScaleDip(8) };
                 const bool emphasized = visualState == TileVisualState::KeyboardFocus
                     || visualState == TileVisualState::Selected
                     || visualState == TileVisualState::MultiSelected
@@ -7165,11 +7434,19 @@ bool PaintContentDirect2D(HDC dc, const RECT& client)
                 const COLORREF labelColor = g_adaptivePolicy.solidSurface
                     ? WindowsColor(emphasized ? g_adaptivePolicy.focusText : g_adaptivePolicy.text)
                     : (IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252));
-                DrawTextDirect(target, g_tileTextFormat, item.displayName, labelRect, labelColor, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP);
-                if (g_searchHistory.Get(item.stableId).favorite)
+                DrawTextDirect(
+                    target,
+                    g_tileTextFormat,
+                    item.displayName,
+                    labelRect,
+                    labelColor,
+                    IsSpotlightMode() ? DWRITE_TEXT_ALIGNMENT_LEADING : DWRITE_TEXT_ALIGNMENT_CENTER,
+                    DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+                    DWRITE_WORD_WRAPPING_WRAP);
+                if (!IsSpotlightMode() && g_searchHistory.Get(item.stableId).favorite)
                 {
                     RECT favoriteRect = { visualTileRect.right - ScaleDip(30), visualTileRect.top + ScaleDip(6), visualTileRect.right - ScaleDip(8), visualTileRect.top + ScaleDip(28) };
-                    DrawTextDirect(target, g_iconTextFormat, L"\xE735", favoriteRect, RGB(255, 210, 92), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP);
+                    DrawFavoriteBadge(target, favoriteRect);
                 }
             }
             g_hits.push_back({ visualTileRect, slot.filteredIndex });
@@ -7231,6 +7508,10 @@ void PaintContent(HDC dc, const RECT& client)
         }
         if (!baseLayerOnly)
         {
+            if (SpotlightFallbackPaintEvidenceEnabled())
+            {
+                ++g_spotlightFallbackPaintEvidence.regionHeaderCount;
+            }
             RECT headerRect = { bounds.left + ScaleDip(8), bounds.top, bounds.right, bounds.bottom };
             DrawTextClipped(dc, RegionName(region.regionId), headerRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS, g_adaptivePolicy.solidSurface ? WindowsColor(IsRegionSelected(region.regionId) ? g_adaptivePolicy.focusText : g_adaptivePolicy.text) : RGB(220, 232, 248));
         }
@@ -7260,20 +7541,48 @@ void PaintContent(HDC dc, const RECT& client)
         if (!hideTileForDrag && regionHit != g_regionHits.end()) regionHit->bounds.bottom = std::max(regionHit->bounds.bottom, visualTileRect.bottom + metrics.gap);
         if (!hideTileForDrag && visualTileRect.bottom >= ContentClipTop() && visualTileRect.top <= client.bottom)
         {
-            const TileVisualState visualState = ResolveTileVisualState(item, slot.filteredIndex);
-            DrawAppTileSurface(dc, visualTileRect, visualState);
+            const TileVisualState visualState = IsSpotlightMode()
+                ? (g_spotlightState.Focus() == llp::interaction::FocusArea::Results
+                        && slot.filteredIndex == g_spotlightState.FocusedResultIndex()
+                    ? TileVisualState::KeyboardFocus
+                    : TileVisualState::Normal)
+                : ResolveTileVisualState(item, slot.filteredIndex);
+            if (!IsSpotlightMode() || visualState == TileVisualState::KeyboardFocus)
+            {
+                DrawAppTileSurface(dc, visualTileRect, visualState);
+            }
             if (!baseLayerOnly)
             {
+                if (SpotlightFallbackPaintEvidenceEnabled())
+                {
+                    g_spotlightFallbackPaintEvidence.itemStableIds.push_back(item.stableId);
+                    g_spotlightFallbackPaintEvidence.itemTitles.push_back(item.displayName);
+                    g_spotlightFallbackPaintEvidence.itemBounds.push_back(visualTileRect);
+                    g_spotlightFallbackPaintEvidence.itemIconTops.push_back(visualTileRect.top + 8);
+                    g_spotlightFallbackPaintEvidence.itemTitleTops.push_back(
+                        visualTileRect.bottom - std::max(36, CurrentSceneMetrics(client).tileFontPx * 2));
+                }
                 QueueItemIcon(item);
                 if (item.icon)
                 {
                     const int icon = IconSizePx();
                     const int iconX = visualTileRect.left + (metrics.tileSize - icon) / 2;
-                    const int iconY = visualTileRect.top + ScaleDip(14);
+                    const int iconY = visualTileRect.top + (IsSpotlightMode() ? 8 : ScaleDip(14));
                     DrawFittedIcon(dc, iconX, iconY, item.icon, icon, DragIconAlphaForItem(item));
                 }
                 SelectObject(dc, tileFont);
-                RECT labelRect = { visualTileRect.left + ScaleDip(8), visualTileRect.top + IconSizePx() + ScaleDip(24), visualTileRect.right - ScaleDip(8), visualTileRect.bottom - ScaleDip(8) };
+                const auto sceneMetrics = CurrentSceneMetrics(client);
+                RECT labelRect = IsSpotlightMode()
+                    ? RECT{
+                        visualTileRect.left,
+                        visualTileRect.bottom - std::max(36, sceneMetrics.tileFontPx * 2),
+                        visualTileRect.right,
+                        visualTileRect.bottom }
+                    : RECT{
+                        visualTileRect.left + ScaleDip(8),
+                        visualTileRect.top + IconSizePx() + ScaleDip(24),
+                        visualTileRect.right - ScaleDip(8),
+                        visualTileRect.bottom - ScaleDip(8) };
                 const bool emphasized = visualState == TileVisualState::KeyboardFocus
                     || visualState == TileVisualState::Selected
                     || visualState == TileVisualState::MultiSelected
@@ -7281,12 +7590,17 @@ void PaintContent(HDC dc, const RECT& client)
                 const COLORREF labelColor = g_adaptivePolicy.solidSurface
                     ? WindowsColor(emphasized ? g_adaptivePolicy.focusText : g_adaptivePolicy.text)
                     : (IsDropHintItem(item) ? RGB(168, 184, 202) : RGB(238, 244, 252));
-                DrawTextClipped(dc, item.displayName, labelRect, DT_CENTER | DT_WORDBREAK | DT_END_ELLIPSIS, labelColor);
-                if (g_searchHistory.Get(item.stableId).favorite)
+                DrawTextClipped(
+                    dc,
+                    item.displayName,
+                    labelRect,
+                    (IsSpotlightMode() ? DT_LEFT : DT_CENTER) | DT_WORDBREAK | DT_END_ELLIPSIS,
+                    labelColor);
+                if (!IsSpotlightMode() && g_searchHistory.Get(item.stableId).favorite)
                 {
                     RECT favoriteRect = { visualTileRect.right - ScaleDip(30), visualTileRect.top + ScaleDip(6), visualTileRect.right - ScaleDip(8), visualTileRect.top + ScaleDip(28) };
                     SelectObject(dc, iconFont);
-                    DrawTextClipped(dc, L"\xE735", favoriteRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER, RGB(255, 210, 92));
+                    DrawFavoriteBadge(dc, favoriteRect);
                 }
             }
             g_hits.push_back({ visualTileRect, slot.filteredIndex });
@@ -7460,12 +7774,51 @@ void ApplySpotlightPerPixelAlpha(DWORD* basePixels, DWORD* fullPixels, int width
     }
 }
 
+RECT SpotlightOwnershipProbeRect(int width, int height)
+{
+    return { 2, 2, std::min(width, 18), std::min(height, 18) };
+}
+
+bool SpotlightOwnershipProbeEnabled()
+{
+    return g_spotlightFlowProbe.active
+        && CompareStringOrdinal(
+            LLP_BUILD_CHANNEL_WIDE, -1, L"development", -1, TRUE) == CSTR_EQUAL
+        && CommandLineHasArgument(L"--spotlight-ownership-probe");
+}
+
+bool SpotlightFallbackPaintEvidenceEnabled()
+{
+    return SpotlightOwnershipProbeEnabled();
+}
+
+void StampSpotlightOwnershipProbe(DWORD* pixels, int width, int height)
+{
+    if (!pixels || !SpotlightOwnershipProbeEnabled()) return;
+    const RECT marker = SpotlightOwnershipProbeRect(width, height);
+    for (int y = marker.top; y < marker.bottom; ++y)
+    {
+        for (int x = marker.left; x < marker.right; ++x)
+        {
+            pixels[static_cast<size_t>(y) * width + x] = 0xFFFF00FF;
+        }
+    }
+}
+
 bool PaintIntoDib(HDC dc, const RECT& client, bool glassBaseOnly)
 {
+    if (!glassBaseOnly && SpotlightFallbackPaintEvidenceEnabled())
+    {
+        g_spotlightFallbackPaintEvidence = {};
+    }
     g_spotlightLayerBasePass = glassBaseOnly;
     const bool drawn = PaintContentDirect2D(dc, client);
     if (!drawn)
     {
+        if (!glassBaseOnly && SpotlightFallbackPaintEvidenceEnabled())
+        {
+            g_spotlightFallbackPaintEvidence = {};
+        }
         PaintContent(dc, client);
     }
     g_spotlightLayerBasePass = false;
@@ -7495,6 +7848,10 @@ bool PaintSpotlightLayeredWindow(bool repaint)
             reinterpret_cast<DWORD*>(g_spotlightLayerBuffer.fullBits),
             width,
             height);
+        StampSpotlightOwnershipProbe(
+            reinterpret_cast<DWORD*>(g_spotlightLayerBuffer.fullBits),
+            width,
+            height);
         g_spotlightLayerDirty = false;
     }
 
@@ -7508,6 +7865,62 @@ bool PaintSpotlightLayeredWindow(bool repaint)
     if (!screenDc) return false;
     const BOOL updated = UpdateLayeredWindow(g_hwnd, screenDc, &dst, &size, g_spotlightLayerBuffer.fullDc, &src, 0, &blend, ULW_ALPHA);
     ReleaseDC(nullptr, screenDc);
+    if (updated) g_spotlightLayerBuffer.directPixelsTransparent = false;
+    return updated != FALSE;
+}
+
+bool PresentTransparentSpotlightDirectLayer()
+{
+    if (!g_hwnd || !IsSpotlightMode()) return false;
+    if (g_spotlightLayerBuffer.directPixelsTransparent) return true;
+
+    RECT client = {};
+    GetClientRect(g_hwnd, &client);
+    const int width = std::max(1, static_cast<int>(client.right - client.left));
+    const int height = std::max(1, static_cast<int>(client.bottom - client.top));
+    if (!EnsureSpotlightLayerBuffer(width, height)) return false;
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    HDC screenDc = GetDC(nullptr);
+    if (!screenDc) return false;
+    HDC transparentDc = CreateCompatibleDC(screenDc);
+    void* transparentBits = nullptr;
+    HBITMAP transparentBitmap = CreateDIBSection(
+        screenDc, &info, DIB_RGB_COLORS, &transparentBits, nullptr, 0);
+    if (!transparentDc || !transparentBitmap || !transparentBits)
+    {
+        if (transparentBitmap) DeleteObject(transparentBitmap);
+        if (transparentDc) DeleteDC(transparentDc);
+        ReleaseDC(nullptr, screenDc);
+        return false;
+    }
+
+    HGDIOBJ oldBitmap = SelectObject(transparentDc, transparentBitmap);
+    std::memset(
+        transparentBits,
+        0,
+        static_cast<size_t>(width) * static_cast<size_t>(height) * sizeof(DWORD));
+    RECT windowRect = {};
+    GetWindowRect(g_hwnd, &windowRect);
+    POINT dst = { windowRect.left, windowRect.top };
+    POINT src = { 0, 0 };
+    SIZE size = { width, height };
+    BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    const BOOL updated = UpdateLayeredWindow(
+        g_hwnd, screenDc, &dst, &size, transparentDc, &src, 0, &blend, ULW_ALPHA);
+
+    SelectObject(transparentDc, oldBitmap);
+    DeleteObject(transparentBitmap);
+    DeleteDC(transparentDc);
+    ReleaseDC(nullptr, screenDc);
+    if (updated) g_spotlightLayerBuffer.directPixelsTransparent = true;
     return updated != FALSE;
 }
 
@@ -8241,7 +8654,7 @@ bool ApplySettingsFromWindow(HWND hwnd)
     RebuildFiltered();
     PositionWindow();
     PopulateSettingsWindow(hwnd);
-    InvalidateRect(g_hwnd, nullptr, TRUE);
+    RequestSearchRepaint(g_hwnd, true);
     return true;
 }
 
@@ -9028,19 +9441,30 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         WriteMaterialProbeState(hwnd);
         if (IsSpotlightMode() && IsWindowVisible(hwnd))
         {
-            if (g_spotlightFlowProbe.active) WriteSpotlightFlowReadyState();
             const auto diagnostics = g_materialRenderer.SnapshotDiagnostics();
             if (diagnostics.path == llp::material::RenderPath::HighFidelity
                 && (diagnostics.state == llp::material::LifecycleState::Live
-                    || diagnostics.state == llp::material::LifecycleState::FrozenEvidence))
+                    || diagnostics.state == llp::material::LifecycleState::FrozenEvidence)
+                && diagnostics.committedActivation == g_requestedMaterialActivation
+                && diagnostics.presentedSceneGeneration >= g_requestedMaterialSceneGeneration)
             {
-                InvalidateRect(hwnd, nullptr, FALSE);
+                if (PresentTransparentSpotlightDirectLayer())
+                {
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                else
+                {
+                    g_materialRenderer.Hide();
+                    g_spotlightLayerDirty = true;
+                    PaintSpotlightLayeredWindow(true);
+                }
             }
             else
             {
                 g_spotlightLayerDirty = true;
                 PaintSpotlightLayeredWindow(true);
             }
+            if (g_spotlightFlowProbe.active) WriteSpotlightFlowReadyState();
         }
         return 0;
     }
@@ -9161,7 +9585,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_COMMAND:
         if (LOWORD(wParam) == TrayOpenCommand) ShowNativeUi();
         if (LOWORD(wParam) == TrayOpenFolderCommand) OpenLaunchpadFolder();
-        if (LOWORD(wParam) == TrayRefreshCommand) { ReloadData(); RebuildFiltered(); InvalidateRect(hwnd, nullptr, TRUE); }
+        if (LOWORD(wParam) == TrayRefreshCommand)
+        {
+            ReloadData();
+            RebuildFiltered();
+            RequestSearchRepaint(hwnd, true);
+        }
         if (LOWORD(wParam) == TraySettingsCommand) ShowSettingsWindow();
         if (LOWORD(wParam) == TrayExitCommand) DestroyWindow(hwnd);
         if (LOWORD(wParam) == ItemLaunchCommand && !g_contextItemPaths.empty()) LaunchItemBySourcePath(g_contextItemPaths.front());
@@ -9205,6 +9634,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WmAdaptiveSnapshot:
         if (g_spotlightFlowProbe.active)
         {
+            if (SpotlightOwnershipProbeEnabled() && IsSpotlightMode() && IsWindowVisible(hwnd))
+            {
+                if (wParam == 2)
+                {
+                    g_materialRenderer.FreezeEvidence();
+                    return 0;
+                }
+                if (wParam == 3)
+                {
+                    RebuildVisibleMaterialRenderer();
+                    return 0;
+                }
+            }
             if (wParam == 1)
             {
                 SetOrganizationFeedback(L"Adaptive status announced", false, true, 8000);
@@ -9946,10 +10388,13 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     const bool materialProbeArgument = CommandLineHasArgument(L"--material-probe-file");
     const bool materialFailureArgument = CommandLineHasArgument(L"--material-force-failure");
     const bool spotlightFlowArgument = CommandLineHasArgument(L"--spotlight-flow-probe-file");
+    const bool testMonitorArgument = CommandLineHasArgument(L"--test-monitor-device");
     const bool anyMaterialTestArgument = materialProbeArgument || materialFailureArgument;
     const bool developmentBuild = CompareStringOrdinal(
         LLP_BUILD_CHANNEL_WIDE, -1, L"development", -1, TRUE) == CSTR_EQUAL;
     if (anyMaterialTestArgument && !developmentBuild) return 2;
+    const std::wstring requestedTestMonitorDevice = CommandLineValue(L"--test-monitor-device");
+    if (testMonitorArgument && (!developmentBuild || requestedTestMonitorDevice.empty())) return 2;
     const std::wstring materialProbePath = CommandLineValue(L"--material-probe-file");
     const std::wstring materialFailureText = CommandLineValue(L"--material-force-failure");
     if (anyMaterialTestArgument && materialProbePath.empty() && !spotlightFlowArgument) return 2;
@@ -10025,6 +10470,13 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         + (g_regionUndoProbe.active ? 1 : 0)
         + (materialProbeActive ? 1 : 0);
     if (activeBehaviorProbes > 1) return 2;
+    if (testMonitorArgument)
+    {
+        if (activeBehaviorProbes != 1) return 2;
+        g_testMonitorDevice = requestedTestMonitorDevice;
+        HMONITOR requestedMonitor = nullptr;
+        if (!ResolveRequestedTestMonitor(requestedMonitor)) return 2;
+    }
     if (g_shellImportProbe.active && (g_shellImportProbe.root.empty() || g_shellImportProbe.destination.empty())) return 2;
     if (g_spotlightFlowProbe.active && g_spotlightFlowProbe.readyPath.empty()) return 2;
     if (g_launchpadFlowProbe.active && g_launchpadFlowProbe.readyPath.empty()) return 2;
@@ -10229,7 +10681,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         }
         llp::material::ShowRequest request;
         request.window = g_hwnd;
-        request.monitor = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+        request.monitor = g_testMonitorDevice.empty()
+            ? MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST)
+            : SpotlightTargetMonitor();
         request.windowDesktop = { windowRect.left, windowRect.top, windowRect.right, windowRect.bottom };
         request.dpi = static_cast<int>(g_windowDpi);
         request.policy = g_adaptivePolicy;
