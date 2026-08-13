@@ -577,6 +577,7 @@ git commit -m "feat: route Spotlight through live material"
 
 **Files:**
 
+- Modify: `src/LightLaunchpad.NativeUi/MaterialRenderer.h`
 - Modify: `src/LightLaunchpad.NativeUi/MaterialRenderer.cpp`
 - Modify: `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
 - Modify: `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp`
@@ -629,7 +630,7 @@ Expected: adaptive and recovery matrix passes, evidence freeze removes affinity 
 - [ ] Commit:
 
 ```powershell
-git add src/LightLaunchpad.NativeUi/MaterialRenderer.cpp src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp tests/LightLaunchpad.NativeUi.Tests/MaterialRendererBehavior.Tests.ps1 tests/LightLaunchpad.NativeUi.Tests/ExecutableIdentity.Tests.ps1
+git add src/LightLaunchpad.NativeUi/MaterialRenderer.h src/LightLaunchpad.NativeUi/MaterialRenderer.cpp src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp tests/LightLaunchpad.NativeUi.Tests/MaterialRendererBehavior.Tests.ps1 tests/LightLaunchpad.NativeUi.Tests/ExecutableIdentity.Tests.ps1
 git diff --cached --check
 git commit -m "feat: harden material recovery and evidence"
 ```
