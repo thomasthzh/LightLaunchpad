@@ -582,6 +582,7 @@ git commit -m "feat: route Spotlight through live material"
 - Modify: `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp`
 - Modify: `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp`
 - Modify: `tests/LightLaunchpad.NativeUi.Tests/MaterialRendererBehavior.Tests.ps1`
+- Modify: `tests/LightLaunchpad.NativeUi.Tests/SpotlightFlowBehavior.Tests.ps1`
 - Modify: `tests/LightLaunchpad.NativeUi.Tests/ExecutableIdentity.Tests.ps1`
 
 - [ ] Add RED cases for high contrast, transparency disabled, reduced motion, access loss with successful rebuild, access loss with failed rebuild, display change after fallback, and evidence freeze. Require one rebuild only per visible epoch and no recurring retry.
@@ -630,7 +631,7 @@ Expected: adaptive and recovery matrix passes, evidence freeze removes affinity 
 - [ ] Commit:
 
 ```powershell
-git add src/LightLaunchpad.NativeUi/MaterialRenderer.h src/LightLaunchpad.NativeUi/MaterialRenderer.cpp src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp tests/LightLaunchpad.NativeUi.Tests/MaterialRendererBehavior.Tests.ps1 tests/LightLaunchpad.NativeUi.Tests/ExecutableIdentity.Tests.ps1
+git add src/LightLaunchpad.NativeUi/MaterialRenderer.h src/LightLaunchpad.NativeUi/MaterialRenderer.cpp src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp tests/LightLaunchpad.NativeUi.Tests/MaterialRendererBehavior.Tests.ps1 tests/LightLaunchpad.NativeUi.Tests/SpotlightFlowBehavior.Tests.ps1 tests/LightLaunchpad.NativeUi.Tests/ExecutableIdentity.Tests.ps1
 git diff --cached --check
 git commit -m "feat: harden material recovery and evidence"
 ```
