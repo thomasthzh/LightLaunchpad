@@ -2,16 +2,53 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-12 12:06:15 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-14 06:02:49 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `7a435550b05e52b1c9bc3a5d808f5b477f780ae0`
+- HEAD: `cf8489be500dfff6cf0d360206c84d4d4a459f4f`
 - Remote main: `origin/main@33e91c2`
 - Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
 - Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
 - Goal status: active; LLP-013 remains the only task in progress.
-- Current gate: LLP-013 Task 5 is complete after independent specification and code-quality re-review; Task 6 normal Spotlight host integration and legacy-lens removal is the next gate and has not started.
+- Current gate: LLP-013 Task 6 is complete after independent specification and code-quality re-review; Task 7 recovery, adaptive routing, diagnostics, and evidence freeze is the next gate and has not started.
+
+## LLP-013 Task 6 Completion Evidence
+
+Status at 2026-08-14 06:02 +08:00: Task 6 complete; LLP-013 remains the sole project-level `in_progress` task, and Task 7 is the next implementation gate.
+
+Changed files and commits:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - normal Spotlight host ownership, latest immutable scene submission, aligned fallback cache, atomic direct/DComp handoff, DISPLAY1 Development probe selection, visible Settings mode transitions, real hotkey routing, self-capture-free fallback capture, and activation-bound Hidden restoration.
+- `src/LightLaunchpad.NativeUi/MaterialRenderer.{h,cpp}` - host diagnostics contract, successful-commit activation/scene acknowledgement, ordinary-path evidence gating, asynchronous Stopping notification, latest-request-wins Hide ordering, and renderer-owned current-scene lifetime.
+- `tests/LightLaunchpad.NativeUi.Tests/SpotlightFlowBehavior.Tests.ps1` - real normal/fallback canonical flows, DISPLAY1 containment, compositor ownership pixels, catalog identity refresh, real Alt+9, Settings transitions, pre-clear failure, Hide interleavings, scene-lifetime sentinel, self-capture, real blur-close/reopen, and exact isolated launch-process exit evidence.
+- Task 6 commits: initial host integration `5ce5bbc`; immutable scrolling/auxiliary scene completion `df00638`; first atomic ownership correction `53f3847`; final reviewed correction `cf8489be500dfff6cf0d360206c84d4d4a459f4f` (`fix: harden Spotlight lifecycle transitions`). The final commit is exactly four files; `MaterialRendererBehavior.Tests.ps1` architecture/Host coverage was already committed by the initial integration and was not changed in the final correction.
+
+TDD RED and systematic-debugging evidence:
+
+- Initial real-EXE RED reported no normal-host material path. Production then routed Spotlight through the renderer, deleted all five legacy nested/magnifying functions, kept Launchpad painting unchanged, and preserved both canonical paths: `Alt+D -> input -> Enter` and `Alt+D -> input -> Down -> arrows -> Enter`.
+- Real wheel/catalog/auxiliary REDs proved that direct invalidation could not update a high-fidelity Spotlight whose `WM_PAINT` only validates. Visible changes now build and submit latest immutable scenes, maintain content height, and draw the auxiliary control through the same DComp surfaces.
+- Compositor ownership RED captured 235 pixels of a Development-only fallback signature through a committed live frame. The fixed renderer waits for successful DComp commit completion on its worker thread, acknowledges the exact activation/scene, then clears direct-layer alpha; rebuild/reopen remain single-owner. Forced fallback retains 256 ownership pixels and no transparent hole.
+- Visible Settings transaction REDs exposed missing renderer start/stop, deferred Launchpad paint, an opaque fallback restored before Hidden, and a queued Stopping callback race. The final state machine removes `WS_EX_LAYERED`, synchronously paints current Launchpad before Apply returns, retains the committed DComp frame until Hidden, restores fallback once for the matching activation, and uses asynchronous `PostMessage` plus an explicit Development acknowledgement.
+- Latest-request tests produced `starting` after Show->Hide and scene generation 7 after Submit->Hide. Explicit acknowledgement is now separate from real Hide intent; the newest Hide cancels queued Show/Rebuild/pending scene, while Submit+Show arriving during old cleanup survives and commits activation 2/generation 7.
+- Four WER dumps pinpointed `0xC0000005` in the EXE's scene-item loop. A deterministic lifetime RED observed `sceneExpired=true`: UI-thread Hide had released `currentScene_` while the renderer used a raw pointer during unlocked Compose. Only the renderer thread now releases the current scene after returning to the lock; the GREEN sentinel remains alive and final state is Hidden. Fresh final runs created no new Application Error or crash dump.
+- Ordinary real rendering initially copied four stable-ID/source-path strings for two items. The final explicit Development ownership gate yields host copies 0, renderer copies 0, and empty identity vectors in ordinary mode while catalog add/rename/remove/restore and exact launch identity remain fully asserted in evidence mode.
+- Settings hotkey RED persisted Alt+9 but could not trigger because a Development bypass skipped `RegisterHotKey`. The bypass is gone; real Windows Alt+9 hides and reopens after Apply. All subsequent canonical opens use the registered key.
+- Launchpad-to-Spotlight forced-fallback RED found 2,380 Settings ownership pixels in the captured DIB. The final order is position/marker, flush, hide main and Settings, flush, capture, prepaint fallback, Submit/Show, show/focus main, then destroy Settings. GREEN reports main/settings marker 0/0, ownership 256, `settingsWindowExists=false`; a real DISPLAY1 auxiliary window causes blur-close and Alt+9 reopens correctly.
+
+Final verification, performance, screenshots, and real-EXE evidence:
+
+- Post-commit Windows PowerShell 5.1 MaterialRenderer passes 29/29. Focused real-EXE gates pass self-capture/Settings lifetime, Compose lifetime, pre-clear failure, Hide cleanup Submit+Show, latest Show->Hide, latest Submit->Hide, and ordinary zero-copy evidence. `Hide` remains a 0-microsecond UI caller operation; production test symbols are absent.
+- `MaterialRendererBehavior.Tests.ps1 -Mode Host` passes normal and forced canonical flows, both hard-targeted to `\\.\DISPLAY1`; post-commit input-ready P95 is 78/78 ms. Lifecycle passes with normal high fidelity, forced acquired frames 0, Stable window events 0, production fake symbols absent, and startup unchanged.
+- Final independent specification review: PASS, C0/I0/M0. Final independent code-quality review: Ready Yes, C0/I0/M0. Each independently reran the affected focused, module, Host, and Lifecycle gates serially and inspected the original pixel evidence.
+- Pixel evidence includes `artifacts/llp013-task6-quality-settings-lifetime-final/00-launchpad-settings-to-spotlight-fallback.png` plus the clean live/rebuild/reopen and immediate Launchpad transition images. The final forced fallback is a single rounded Spotlight surface with search, auxiliary control, and items; it contains no old Launchpad region/favorite hierarchy, Settings window, white frame, duplicated material, or glass-on-glass. The 16x16 magenta square is an explicit Development ownership signature, not production UI.
+- Retained exact-HEAD Development EXE: `C:\Users\thoma\Desktop\启动台\artifacts\task6-postcommit-cf8489b\development\LightLaunchpad.NativeUi.exe`, 1,838,080 bytes, SHA256 `58D18F79938B5FEE9DE19B19E42A9FFFB73500C60ACFBDC1039391F7FDC190AD`. Diagnostics exit 0 with full commit `cf8489be500dfff6cf0d360206c84d4d4a459f4f`, channel `development`, and the exact retained path. A real DISPLAY1 probe exits 0 with `live/high-fidelity`, acquired 3, presented 3, and first frame 1.5428 ms.
+
+Protection, retained diagnostics, and next step:
+
+- The only NativeUi process remains protected PID `30276` at `C:\Users\thoma\Desktop\启动台\artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe`, SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run remains the exact quoted path. Stable remains absent and the `C:\TOOL` EXE remains SHA256 `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`.
+- `LLP_reconstruction/` remains untracked/unstaged and non-reparse; ignored `LightLaunchpad.NativeUi.o` remains untouched. Historical failed-run roots/processes and the exact-review directory are retained because their validated cleanup either failed with a locked crash-era launch target or was rejected before execution; no stronger delete or process termination was attempted. Fresh final and post-commit runs left no new crash dump or task root.
+- Start Task 7 RED for high contrast/transparency-disabled/reduced-motion routing, one-rebuild recovery, copied diagnostics, and Development-only evidence freeze. Keep LLP-013 as the only project task in progress and do not start Task 8 until Task 7 implementation, specification review, quality review, and evidence update close. No formal install, startup, `C:\TOOL`, push, tag, or release mutation has occurred.
 
 ## LLP-013 Task 5 Completion Evidence
 
