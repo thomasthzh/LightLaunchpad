@@ -150,6 +150,8 @@ struct ShowRequest
     UINT statusMessage = 0;
     std::uint64_t activation = 0;
     std::uint64_t requiredSceneGeneration = 0;
+    bool developmentStoppingBarrier = false;
+    bool developmentComposeLifetimeProbe = false;
 };
 
 struct Diagnostics
@@ -174,6 +176,14 @@ struct Diagnostics
     std::vector<std::wstring> presentedItemSourcePaths;
     std::uint64_t committedActivation = 0;
     std::uint64_t presentedSceneGeneration = 0;
+    std::uint64_t presentationEvidenceItemCopies = 0;
+    std::uint64_t queuedSceneGeneration = 0;
+    std::uint64_t currentSceneGeneration = 0;
+    bool showQueued = false;
+    bool rebuildQueued = false;
+    bool composeLifetimeProbeEntered = false;
+    bool composeLifetimeProbeCompleted = false;
+    bool composeSceneExpiredDuringHide = false;
 };
 
 class LatestSceneSlot
@@ -200,6 +210,7 @@ public:
     void Hide();
     void Shutdown();
     void FreezeEvidence();
+    void AcknowledgeStoppingStatusForDevelopment();
     Diagnostics SnapshotDiagnostics() const;
     bool WaitUntilHiddenForTest(std::uint32_t timeoutMs) const;
 

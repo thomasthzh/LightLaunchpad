@@ -350,6 +350,7 @@ llp::adaptive::Environment g_adaptiveEnvironment;
 llp::adaptive::Policy g_adaptivePolicy;
 llp::material::MaterialRenderer g_materialRenderer;
 std::uint64_t g_materialSceneGeneration = 0;
+std::uint64_t g_materialHostIdentityCopies = 0;
 std::uint64_t g_materialActivation = 0;
 std::uint64_t g_requestedMaterialActivation = 0;
 std::uint64_t g_requestedMaterialSceneGeneration = 0;
@@ -504,6 +505,18 @@ struct SpotlightFlowProbeState
     std::string materialPath = "fallback";
     std::string materialFailure = "None";
     std::string materialState = "hidden";
+    bool launchpadModeTransitionPaintInProgress = false;
+    bool launchpadModeTransitionPaintObserved = false;
+    bool launchpadModeTransitionPaintedBeforeApplyReturn = false;
+    bool launchpadModeTransitionLayeredAfterApply = false;
+    bool hideSceneRaceInjected = false;
+    std::uint64_t hideSceneRaceActivation = 0;
+    std::uint64_t hideSceneRaceGeneration = 0;
+    bool latestHideRaceInjected = false;
+    std::wstring latestHideRaceMode;
+    std::uint64_t latestHideRaceActivation = 0;
+    std::uint64_t latestHideRaceGeneration = 0;
+    bool composeHideLifetimeInjected = false;
 };
 
 struct LaunchpadFlowProbeState
@@ -591,6 +604,37 @@ struct SpotlightFallbackPaintEvidence
     std::vector<int> itemTitleTops;
 };
 SpotlightFallbackPaintEvidence g_spotlightFallbackPaintEvidence;
+struct SpotlightDirectTransitionFailureEvidence
+{
+    bool injected = false;
+    llp::material::LifecycleState failureState = llp::material::LifecycleState::Hidden;
+    llp::material::RenderPath failurePath = llp::material::RenderPath::Fallback;
+    bool directTransparentAfterFailureHandler = false;
+    bool fallbackRestoredAfterHidden = false;
+    llp::material::LifecycleState fallbackRestoreState = llp::material::LifecycleState::Hidden;
+    int preHiddenStatusCallbacks = 0;
+    bool stoppingStatusCallbackSynchronous = false;
+    bool directTransparentAfterPreHiddenCallbacks = true;
+    bool windowHiddenAfterFailureHandler = false;
+    bool windowHiddenDuringPreHiddenCallbacks = true;
+    int preHiddenVisibleOpaqueOverlapCallbacks = 0;
+    int preHiddenOpaqueFallbackPaints = 0;
+    int hiddenFallbackRestorePaints = 0;
+    bool windowVisibleAfterHiddenRestore = false;
+};
+SpotlightDirectTransitionFailureEvidence g_spotlightDirectTransitionFailureEvidence;
+struct SpotlightSelfCaptureEvidence
+{
+    bool active = false;
+    bool captured = false;
+    int mainMarkerPixels = 0;
+    int settingsMarkerPixels = 0;
+    RECT mainMarker = {};
+    RECT settingsMarker = {};
+};
+SpotlightSelfCaptureEvidence g_spotlightSelfCaptureEvidence;
+bool g_spotlightFallbackRestorePending = false;
+std::uint64_t g_spotlightFallbackRestoreActivation = 0;
 LaunchpadFlowProbeState g_launchpadFlowProbe;
 OrganizationProbeState g_organizationProbe;
 RegionUndoProbeState g_regionUndoProbe;
@@ -612,6 +656,13 @@ bool IsSpotlightMode();
 bool PaintSpotlightLayeredWindow(bool repaint = true);
 bool PresentTransparentSpotlightDirectLayer();
 RECT SpotlightOwnershipProbeRect(int width, int height);
+bool SpotlightDevelopmentFlowProbeEnabled();
+bool SpotlightOwnershipProbeEnabled();
+bool SpotlightTransparentTransitionFailureProbeEnabled();
+bool SpotlightHideSceneRaceProbeEnabled();
+std::wstring SpotlightLatestHideRaceProbeMode();
+bool SpotlightComposeHideLifetimeProbeEnabled();
+bool SpotlightSelfCaptureProbeEnabled();
 bool SpotlightFallbackPaintEvidenceEnabled();
 void ReleaseSpotlightLayerBuffer();
 void ReleaseSpotlightBackdrop();
@@ -2153,6 +2204,7 @@ std::vector<HitTile> BuildContentHitTiles()
 
 std::shared_ptr<const llp::material::SceneSnapshot> BuildMaterialSceneSnapshot(const RECT& client)
 {
+    g_materialHostIdentityCopies = 0;
     auto snapshot = std::make_shared<llp::material::SceneSnapshot>();
     snapshot->generation = ++g_materialSceneGeneration;
     snapshot->metrics = CurrentSceneMetrics(client);
@@ -2211,8 +2263,12 @@ std::shared_ptr<const llp::material::SceneSnapshot> BuildMaterialSceneSnapshot(c
         }
 
         llp::material::SceneItem item;
-        item.stableId = source.stableId;
-        item.sourcePath = source.sourcePath;
+        if (SpotlightOwnershipProbeEnabled())
+        {
+            item.stableId = source.stableId;
+            item.sourcePath = source.sourcePath;
+            g_materialHostIdentityCopies += 2;
+        }
         item.bounds = slot.viewportBounds;
         item.title = source.displayName;
         item.subtitle = source.subtitle;
@@ -3335,6 +3391,15 @@ bool WriteSpotlightFlowReadyState()
         { "materialRequestedSceneGeneration", g_requestedMaterialSceneGeneration },
         { "materialCommittedActivation", material.committedActivation },
         { "materialPresentedSceneGeneration", material.presentedSceneGeneration },
+        { "materialPresentationEvidenceItemCopies", material.presentationEvidenceItemCopies },
+        { "materialHostIdentityCopies", g_materialHostIdentityCopies },
+        { "materialQueuedSceneGeneration", material.queuedSceneGeneration },
+        { "materialCurrentSceneGeneration", material.currentSceneGeneration },
+        { "materialShowQueued", material.showQueued },
+        { "materialRebuildQueued", material.rebuildQueued },
+        { "materialComposeLifetimeProbeEntered", material.composeLifetimeProbeEntered },
+        { "materialComposeLifetimeProbeCompleted", material.composeLifetimeProbeCompleted },
+        { "materialComposeSceneExpiredDuringHide", material.composeSceneExpiredDuringHide },
         { "materialAuxiliaryRendered", material.auxiliaryRendered },
         { "materialAuxiliarySceneGeneration", material.auxiliarySceneGeneration },
         { "materialAuxiliaryBounds", jsonRect(material.auxiliaryBounds) },
@@ -3350,6 +3415,36 @@ bool WriteSpotlightFlowReadyState()
         { "spotlightFallbackPresentedItemIconTops", fallbackItemIconTops },
         { "spotlightFallbackPresentedItemTitleTops", fallbackItemTitleTops },
         { "materialDirectLayerTransparent", g_spotlightLayerBuffer.directPixelsTransparent },
+        { "materialTransparentTransitionFailureInjected", g_spotlightDirectTransitionFailureEvidence.injected },
+        { "materialTransitionFailureState", MaterialStateName(g_spotlightDirectTransitionFailureEvidence.failureState) },
+        { "materialTransitionFailurePath", MaterialRenderPathName(g_spotlightDirectTransitionFailureEvidence.failurePath) },
+        { "materialTransitionDirectTransparentAfterHandler", g_spotlightDirectTransitionFailureEvidence.directTransparentAfterFailureHandler },
+        { "materialTransitionFallbackRestoredAfterHidden", g_spotlightDirectTransitionFailureEvidence.fallbackRestoredAfterHidden },
+        { "materialTransitionFallbackRestoreState", MaterialStateName(g_spotlightDirectTransitionFailureEvidence.fallbackRestoreState) },
+        { "materialTransitionPreHiddenStatusCallbacks", g_spotlightDirectTransitionFailureEvidence.preHiddenStatusCallbacks },
+        { "materialTransitionStoppingStatusCallbackSynchronous", g_spotlightDirectTransitionFailureEvidence.stoppingStatusCallbackSynchronous },
+        { "materialTransitionDirectTransparentAfterPreHiddenCallbacks", g_spotlightDirectTransitionFailureEvidence.directTransparentAfterPreHiddenCallbacks },
+        { "materialTransitionWindowHiddenAfterFailureHandler", g_spotlightDirectTransitionFailureEvidence.windowHiddenAfterFailureHandler },
+        { "materialTransitionWindowHiddenDuringPreHiddenCallbacks", g_spotlightDirectTransitionFailureEvidence.windowHiddenDuringPreHiddenCallbacks },
+        { "materialTransitionPreHiddenVisibleOpaqueOverlapCallbacks", g_spotlightDirectTransitionFailureEvidence.preHiddenVisibleOpaqueOverlapCallbacks },
+        { "materialTransitionPreHiddenOpaqueFallbackPaints", g_spotlightDirectTransitionFailureEvidence.preHiddenOpaqueFallbackPaints },
+        { "materialTransitionHiddenFallbackRestorePaints", g_spotlightDirectTransitionFailureEvidence.hiddenFallbackRestorePaints },
+        { "materialTransitionWindowVisibleAfterHiddenRestore", g_spotlightDirectTransitionFailureEvidence.windowVisibleAfterHiddenRestore },
+        { "launchpadModeTransitionPaintedBeforeApplyReturn", g_spotlightFlowProbe.launchpadModeTransitionPaintedBeforeApplyReturn },
+        { "launchpadModeTransitionLayeredAfterApply", g_spotlightFlowProbe.launchpadModeTransitionLayeredAfterApply },
+        { "materialHideSceneRaceInjected", g_spotlightFlowProbe.hideSceneRaceInjected },
+        { "materialHideSceneRaceActivation", g_spotlightFlowProbe.hideSceneRaceActivation },
+        { "materialHideSceneRaceGeneration", g_spotlightFlowProbe.hideSceneRaceGeneration },
+        { "materialLatestHideRaceInjected", g_spotlightFlowProbe.latestHideRaceInjected },
+        { "materialLatestHideRaceMode", llp::persistence::WideToUtf8(g_spotlightFlowProbe.latestHideRaceMode) },
+        { "materialLatestHideRaceActivation", g_spotlightFlowProbe.latestHideRaceActivation },
+        { "materialLatestHideRaceGeneration", g_spotlightFlowProbe.latestHideRaceGeneration },
+        { "materialComposeHideLifetimeInjected", g_spotlightFlowProbe.composeHideLifetimeInjected },
+        { "spotlightSelfCaptureEvidenceActive", g_spotlightSelfCaptureEvidence.active },
+        { "spotlightSelfCaptureEvidenceCaptured", g_spotlightSelfCaptureEvidence.captured },
+        { "spotlightSelfCaptureMainMarkerPixels", g_spotlightSelfCaptureEvidence.mainMarkerPixels },
+        { "spotlightSelfCaptureSettingsMarkerPixels", g_spotlightSelfCaptureEvidence.settingsMarkerPixels },
+        { "settingsWindowExists", g_settingsHwnd && IsWindow(g_settingsHwnd) },
         { "materialOwnershipProbeBounds", Json{
             { "left", ownershipProbe.left },
             { "top", ownershipProbe.top },
@@ -4450,6 +4545,53 @@ void ReleaseSpotlightBackdrop()
     g_spotlightLayerDirty = true;
 }
 
+RECT DrawSpotlightSelfCaptureMarker(HWND window, COLORREF color, int inset)
+{
+    RECT screenMarker = {};
+    if (!window || !IsWindowVisible(window)) return screenMarker;
+    const RECT clientMarker = { inset, inset, inset + 64, inset + 64 };
+    HDC dc = GetDC(window);
+    if (!dc) return screenMarker;
+    HBRUSH brush = CreateSolidBrush(color);
+    if (brush)
+    {
+        FillRect(dc, &clientMarker, brush);
+        DeleteObject(brush);
+    }
+    ReleaseDC(window, dc);
+    POINT topLeft = { clientMarker.left, clientMarker.top };
+    POINT bottomRight = { clientMarker.right, clientMarker.bottom };
+    ClientToScreen(window, &topLeft);
+    ClientToScreen(window, &bottomRight);
+    return { topLeft.x, topLeft.y, bottomRight.x, bottomRight.y };
+}
+
+int CountSpotlightSelfCaptureMarkerPixels(
+    const RECT& windowRect,
+    const RECT& markerRect,
+    DWORD expected)
+{
+    if (!g_spotlightBackdrop.bits) return 0;
+    const RECT local = {
+        std::max(0L, markerRect.left - windowRect.left),
+        std::max(0L, markerRect.top - windowRect.top),
+        std::min(static_cast<LONG>(g_spotlightBackdrop.width), markerRect.right - windowRect.left),
+        std::min(static_cast<LONG>(g_spotlightBackdrop.height), markerRect.bottom - windowRect.top)
+    };
+    if (local.right <= local.left || local.bottom <= local.top) return 0;
+    const DWORD* pixels = reinterpret_cast<const DWORD*>(g_spotlightBackdrop.bits);
+    int count = 0;
+    for (LONG y = local.top; y < local.bottom; ++y)
+    {
+        for (LONG x = local.left; x < local.right; ++x)
+        {
+            if ((pixels[static_cast<size_t>(y) * g_spotlightBackdrop.width + x] & 0x00FFFFFFu)
+                == expected) ++count;
+        }
+    }
+    return count;
+}
+
 bool CaptureSpotlightBackdrop(const RECT& windowRect)
 {
     ReleaseSpotlightBackdrop();
@@ -4506,6 +4648,18 @@ bool CaptureSpotlightBackdrop(const RECT& windowRect)
     g_spotlightBackdrop.bitmap = bitmap;
     g_spotlightBackdrop.oldBitmap = oldBitmap;
     g_spotlightBackdrop.bits = bits;
+    if (g_spotlightSelfCaptureEvidence.active)
+    {
+        g_spotlightSelfCaptureEvidence.captured = true;
+        g_spotlightSelfCaptureEvidence.mainMarkerPixels = CountSpotlightSelfCaptureMarkerPixels(
+            windowRect,
+            g_spotlightSelfCaptureEvidence.mainMarker,
+            0x00FF00FFu);
+        g_spotlightSelfCaptureEvidence.settingsMarkerPixels = CountSpotlightSelfCaptureMarkerPixels(
+            windowRect,
+            g_spotlightSelfCaptureEvidence.settingsMarker,
+            0x0000FF00u);
+    }
     ApplyBoxBlurToBackdrop(width, height, 12);
     g_spotlightLayerDirty = true;
     return true;
@@ -4751,10 +4905,15 @@ llp::material::ShowRequest CurrentMaterialShowRequest(std::uint64_t requiredScen
     };
     request.dpi = static_cast<int>(g_windowDpi);
     request.policy = g_adaptivePolicy;
+    request.developmentEvidence = SpotlightOwnershipProbeEnabled();
     request.forcedFailure = MaterialForcedFailureFromCommandLine();
     request.statusMessage = WmMaterialRendererStatus;
     request.activation = ++g_materialActivation;
     request.requiredSceneGeneration = requiredSceneGeneration;
+    request.developmentStoppingBarrier = SpotlightHideSceneRaceProbeEnabled()
+        || !SpotlightLatestHideRaceProbeMode().empty()
+        || SpotlightTransparentTransitionFailureProbeEnabled();
+    request.developmentComposeLifetimeProbe = SpotlightComposeHideLifetimeProbeEnabled();
     g_requestedMaterialActivation = request.activation;
     g_requestedMaterialSceneGeneration = requiredSceneGeneration;
     return request;
@@ -4763,6 +4922,8 @@ llp::material::ShowRequest CurrentMaterialShowRequest(std::uint64_t requiredScen
 void RebuildVisibleMaterialRenderer()
 {
     if (!g_hwnd || !IsSpotlightMode() || !IsWindowVisible(g_hwnd)) return;
+    g_spotlightFallbackRestorePending = false;
+    g_spotlightFallbackRestoreActivation = 0;
     RECT client = {};
     std::shared_ptr<const llp::material::SceneSnapshot> scene;
     if (GetClientRect(g_hwnd, &client))
@@ -4798,6 +4959,8 @@ void HideSpotlightImmediately()
 
 void ShowNativeUi()
 {
+    g_spotlightFallbackRestorePending = false;
+    g_spotlightFallbackRestoreActivation = 0;
     if (!g_catalogRefreshPending)
     {
         const DWORD probeDelay = g_catalogBrokerProbe.active && g_catalogBrokerProbe.stage == 1
@@ -4858,6 +5021,8 @@ void ShowNativeUi()
 
 void HideNativeUi()
 {
+    g_spotlightFallbackRestorePending = false;
+    g_spotlightFallbackRestoreActivation = 0;
     g_searchInputActive = false;
     g_searchInput.CancelComposition();
     g_searchPointerSelecting = false;
@@ -7781,10 +7946,48 @@ RECT SpotlightOwnershipProbeRect(int width, int height)
 
 bool SpotlightOwnershipProbeEnabled()
 {
+    return SpotlightDevelopmentFlowProbeEnabled()
+        && CommandLineHasArgument(L"--spotlight-ownership-probe");
+}
+
+bool SpotlightDevelopmentFlowProbeEnabled()
+{
     return g_spotlightFlowProbe.active
         && CompareStringOrdinal(
-            LLP_BUILD_CHANNEL_WIDE, -1, L"development", -1, TRUE) == CSTR_EQUAL
-        && CommandLineHasArgument(L"--spotlight-ownership-probe");
+            LLP_BUILD_CHANNEL_WIDE, -1, L"development", -1, TRUE) == CSTR_EQUAL;
+}
+
+bool SpotlightTransparentTransitionFailureProbeEnabled()
+{
+    return SpotlightDevelopmentFlowProbeEnabled()
+        && CommandLineHasArgument(L"--spotlight-force-transparent-transition-failure");
+}
+
+bool SpotlightHideSceneRaceProbeEnabled()
+{
+    return SpotlightDevelopmentFlowProbeEnabled()
+        && CommandLineHasArgument(L"--spotlight-force-hide-scene-race");
+}
+
+std::wstring SpotlightLatestHideRaceProbeMode()
+{
+    if (!SpotlightDevelopmentFlowProbeEnabled()) return L"";
+    const auto mode = CommandLineValue(L"--spotlight-force-latest-hide-race");
+    if (CompareStringOrdinal(mode.c_str(), -1, L"show-hide", -1, TRUE) == CSTR_EQUAL) return L"show-hide";
+    if (CompareStringOrdinal(mode.c_str(), -1, L"submit-hide", -1, TRUE) == CSTR_EQUAL) return L"submit-hide";
+    return L"";
+}
+
+bool SpotlightComposeHideLifetimeProbeEnabled()
+{
+    return SpotlightDevelopmentFlowProbeEnabled()
+        && CommandLineHasArgument(L"--spotlight-force-compose-hide-lifetime");
+}
+
+bool SpotlightSelfCaptureProbeEnabled()
+{
+    return SpotlightDevelopmentFlowProbeEnabled()
+        && CommandLineHasArgument(L"--spotlight-force-self-capture-evidence");
 }
 
 bool SpotlightFallbackPaintEvidenceEnabled()
@@ -7873,6 +8076,14 @@ bool PresentTransparentSpotlightDirectLayer()
 {
     if (!g_hwnd || !IsSpotlightMode()) return false;
     if (g_spotlightLayerBuffer.directPixelsTransparent) return true;
+
+    if (SpotlightTransparentTransitionFailureProbeEnabled()
+        && !g_spotlightDirectTransitionFailureEvidence.injected)
+    {
+        g_spotlightDirectTransitionFailureEvidence.injected = true;
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return false;
+    }
 
     RECT client = {};
     GetClientRect(g_hwnd, &client);
@@ -7980,6 +8191,11 @@ void PaintWindow(HWND hwnd)
         PaintContent(memoryDc, client);
     }
     BitBlt(screenDc, 0, 0, client.right - client.left, client.bottom - client.top, memoryDc, 0, 0, SRCCOPY);
+
+    if (g_spotlightFlowProbe.launchpadModeTransitionPaintInProgress)
+    {
+        g_spotlightFlowProbe.launchpadModeTransitionPaintObserved = true;
+    }
 
     SelectObject(memoryDc, oldBitmap);
     DeleteObject(bitmap);
@@ -8601,6 +8817,11 @@ bool ApplySettingsFromWindow(HWND hwnd)
 {
     const Settings previous = g_settings;
     const Settings candidate = ReadSettingsWindowCandidate(hwnd);
+    const bool previousSpotlight = ContainsIgnoreCase(previous.displayMode, L"Spotlight");
+    const bool candidateSpotlight = ContainsIgnoreCase(candidate.displayMode, L"Spotlight");
+    const bool visibleModeTransition = previousSpotlight != candidateSpotlight
+        && g_hwnd
+        && IsWindowVisible(g_hwnd);
     int reservedHotkeyId = 0;
     std::wstring hotkeyFailure;
     if (!ReserveCandidateHotkey(candidate, reservedHotkeyId, hotkeyFailure))
@@ -8652,8 +8873,76 @@ bool ApplySettingsFromWindow(HWND hwnd)
     AppendStartupLog(L"settings-apply", true, g_settingsStatus);
     ReloadData();
     RebuildFiltered();
-    PositionWindow();
-    PopulateSettingsWindow(hwnd);
+    if (visibleModeTransition && !candidateSpotlight)
+    {
+        g_spotlightFallbackRestorePending = false;
+        g_spotlightFallbackRestoreActivation = 0;
+        g_spotlightFlowProbe.launchpadModeTransitionPaintInProgress = SpotlightDevelopmentFlowProbeEnabled();
+        g_spotlightFlowProbe.launchpadModeTransitionPaintObserved = false;
+        g_materialRenderer.Hide();
+        g_requestedMaterialActivation = 0;
+        g_requestedMaterialSceneGeneration = 0;
+        SetSpotlightLayeredOpacity(255);
+        ReleaseSpotlightBackdrop();
+        ReleaseSpotlightLayerBuffer();
+        g_launchpadState.Open();
+        ResetDragState();
+        ClearAllSelection();
+        PositionWindow();
+        ApplyGlassBackdrop();
+        RedrawWindow(g_hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        g_spotlightFlowProbe.launchpadModeTransitionPaintedBeforeApplyReturn =
+            g_spotlightFlowProbe.launchpadModeTransitionPaintObserved;
+        g_spotlightFlowProbe.launchpadModeTransitionLayeredAfterApply =
+            (GetWindowLongPtrW(g_hwnd, GWL_EXSTYLE) & WS_EX_LAYERED) != 0;
+        g_spotlightFlowProbe.launchpadModeTransitionPaintInProgress = false;
+    }
+    else if (visibleModeTransition)
+    {
+        g_spotlightFallbackRestorePending = false;
+        g_spotlightFallbackRestoreActivation = 0;
+        g_spotlightState.Open();
+        ResetDragState();
+        ClearAllSelection();
+        if (SpotlightSelfCaptureProbeEnabled())
+        {
+            PositionWindow();
+            g_spotlightSelfCaptureEvidence = {};
+            g_spotlightSelfCaptureEvidence.active = true;
+            g_spotlightSelfCaptureEvidence.mainMarker = DrawSpotlightSelfCaptureMarker(
+                g_hwnd,
+                RGB(255, 0, 255),
+                24);
+            g_spotlightSelfCaptureEvidence.settingsMarker = DrawSpotlightSelfCaptureMarker(
+                hwnd,
+                RGB(0, 255, 0),
+                16);
+            DwmFlush();
+        }
+        ShowWindow(g_hwnd, SW_HIDE);
+        ShowWindow(hwnd, SW_HIDE);
+        DwmFlush();
+        PositionWindow();
+        RECT windowRect = {};
+        GetWindowRect(g_hwnd, &windowRect);
+        if (!g_adaptivePolicy.solidSurface) CaptureSpotlightBackdrop(windowRect);
+        else ReleaseSpotlightBackdrop();
+        RECT client = {};
+        GetClientRect(g_hwnd, &client);
+        auto scene = BuildMaterialSceneSnapshot(client);
+        PaintSpotlightLayeredWindow(true);
+        g_materialRenderer.Submit(scene);
+        g_materialRenderer.Show(CurrentMaterialShowRequest(scene->generation));
+        ShowSpotlightImmediately();
+        SetForegroundWindow(g_hwnd);
+        ActivateSearchInput();
+        DestroyWindow(hwnd);
+    }
+    else
+    {
+        PositionWindow();
+    }
+    if (IsWindow(hwnd)) PopulateSettingsWindow(hwnd);
     RequestSearchRepaint(g_hwnd, true);
     return true;
 }
@@ -8796,7 +9085,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         }
         if (LOWORD(wParam) == ControlId(SettingsControlId::Save))
         {
-            if (ApplySettingsFromWindow(hwnd)) DestroyWindow(hwnd);
+            if (ApplySettingsFromWindow(hwnd) && IsWindow(hwnd)) DestroyWindow(hwnd);
             return 0;
         }
         if (LOWORD(wParam) == ControlId(SettingsControlId::Apply))
@@ -8857,13 +9146,19 @@ void ShowSettingsWindow()
     const int settingsHeight = std::min(
         llp::geometry::ScaleDip(730, static_cast<int>(g_settingsDpi)),
         static_cast<int>(settingsWork.bottom - settingsWork.top));
+    const int settingsX = g_testMonitorDevice.empty()
+        ? CW_USEDEFAULT
+        : settingsWork.left + ((settingsWork.right - settingsWork.left) - settingsWidth) / 2;
+    const int settingsY = g_testMonitorDevice.empty()
+        ? CW_USEDEFAULT
+        : settingsWork.top + ((settingsWork.bottom - settingsWork.top) - settingsHeight) / 2;
     g_settingsHwnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME | (g_diagnosticsUiMode ? 0 : WS_EX_TOOLWINDOW),
         SettingsWindowClassName,
         Text(L"LightLaunchpad Settings", L"LightLaunchpad 设置"),
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VSCROLL | WS_CLIPCHILDREN,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
+        settingsX,
+        settingsY,
         settingsWidth,
         settingsHeight,
         g_diagnosticsUiMode ? nullptr : g_hwnd,
@@ -9439,9 +9734,125 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     if (message == WmMaterialRendererStatus)
     {
         WriteMaterialProbeState(hwnd);
+        const auto statusDiagnostics = g_materialRenderer.SnapshotDiagnostics();
+        if (SpotlightComposeHideLifetimeProbeEnabled()
+            && statusDiagnostics.composeLifetimeProbeEntered
+            && !g_spotlightFlowProbe.composeHideLifetimeInjected)
+        {
+            g_spotlightFlowProbe.composeHideLifetimeInjected = true;
+            g_materialRenderer.Hide();
+            WriteSpotlightFlowReadyState();
+            return 0;
+        }
+        const auto latestHideRaceMode = SpotlightLatestHideRaceProbeMode();
+        if (g_spotlightFallbackRestorePending
+            && statusDiagnostics.state == llp::material::LifecycleState::Stopping
+            && !latestHideRaceMode.empty()
+            && !g_spotlightFlowProbe.latestHideRaceInjected)
+        {
+            g_spotlightFlowProbe.latestHideRaceInjected = true;
+            g_spotlightFlowProbe.latestHideRaceMode = latestHideRaceMode;
+            g_spotlightFallbackRestorePending = false;
+            g_spotlightFallbackRestoreActivation = 0;
+            RECT client = {};
+            GetClientRect(hwnd, &client);
+            if (latestHideRaceMode == L"show-hide")
+            {
+                const auto request = CurrentMaterialShowRequest(g_materialSceneGeneration);
+                g_spotlightFlowProbe.latestHideRaceActivation = request.activation;
+                g_materialRenderer.Show(request);
+            }
+            else
+            {
+                auto scene = BuildMaterialSceneSnapshot(client);
+                g_spotlightFlowProbe.latestHideRaceGeneration = scene->generation;
+                g_materialRenderer.Submit(scene);
+            }
+            g_materialRenderer.Hide();
+            g_materialRenderer.AcknowledgeStoppingStatusForDevelopment();
+            WriteSpotlightFlowReadyState();
+            return 0;
+        }
+        if (g_spotlightFallbackRestorePending
+            && statusDiagnostics.state == llp::material::LifecycleState::Stopping
+            && SpotlightHideSceneRaceProbeEnabled()
+            && !g_spotlightFlowProbe.hideSceneRaceInjected)
+        {
+            g_spotlightFlowProbe.hideSceneRaceInjected = true;
+            g_spotlightFallbackRestorePending = false;
+            g_spotlightFallbackRestoreActivation = 0;
+            RECT client = {};
+            GetClientRect(hwnd, &client);
+            auto scene = BuildMaterialSceneSnapshot(client);
+            g_materialRenderer.Submit(scene);
+            const auto request = CurrentMaterialShowRequest(scene->generation);
+            g_spotlightFlowProbe.hideSceneRaceActivation = request.activation;
+            g_spotlightFlowProbe.hideSceneRaceGeneration = scene->generation;
+            g_materialRenderer.Show(request);
+            g_materialRenderer.AcknowledgeStoppingStatusForDevelopment();
+            WriteSpotlightFlowReadyState();
+            return 0;
+        }
+        if (g_spotlightFallbackRestorePending
+            && statusDiagnostics.state != llp::material::LifecycleState::Hidden
+            && g_spotlightDirectTransitionFailureEvidence.injected)
+        {
+            ++g_spotlightDirectTransitionFailureEvidence.preHiddenStatusCallbacks;
+            g_spotlightDirectTransitionFailureEvidence.stoppingStatusCallbackSynchronous =
+                g_spotlightDirectTransitionFailureEvidence.stoppingStatusCallbackSynchronous
+                || InSendMessageEx(nullptr) != ISMEX_NOSEND;
+            g_spotlightDirectTransitionFailureEvidence.directTransparentAfterPreHiddenCallbacks =
+                g_spotlightDirectTransitionFailureEvidence.directTransparentAfterPreHiddenCallbacks
+                && g_spotlightLayerBuffer.directPixelsTransparent;
+            const bool windowHidden = !IsWindowVisible(hwnd);
+            g_spotlightDirectTransitionFailureEvidence.windowHiddenDuringPreHiddenCallbacks =
+                g_spotlightDirectTransitionFailureEvidence.windowHiddenDuringPreHiddenCallbacks
+                && windowHidden;
+            if (!windowHidden && !g_spotlightLayerBuffer.directPixelsTransparent)
+            {
+                ++g_spotlightDirectTransitionFailureEvidence.preHiddenVisibleOpaqueOverlapCallbacks;
+            }
+            if (statusDiagnostics.state == llp::material::LifecycleState::Stopping)
+            {
+                g_materialRenderer.AcknowledgeStoppingStatusForDevelopment();
+            }
+        }
+        if (g_spotlightFallbackRestorePending
+            && statusDiagnostics.state != llp::material::LifecycleState::Hidden)
+        {
+            if (g_spotlightFlowProbe.active) WriteSpotlightFlowReadyState();
+            return 0;
+        }
+        if (g_spotlightFallbackRestorePending
+            && statusDiagnostics.state == llp::material::LifecycleState::Hidden)
+        {
+            const bool restoreCurrentSpotlight = IsSpotlightMode()
+                && g_requestedMaterialActivation == g_spotlightFallbackRestoreActivation;
+            if (restoreCurrentSpotlight)
+            {
+                g_spotlightLayerDirty = true;
+                PaintSpotlightLayeredWindow(true);
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                SetForegroundWindow(hwnd);
+                ActivateSearchInput();
+                if (g_spotlightDirectTransitionFailureEvidence.injected)
+                {
+                    g_spotlightDirectTransitionFailureEvidence.fallbackRestoredAfterHidden =
+                        !g_spotlightLayerBuffer.directPixelsTransparent;
+                    g_spotlightDirectTransitionFailureEvidence.fallbackRestoreState = statusDiagnostics.state;
+                    ++g_spotlightDirectTransitionFailureEvidence.hiddenFallbackRestorePaints;
+                    g_spotlightDirectTransitionFailureEvidence.windowVisibleAfterHiddenRestore =
+                        IsWindowVisible(hwnd) != FALSE;
+                }
+            }
+            g_spotlightFallbackRestorePending = false;
+            g_spotlightFallbackRestoreActivation = 0;
+            if (g_spotlightFlowProbe.active) WriteSpotlightFlowReadyState();
+            return 0;
+        }
         if (IsSpotlightMode() && IsWindowVisible(hwnd))
         {
-            const auto diagnostics = g_materialRenderer.SnapshotDiagnostics();
+            const auto diagnostics = statusDiagnostics;
             if (diagnostics.path == llp::material::RenderPath::HighFidelity
                 && (diagnostics.state == llp::material::LifecycleState::Live
                     || diagnostics.state == llp::material::LifecycleState::FrozenEvidence)
@@ -9454,15 +9865,40 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 }
                 else
                 {
+                    if (g_spotlightDirectTransitionFailureEvidence.injected)
+                    {
+                        g_spotlightDirectTransitionFailureEvidence.failureState = diagnostics.state;
+                        g_spotlightDirectTransitionFailureEvidence.failurePath = diagnostics.path;
+                    }
+                    g_spotlightFallbackRestorePending = true;
+                    g_spotlightFallbackRestoreActivation = g_requestedMaterialActivation;
+                    ShowWindow(hwnd, SW_HIDE);
                     g_materialRenderer.Hide();
-                    g_spotlightLayerDirty = true;
-                    PaintSpotlightLayeredWindow(true);
+                    if (g_spotlightDirectTransitionFailureEvidence.injected)
+                    {
+                        g_spotlightDirectTransitionFailureEvidence.directTransparentAfterFailureHandler =
+                            g_spotlightLayerBuffer.directPixelsTransparent;
+                        g_spotlightDirectTransitionFailureEvidence.windowHiddenAfterFailureHandler =
+                            !IsWindowVisible(hwnd);
+                    }
                 }
             }
             else
             {
                 g_spotlightLayerDirty = true;
                 PaintSpotlightLayeredWindow(true);
+                if (g_spotlightFallbackRestorePending
+                    && statusDiagnostics.state != llp::material::LifecycleState::Hidden
+                    && g_spotlightDirectTransitionFailureEvidence.injected)
+                {
+                    g_spotlightDirectTransitionFailureEvidence.directTransparentAfterPreHiddenCallbacks =
+                        g_spotlightDirectTransitionFailureEvidence.directTransparentAfterPreHiddenCallbacks
+                        && g_spotlightLayerBuffer.directPixelsTransparent;
+                    if (!g_spotlightLayerBuffer.directPixelsTransparent)
+                    {
+                        ++g_spotlightDirectTransitionFailureEvidence.preHiddenOpaqueFallbackPaints;
+                    }
+                }
             }
             if (g_spotlightFlowProbe.active) WriteSpotlightFlowReadyState();
         }

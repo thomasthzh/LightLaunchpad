@@ -298,6 +298,7 @@ struct AuxiliaryPresentationEvidence
     bool focused = false;
     std::vector<std::wstring> itemStableIds;
     std::vector<std::wstring> itemSourcePaths;
+    std::uint64_t itemIdentityCopies = 0;
 };
 
 using LuminanceGrid = std::array<float, 16 * 12>;
@@ -899,6 +900,7 @@ public:
     FailureReason Start(const ShowRequest& request) override
     {
         Stop();
+        developmentEvidence_ = request.developmentEvidence;
         if (!request.monitor) return FailureReason::AdapterUnavailable;
 
         ComOwner<IDXGIFactory1> factory;
@@ -1770,14 +1772,16 @@ public:
             pendingAuxiliary_.bounds = scene.auxiliary.bounds;
             pendingAuxiliary_.text = scene.auxiliary.text;
             pendingAuxiliary_.focused = scene.auxiliary.focused;
-            pendingAuxiliary_.itemStableIds.clear();
-            pendingAuxiliary_.itemSourcePaths.clear();
-            pendingAuxiliary_.itemStableIds.reserve(scene.items.size());
-            pendingAuxiliary_.itemSourcePaths.reserve(scene.items.size());
-            for (const auto& item : scene.items)
+            if (developmentEvidence_)
             {
-                pendingAuxiliary_.itemStableIds.push_back(item.stableId);
-                pendingAuxiliary_.itemSourcePaths.push_back(item.sourcePath);
+                pendingAuxiliary_.itemStableIds.reserve(scene.items.size());
+                pendingAuxiliary_.itemSourcePaths.reserve(scene.items.size());
+                for (const auto& item : scene.items)
+                {
+                    pendingAuxiliary_.itemStableIds.push_back(item.stableId);
+                    pendingAuxiliary_.itemSourcePaths.push_back(item.sourcePath);
+                    pendingAuxiliary_.itemIdentityCopies += 2;
+                }
             }
         }
         return result;
@@ -1834,6 +1838,7 @@ public:
         outputDesktop_ = {};
         outputRotation_ = OutputRotation::Identity;
         lastSceneGeneration_ = std::numeric_limits<std::uint64_t>::max();
+        developmentEvidence_ = false;
         pendingAuxiliary_ = {};
         lastPresentedAuxiliary_ = {};
     }
@@ -1979,6 +1984,7 @@ private:
     UINT surfaceWidth_ = 0;
     UINT surfaceHeight_ = 0;
     std::uint64_t lastSceneGeneration_ = std::numeric_limits<std::uint64_t>::max();
+    bool developmentEvidence_ = false;
     AuxiliaryPresentationEvidence pendingAuxiliary_;
     AuxiliaryPresentationEvidence lastPresentedAuxiliary_;
     float relativeLuminance_ = 0.5f;
@@ -2352,9 +2358,21 @@ public:
     {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            hideRequested_ = true;
+            hideRequested_ = diagnostics_.state != LifecycleState::Stopping;
             showRequested_ = false;
             rebuildRequested_ = false;
+            pendingScene_.reset();
+        }
+        workCondition_.notify_one();
+    }
+
+    void AcknowledgeStoppingStatusForDevelopment()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (diagnostics_.state != LifecycleState::Stopping
+                || !developmentStoppingNotificationPending_) return;
+            developmentStoppingNotificationPending_ = false;
         }
         workCondition_.notify_one();
     }
@@ -2371,7 +2389,18 @@ public:
     Diagnostics SnapshotDiagnostics() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        return diagnostics_;
+        Diagnostics snapshot = diagnostics_;
+        if (request_.developmentStoppingBarrier)
+        {
+            snapshot.queuedSceneGeneration = pendingScene_ ? pendingScene_->generation : 0;
+            snapshot.currentSceneGeneration = currentScene_ ? currentScene_->generation : 0;
+            snapshot.showQueued = showRequested_;
+            snapshot.rebuildQueued = rebuildRequested_;
+        }
+        snapshot.composeLifetimeProbeEntered = composeLifetimeProbeEntered_;
+        snapshot.composeLifetimeProbeCompleted = composeLifetimeProbeCompleted_;
+        snapshot.composeSceneExpiredDuringHide = composeSceneExpiredDuringHide_;
+        return snapshot;
     }
 
     bool WaitUntilHiddenForTest(std::uint32_t timeoutMs) const
@@ -2398,8 +2427,12 @@ private:
         updated.auxiliaryBounds = auxiliary.bounds;
         updated.auxiliaryText = auxiliary.text;
         updated.auxiliaryFocused = auxiliary.focused;
-        updated.presentedItemStableIds = auxiliary.itemStableIds;
-        updated.presentedItemSourcePaths = auxiliary.itemSourcePaths;
+        if (auxiliary.itemIdentityCopies > 0)
+        {
+            updated.presentedItemStableIds = auxiliary.itemStableIds;
+            updated.presentedItemSourcePaths = auxiliary.itemSourcePaths;
+        }
+        updated.presentationEvidenceItemCopies = auxiliary.itemIdentityCopies;
         const bool notifyHost = updated.path != diagnostics_.path
             || updated.failure != diagnostics_.failure
             || updated.state != diagnostics_.state
@@ -2452,15 +2485,33 @@ private:
             if (hideRequested_)
             {
                 diagnostics_.state = LifecycleState::Stopping;
+                const ShowRequest stoppingRequest = request_;
+                pendingScene_.reset();
+                currentScene_.reset();
+                hideRequested_ = false;
+                if (stoppingRequest.developmentEvidence
+                    && stoppingRequest.window
+                    && stoppingRequest.statusMessage)
+                {
+                    developmentStoppingNotificationPending_ = stoppingRequest.developmentStoppingBarrier;
+                    PostMessageW(stoppingRequest.window, stoppingRequest.statusMessage, 0, 0);
+                    if (developmentStoppingNotificationPending_)
+                    {
+                        workCondition_.wait_for(
+                            lock,
+                            std::chrono::seconds(2),
+                            [this]() {
+                                return !developmentStoppingNotificationPending_
+                                    || shutdown_;
+                            });
+                        developmentStoppingNotificationPending_ = false;
+                    }
+                }
                 lock.unlock();
                 lifecycle.Hide(backend);
                 lock.lock();
-                pendingScene_.reset();
-                currentScene_.reset();
                 PublishDiagnostics(lifecycle, backend.LastPresentedAuxiliary());
-                hideRequested_ = false;
                 hiddenCondition_.notify_all();
-                continue;
             }
 
             const bool rebuild = rebuildRequested_;
@@ -2497,6 +2548,28 @@ private:
 
             if (lifecycle.IsCapturing())
             {
+                if (request_.developmentComposeLifetimeProbe
+                    && !composeLifetimeProbeCompleted_
+                    && currentScene_)
+                {
+                    std::weak_ptr<const SceneSnapshot> sceneLifetime = currentScene_;
+                    composeLifetimeProbeEntered_ = true;
+                    if (request_.window && request_.statusMessage)
+                    {
+                        PostMessageW(request_.window, request_.statusMessage, 0, 0);
+                    }
+                    workCondition_.wait_for(
+                        lock,
+                        std::chrono::seconds(2),
+                        [this]() { return hideRequested_ || shutdown_; });
+                    composeSceneExpiredDuringHide_ = sceneLifetime.expired();
+                    composeLifetimeProbeCompleted_ = true;
+                    if (request_.window && request_.statusMessage)
+                    {
+                        PostMessageW(request_.window, request_.statusMessage, 0, 0);
+                    }
+                    if (hideRequested_ || shutdown_) continue;
+                }
                 lock.unlock();
                 lifecycle.Step(backend, currentScene_.get(), sceneChanged);
                 lock.lock();
@@ -2518,6 +2591,10 @@ private:
     bool hideRequested_ = false;
     bool rebuildRequested_ = false;
     bool freezeRequested_ = false;
+    bool developmentStoppingNotificationPending_ = false;
+    bool composeLifetimeProbeEntered_ = false;
+    bool composeLifetimeProbeCompleted_ = false;
+    bool composeSceneExpiredDuringHide_ = false;
     ShowRequest request_;
     std::shared_ptr<const SceneSnapshot> pendingScene_;
     std::shared_ptr<const SceneSnapshot> currentScene_;
@@ -2737,6 +2814,11 @@ void MaterialRenderer::Shutdown()
 void MaterialRenderer::FreezeEvidence()
 {
     if (impl_) impl_->FreezeEvidence();
+}
+
+void MaterialRenderer::AcknowledgeStoppingStatusForDevelopment()
+{
+    if (impl_) impl_->AcknowledgeStoppingStatusForDevelopment();
 }
 
 Diagnostics MaterialRenderer::SnapshotDiagnostics() const
