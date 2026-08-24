@@ -28,6 +28,22 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 
+function Invoke-LlpClipboardWrite {
+    param([scriptblock]$Operation)
+    $llpClipboardFailure = $null
+    foreach ($llpClipboardAttempt in 1..20) {
+        try {
+            & $Operation
+            return
+        }
+        catch {
+            $llpClipboardFailure = $_
+            Start-Sleep -Milliseconds 50
+        }
+    }
+    throw $llpClipboardFailure
+}
+
 function Set-LlpTextSelection {
     param($TextPattern, [int]$Start, [int]$End)
     $llpRange = $TextPattern.DocumentRange.Clone()
@@ -318,10 +334,10 @@ finally {
     }
     if ($llpClipboardCaptured) {
         if ($null -eq $llpOriginalClipboard) {
-            [System.Windows.Forms.Clipboard]::Clear()
+            Invoke-LlpClipboardWrite { [System.Windows.Forms.Clipboard]::Clear() }
         }
         else {
-            [System.Windows.Forms.Clipboard]::SetDataObject($llpOriginalClipboard, $true)
+            Invoke-LlpClipboardWrite { [System.Windows.Forms.Clipboard]::SetDataObject($llpOriginalClipboard, $true) }
         }
     }
     $llpResolvedTemp = [System.IO.Path]::GetFullPath($llpTempRoot)

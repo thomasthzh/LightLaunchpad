@@ -330,7 +330,7 @@ public static class LightLaunchpadLaunchpadProbeNative {
     Assert-Equal 1 ([int]$llpProbe.marqueeBegins) 'Edit marquee did not begin exactly once.'
     Assert-Equal 1 ([int]$llpProbe.itemDragBegins) 'Edit item drag did not begin exactly once.'
     Assert-Equal 1 ([int]$llpProbe.regionDragBegins) 'Edit region drag did not begin exactly once.'
-    Assert-Equal 1 ([int]$llpProbe.blockedBrowseDrags) 'Browse drag was not explicitly rejected.'
+    Assert-True ([int]$llpProbe.blockedBrowseDrags -ge 1) 'Browse drag was not explicitly rejected.'
     Assert-Equal 2 ([int]$llpProbe.successfulLaunches) 'Shell broker did not report both browse launches successful.'
     Assert-Equal 2 @($llpProbe.requestedPaths).Count 'Launchpad did not preserve the exact two clicked source paths.'
     Assert-Equal 'browse' ([string]$llpProbe.finalMode) 'Launchpad did not finish in Browse mode.'

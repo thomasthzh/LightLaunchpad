@@ -507,21 +507,22 @@ public sealed class HostedAppModeSourceTests
     public static void NativeUiSource_UsesLiquidGlassFocusLensing()
     {
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var materialSource = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "MaterialRenderer.cpp"));
 
         TestAssert.Contains("SpotlightBackdropCapture", source);
         TestAssert.Contains("CaptureSpotlightBackdrop", source);
         TestAssert.Contains("ReleaseSpotlightBackdrop", source);
-        TestAssert.Contains("DrawLiquidGlassFocusLens", source);
         TestAssert.Contains("DrawSearchFocusLens", source);
-        TestAssert.Contains("DrawFocusedTileLens", source);
         TestAssert.Contains("CaptureSpotlightBackdrop(windowRect);", source);
         TestAssert.Contains("DrawSearchFocusLens(target, rounded, rect, active);", source);
-        TestAssert.Contains("DrawFocusedTileLens(target, rounded, rect);", source);
         TestAssert.Contains("StretchBlt", source);
         TestAssert.Contains("CAPTUREBLT", source);
+        TestAssert.Contains("SubmitSearchEdgeCommands", materialSource);
+        TestAssert.Contains("plan.searchOpticalPoints.size() == 5", materialSource);
+        TestAssert.Contains("D2DColor(scene.policy.focus, 1.0f)", materialSource);
+        TestAssert.Contains("context->DrawRoundedRectangle(tile, focusRim.Get(), 2.0f);", materialSource);
         TestAssert.DoesNotContain("1.16f", source);
         TestAssert.DoesNotContain("rect, 14, 1.16f, 0, -4", source);
-        TestAssert.DoesNotContain("ID2D1Effect", source);
     }
 
     public static void NativeUiSource_UsesBackdropBlurForLiquidGlass()
@@ -539,21 +540,20 @@ public sealed class HostedAppModeSourceTests
     public static void NativeUiSource_UsesAlignedSearchFocusRefraction()
     {
         var source = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "LightLaunchpad.NativeUi.cpp"));
+        var materialSource = File.ReadAllText(FindRepoFile("src", "LightLaunchpad.NativeUi", "MaterialRenderer.cpp"));
 
-        TestAssert.Contains("DrawAlignedSearchBackdrop", source);
         TestAssert.Contains("DrawSearchLiquidMaterialWash", source);
-        TestAssert.Contains("DrawSearchEdgeRefraction", source);
         TestAssert.Contains("DrawSearchHorizontalGlassRim", source);
         TestAssert.Contains("DrawSearchFocusGlow", source);
-        TestAssert.Contains("DrawAlignedSearchBackdrop(target, rounded, rect, active);", source);
         TestAssert.Contains("DrawSearchLiquidMaterialWash(target, rounded, rect, active);", source);
-        TestAssert.Contains("DrawSearchEdgeRefraction(target, rounded, rect, active);", source);
         TestAssert.Contains("DrawSearchHorizontalGlassRim(target, rounded, rect, active);", source);
-        TestAssert.Contains("DrawAlignedSearchBackdrop(dc, rect, active);", source);
         TestAssert.Contains("DrawSearchLiquidMaterialWash(dc, rect, active);", source);
-        TestAssert.Contains("DrawSearchEdgeRefraction(dc, rect, active);", source);
         TestAssert.Contains("DrawSearchHorizontalGlassRim(dc, rect, active);", source);
-        TestAssert.Contains("active ? 0.035f : 0.020f", source);
+        TestAssert.Contains("SubmitSearchEdgeCommands", materialSource);
+        TestAssert.Contains("SearchEdgeOperation::DrawImage", materialSource);
+        TestAssert.Contains("context->PushAxisAlignedClip", materialSource);
+        TestAssert.Contains("D2D1_COMPOSITE_MODE_SOURCE_COPY", materialSource);
+        TestAssert.Contains("scene.search.active ? 0.16f : 0.10f", materialSource);
         TestAssert.Contains("D2DColorAlpha(RGB(246, 252, 255), active ? 0.46f : 0.34f)", source);
         TestAssert.Contains("D2DColorAlpha(RGB(148, 214, 255), active ? 0.24f : 0.16f)", source);
         TestAssert.Contains("displayText.empty() ? RGB(110, 132, 150) : RGB(34, 54, 72)", source);

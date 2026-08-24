@@ -6,7 +6,7 @@
 #include <d3d11.h>
 #include <dcomp.h>
 #include <dwrite.h>
-#include <dxgi1_2.h>
+#include <dxgi1_3.h>
 #include <objbase.h>
 
 #if __has_include("LightLaunchpad.BuildIdentity.generated.h")
@@ -870,7 +870,9 @@ FailureReason InitializeDevice(
         selectedAdapter,
         selectedAdapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
         nullptr,
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT
+            | D3D11_CREATE_DEVICE_SINGLETHREADED
+            | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS,
         requestedFeatureLevels.data(),
         static_cast<UINT>(requestedFeatureLevels.size()),
         D3D11_SDK_VERSION,
@@ -2171,6 +2173,34 @@ public:
 
     void Stop() override
     {
+        ComOwner<IDXGIDevice3> trimDevice;
+        if (resources_.dxgiDevice.Get())
+        {
+            (void)resources_.dxgiDevice.Get()->QueryInterface(
+                __uuidof(IDXGIDevice3), trimDevice.PutVoid());
+        }
+        if (resources_.d3dDevice.Get() && resources_.d3dContext.Get())
+        {
+            D3D11_QUERY_DESC idleDescription = {};
+            idleDescription.Query = D3D11_QUERY_EVENT;
+            ComOwner<ID3D11Query> idleQuery;
+            if (SUCCEEDED(resources_.d3dDevice.Get()->CreateQuery(
+                    &idleDescription, idleQuery.Put())))
+            {
+                resources_.d3dContext.Get()->End(idleQuery.Get());
+                resources_.d3dContext.Get()->Flush();
+                const auto deadline = std::chrono::steady_clock::now()
+                    + std::chrono::milliseconds(100);
+                BOOL idle = FALSE;
+                while (resources_.d3dContext.Get()->GetData(
+                           idleQuery.Get(), &idle, sizeof(idle),
+                           D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_FALSE
+                    && std::chrono::steady_clock::now() < deadline)
+                {
+                    Sleep(1);
+                }
+            }
+        }
         (void)ReleaseFrame();
         acquiredResource_.Reset();
         candidateDesktop_.Reset();
@@ -2183,7 +2213,13 @@ public:
         output_.Reset();
         adapter_.Reset();
         factory_.Reset();
+        if (resources_.d3dContext.Get())
+        {
+            resources_.d3dContext.Get()->ClearState();
+            resources_.d3dContext.Get()->Flush();
+        }
         resources_ = DeviceResources{};
+        if (trimDevice.Get()) trimDevice.Get()->Trim();
         outputDesktop_ = {};
         outputRotation_ = OutputRotation::Identity;
         lastSceneGeneration_ = std::numeric_limits<std::uint64_t>::max();
@@ -2402,6 +2438,14 @@ private:
 
     void ResetComposition()
     {
+        if (compositionTarget_.Get() && resources_.compositionDevice.Get())
+        {
+            if (SUCCEEDED(compositionTarget_.Get()->SetRoot(nullptr))
+                && SUCCEEDED(resources_.compositionDevice.Get()->Commit()))
+            {
+                (void)resources_.compositionDevice.Get()->WaitForCommitCompletion();
+            }
+        }
         for (auto& surface : surfaces_) surface.Reset();
         for (auto& visual : visuals_) visual.Reset();
         rootVisual_.Reset();
@@ -2469,6 +2513,11 @@ enum class EvidenceCandidateResult
 class CaptureLifecycle final
 {
 public:
+    explicit CaptureLifecycle(Diagnostics diagnostics = {})
+        : diagnostics_(std::move(diagnostics))
+    {
+    }
+
     void FailStart(CaptureBackend& backend, ShowRequest request, FailureReason failure)
     {
         CleanupVisible(backend);
@@ -2934,6 +2983,7 @@ public:
 
     void Show(ShowRequest request)
     {
+        RestartRendererThreadIfNeeded();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             request_ = std::move(request);
@@ -2956,6 +3006,7 @@ public:
 
     void Rebuild(ShowRequest request)
     {
+        RestartRendererThreadIfNeeded();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             request_ = std::move(request);
@@ -2970,6 +3021,11 @@ public:
     {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (rendererThreadExited_ && diagnostics_.state == LifecycleState::Hidden)
+            {
+                hideRequested_ = false;
+                return;
+            }
             hideRequested_ = diagnostics_.state != LifecycleState::Stopping;
             showRequested_ = false;
             rebuildRequested_ = false;
@@ -3022,6 +3078,7 @@ public:
 
     void RequestStatusForDevelopment()
     {
+        RestartRendererThreadIfNeeded();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!IsDevelopmentBuild() || !request_.window || !request_.statusMessage) return;
@@ -3075,6 +3132,18 @@ public:
 #endif
 
 private:
+    void RestartRendererThreadIfNeeded()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!rendererThreadExited_) return;
+        lock.unlock();
+        if (rendererThread_.joinable()) rendererThread_.join();
+        lock.lock();
+        if (shutdown_) return;
+        rendererThreadExited_ = false;
+        rendererThread_ = std::thread(&Impl::Run, this);
+    }
+
     void CompleteEvidenceCandidatePreparation(EvidenceCandidateResult result)
     {
         evidencePreparationActive_ = result == EvidenceCandidateResult::Prepared;
@@ -3112,9 +3181,8 @@ private:
         const HRESULT apartmentResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         const bool apartmentReady = SUCCEEDED(apartmentResult);
         DesktopDuplicationBackend backend;
-        CaptureLifecycle lifecycle;
-
         std::unique_lock<std::mutex> lock(mutex_);
+        CaptureLifecycle lifecycle(diagnostics_);
         for (;;)
         {
             if (!lifecycle.IsCapturing() || evidencePreparationActive_)
@@ -3134,6 +3202,14 @@ private:
                 {
                     ++diagnostics_.statusPublications;
                     PostMessageW(request_.window, request_.statusMessage, 0, 0);
+                }
+                if (lifecycle.CurrentDiagnostics().state == LifecycleState::Hidden
+                    && !showRequested_ && !hideRequested_ && !rebuildRequested_
+                    && !freezeRequested_ && !evidenceSnapshotRequested_
+                    && !evidenceCandidateRequested_ && !pendingScene_)
+                {
+                    rendererThreadExited_ = true;
+                    break;
                 }
             }
 
@@ -3179,6 +3255,12 @@ private:
                 lock.lock();
                 PublishDiagnostics(lifecycle, backend);
                 hiddenCondition_.notify_all();
+                if (!stoppingRequest.developmentEvidence
+                    && !showRequested_ && !rebuildRequested_)
+                {
+                    rendererThreadExited_ = true;
+                    break;
+                }
             }
 
             const bool rebuild = rebuildRequested_;
@@ -3283,6 +3365,7 @@ private:
     std::condition_variable workCondition_;
     mutable std::condition_variable hiddenCondition_;
     std::thread rendererThread_;
+    bool rendererThreadExited_ = false;
     bool shutdown_ = false;
     bool showRequested_ = false;
     bool hideRequested_ = false;

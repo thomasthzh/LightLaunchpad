@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Lifecycle', 'Host', 'Recovery', 'Visual')]
+    [ValidateSet('Lifecycle', 'Host', 'Recovery', 'Visual', 'Performance')]
     [string]$Mode = 'Lifecycle',
 
     [string]$EvidenceDirectory = ''
@@ -59,6 +59,42 @@ function Assert-LlpDisplay1Containment {
         [int]$State.windowRect.right -le [int]$State.monitorBounds.right -and
         [int]$State.windowRect.bottom -le [int]$State.monitorBounds.bottom
     ) "$Context escaped DISPLAY1."
+}
+
+if ($Mode -eq 'Performance') {
+    Assert-True (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) 'Performance mode requires -EvidenceDirectory.'
+    $llpPerformanceRoot = if ([System.IO.Path]::IsPathRooted($EvidenceDirectory)) {
+        [System.IO.Path]::GetFullPath($EvidenceDirectory)
+    }
+    else {
+        [System.IO.Path]::GetFullPath((Join-Path $llpRepoRoot $EvidenceDirectory))
+    }
+    New-Item -ItemType Directory -Force -Path $llpPerformanceRoot | Out-Null
+    $llpPerformanceItem = Get-Item -LiteralPath $llpPerformanceRoot -Force
+    Assert-True (($llpPerformanceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) 'Performance evidence directory must not be a reparse point.'
+    $llpPerformanceOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'SpotlightFlowBehavior.Tests.ps1') -PerformanceOnly -EvidenceDirectory $llpPerformanceRoot 2>&1)
+    $llpPerformanceExitCode = $LASTEXITCODE
+    $llpPerformanceOutput | ForEach-Object { Write-Output $_ }
+    Assert-Equal 0 $llpPerformanceExitCode 'Real Spotlight performance flow failed.'
+    Assert-True (@($llpPerformanceOutput | Where-Object { [string]$_ -eq 'PASS SpotlightFlow_Performance' }).Count -eq 1) 'Real Spotlight performance flow omitted its PASS marker.'
+    $llpPerformancePath = Join-Path $llpPerformanceRoot 'performance.json'
+    Assert-True (Test-Path -LiteralPath $llpPerformancePath -PathType Leaf) 'Real Spotlight performance flow omitted performance.json.'
+    $llpPerformance = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpPerformancePath | ConvertFrom-Json
+    Assert-Equal 30 ([int]$llpPerformance.warmOpenCount) 'Performance evidence did not include 30 warm opens.'
+    Assert-Equal 600 ([int]$llpPerformance.interactionFrameCount) 'Performance evidence did not include 600 visible interaction frames.'
+    Assert-Equal 20 ([int]$llpPerformance.focusChangeCount) 'Performance evidence did not include 20 focus changes.'
+    Assert-True ([double]$llpPerformance.hotkeyToInputReadyP95Ms -le 180.0) 'Hotkey-to-input-ready P95 exceeded 180 ms.'
+    Assert-True ([double]$llpPerformance.interactionFrameP95Ms -le 16.7) 'Interaction frame P95 exceeded 16.7 ms.'
+    Assert-True ([double]$llpPerformance.focusFeedbackP95Ms -le 50.0) 'Focus feedback P95 exceeded 50 ms.'
+    Assert-Equal ([uint64]$llpPerformance.hiddenPresentedFramesBefore) ([uint64]$llpPerformance.hiddenPresentedFramesAfter) 'Hidden renderer presented another frame.'
+    Assert-Equal ([uint64]$llpPerformance.hiddenAcquiredFramesBefore) ([uint64]$llpPerformance.hiddenAcquiredFramesAfter) 'Hidden renderer acquired another frame.'
+    Assert-True ([double]$llpPerformance.hiddenCpuPercent -le 1.0) 'Hidden CPU exceeded the 1% near-zero gate.'
+    Assert-Equal 'growth after first complete graphics teardown' ([string]$llpPerformance.hiddenPrivateGateBasis) 'Hidden Private Bytes evidence used an unknown gate basis.'
+    Assert-True ([uint64]$llpPerformance.hiddenPrivateGrowthBytes -le 15728640) 'Hidden retained Private Bytes growth exceeded 15 MB after the first complete graphics teardown.'
+    Assert-True ([string]$llpPerformance.adapter -ne '' -and [string]$llpPerformance.output -eq '\\.\DISPLAY1') 'Performance evidence omitted the real adapter/output path.'
+    Assert-True ([string]$llpPerformance.executableSha256 -match '^[0-9a-f]{64}$') 'Performance evidence omitted the exact EXE SHA256.'
+    Write-Output 'PASS MaterialRendererBehavior_Performance'
+    return
 }
 
 if ($Mode -eq 'Visual') {

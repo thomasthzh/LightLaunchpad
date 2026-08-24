@@ -17,6 +17,8 @@ param(
 
     [switch]$EvidenceOnly,
 
+    [switch]$PerformanceOnly,
+
     [uint64]$EvidenceBackgroundWindow = 0
 )
 
@@ -34,6 +36,9 @@ if ($llpSpecialScenarioCount -gt 1) {
 }
 if ($EvidenceOnly -and ($MaterialFailure -ne 'None' -or $llpSpecialScenarioCount -ne 0)) {
     throw 'EvidenceOnly requires the normal high-fidelity flow without another scenario or forced failure.'
+}
+if ($PerformanceOnly -and ([string]::IsNullOrWhiteSpace($EvidenceDirectory) -or $EvidenceOnly -or $MaterialFailure -ne 'None' -or $llpSpecialScenarioCount -ne 0)) {
+    throw 'PerformanceOnly requires an evidence directory and the normal high-fidelity flow without another scenario.'
 }
 if ($EvidenceBackgroundWindow -ne 0 -and -not $EvidenceOnly) {
     throw 'EvidenceBackgroundWindow is valid only with EvidenceOnly.'
@@ -356,6 +361,22 @@ public static class LightLaunchpadSpotlightProbeNative {
     public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROCESS_MEMORY_COUNTERS_EX {
+        public uint cb;
+        public uint PageFaultCount;
+        public UIntPtr PeakWorkingSetSize;
+        public UIntPtr WorkingSetSize;
+        public UIntPtr QuotaPeakPagedPoolUsage;
+        public UIntPtr QuotaPagedPoolUsage;
+        public UIntPtr QuotaPeakNonPagedPoolUsage;
+        public UIntPtr QuotaNonPagedPoolUsage;
+        public UIntPtr PagefileUsage;
+        public UIntPtr PeakPagefileUsage;
+        public UIntPtr PrivateUsage;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FILETIME { public uint Low; public uint High; }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct PROCESSENTRY32 {
         public uint dwSize;
@@ -431,6 +452,20 @@ public static class LightLaunchpadSpotlightProbeNative {
     private static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder path, ref uint size);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("psapi.dll", SetLastError = true)]
+    private static extern bool GetProcessMemoryInfo(IntPtr process, out PROCESS_MEMORY_COUNTERS_EX counters, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessTimes(IntPtr process, out FILETIME creation, out FILETIME exit, out FILETIME kernel, out FILETIME user);
+
+    private static ulong FileTimeValue(FILETIME value) { return ((ulong)value.High << 32) | value.Low; }
+    public static ulong[] GetProcessPerformance(IntPtr process) {
+        PROCESS_MEMORY_COUNTERS_EX memory;
+        uint size = (uint)Marshal.SizeOf(typeof(PROCESS_MEMORY_COUNTERS_EX));
+        if (!GetProcessMemoryInfo(process, out memory, size)) throw new InvalidOperationException("GetProcessMemoryInfo failed.");
+        FILETIME creation, exit, kernel, user;
+        if (!GetProcessTimes(process, out creation, out exit, out kernel, out user)) throw new InvalidOperationException("GetProcessTimes failed.");
+        return new ulong[] { memory.PrivateUsage.ToUInt64(), memory.WorkingSetSize.ToUInt64(), FileTimeValue(kernel), FileTimeValue(user) };
+    }
 
     private static uint[] FindProcessIds(Func<string, bool> matches) {
         const uint SnapshotProcesses = 0x00000002;
@@ -648,6 +683,10 @@ public static class LightLaunchpadSpotlightProbeNative {
     $llpCatalogGeneration = [uint64]$llpReady.catalogGeneration
     $llpWindow = [LightLaunchpadSpotlightProbeNative]::FindWindowForProcess([uint32]$llpProcess.Id)
     Assert-True ($llpWindow -ne [IntPtr]::Zero) 'Could not discover the hidden real NativeUi window.'
+    $llpColdHiddenPrivateBytes = if ($PerformanceOnly) {
+        [uint64]([LightLaunchpadSpotlightProbeNative]::GetProcessPerformance($llpProcess.Handle)[0])
+    }
+    else { [uint64]0 }
 
     $llpVisibleInteractions = 0
     Assert-Equal $llpTestMonitorDevice ([string]$llpReady.monitorDevice) 'Hidden Spotlight test window was not fixed to DISPLAY1 before interaction.'
@@ -788,7 +827,7 @@ public static class LightLaunchpadSpotlightProbeNative {
     $llpElement = $null
     $llpValueObject = $null
     $llpValue = $null
-    if (-not $EvidenceOnly) {
+    if (-not $EvidenceOnly -and -not $PerformanceOnly) {
         Wait-LlpCondition {
             $script:llpElement = [System.Windows.Automation.AutomationElement]::FromHandle($llpWindow)
             $script:llpValueObject = $null
@@ -930,6 +969,216 @@ public static class LightLaunchpadSpotlightProbeNative {
     $llpInitialMaterialGeneration = [uint64]$llpMaterialReady.materialSceneGeneration
     $llpEvidenceRoot = if ([string]::IsNullOrWhiteSpace($EvidenceDirectory)) { $llpTempRoot } else { [System.IO.Path]::GetFullPath($EvidenceDirectory) }
     New-Item -ItemType Directory -Force -Path $llpEvidenceRoot | Out-Null
+    if ($PerformanceOnly) {
+        $llpPerformanceRootItem = Get-Item -LiteralPath $llpEvidenceRoot -Force
+        Assert-True (($llpPerformanceRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) 'Performance evidence root must not be a reparse point.'
+        function Get-LlpP95([double[]]$Samples) {
+            Assert-True ($Samples.Count -gt 0) 'A performance percentile had no samples.'
+            $llpSortedSamples = @($Samples | Sort-Object)
+            return [double]$llpSortedSamples[[Math]::Min($llpSortedSamples.Count - 1, [Math]::Max(0, [int][Math]::Ceiling($llpSortedSamples.Count * 0.95) - 1))]
+        }
+        function Get-LlpCpuPercent([uint64[]]$Before, [uint64[]]$After, [double]$ElapsedSeconds) {
+            $llpCpuSeconds = [double](($After[2] - $Before[2]) + ($After[3] - $Before[3])) / 10000000.0
+            return $llpCpuSeconds / [Math]::Max(0.001, $ElapsedSeconds) * 100.0 / [Math]::Max(1, [Environment]::ProcessorCount)
+        }
+        function Wait-LlpPerformanceCondition([scriptblock]$Condition, [int]$TimeoutMilliseconds, [string]$Message) {
+            $llpDeadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+            do {
+                if (& $Condition) { return }
+                Start-Sleep -Milliseconds 2
+            } while ([DateTime]::UtcNow -lt $llpDeadline)
+            throw $Message
+        }
+
+        # Drive the production WM_HOTKEY handler on the isolated probe HWND.
+        # A user's protected LLP instance may already own the global Alt+9 registration.
+        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
+        try {
+            Wait-LlpPerformanceCondition {
+                [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+                $script:llpPerformanceReady = Get-LlpReadyState
+                -not [bool]$script:llpPerformanceReady.windowVisible -and [string]$script:llpPerformanceReady.materialState -eq 'hidden'
+            } 5000 'Performance setup did not reach the hidden warm-open baseline.'
+        }
+        catch {
+            $llpPerformanceLast = Get-LlpReadyState
+            Write-Output "DIAGNOSTIC SpotlightPerformanceSetup visible=$([bool]$llpPerformanceLast.windowVisible) focus=$([string]$llpPerformanceLast.focus) query='$([string]$llpPerformanceLast.searchValue)' path=$([string]$llpPerformanceLast.materialPath) state=$([string]$llpPerformanceLast.materialState) requested=$([uint64]$llpPerformanceLast.materialRequestedActivation) committed=$([uint64]$llpPerformanceLast.materialCommittedActivation)"
+            throw
+        }
+        $llpVisiblePerformanceBefore = [LightLaunchpadSpotlightProbeNative]::GetProcessPerformance($llpProcess.Handle)
+        $llpInitialHiddenPrivateBytes = [uint64]$llpVisiblePerformanceBefore[0]
+        $llpWarmHiddenPrivateBytes = @($llpInitialHiddenPrivateBytes)
+        $llpVisibleStarted = [DateTime]::UtcNow
+        $llpWarmOpenElapsed = @()
+        foreach ($llpWarmOpen in 1..30) {
+            $llpWarmPresentedBefore = [uint64]$llpPerformanceReady.materialPresentedSceneGeneration
+            $llpWarmTimer = [System.Diagnostics.Stopwatch]::StartNew()
+            [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
+            try {
+                Wait-LlpPerformanceCondition {
+                    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+                    $script:llpPerformanceReady = Get-LlpReadyState
+                    [bool]$script:llpPerformanceReady.windowVisible -and
+                        [string]$script:llpPerformanceReady.materialPath -eq 'high-fidelity' -and
+                        [string]$script:llpPerformanceReady.materialState -eq 'live' -and
+                        [uint64]$script:llpPerformanceReady.materialCommittedActivation -eq [uint64]$script:llpPerformanceReady.materialRequestedActivation -and
+                        [uint64]$script:llpPerformanceReady.materialPresentedSceneGeneration -gt $llpWarmPresentedBefore
+                } 5000 "Warm open $llpWarmOpen did not present its committed material scene."
+            }
+            catch {
+                [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+                $llpWarmOpenLast = Get-LlpReadyState
+                Write-Output "DIAGNOSTIC SpotlightWarmOpen index=$llpWarmOpen visible=$([bool]$llpWarmOpenLast.windowVisible) path=$([string]$llpWarmOpenLast.materialPath) failure=$([string]$llpWarmOpenLast.materialFailure) state=$([string]$llpWarmOpenLast.materialState) requested=$([uint64]$llpWarmOpenLast.materialRequestedActivation) committed=$([uint64]$llpWarmOpenLast.materialCommittedActivation) scene=$([uint64]$llpWarmOpenLast.materialSceneGeneration) presentedScene=$([uint64]$llpWarmOpenLast.materialPresentedSceneGeneration) acquired=$([uint64]$llpWarmOpenLast.materialAcquiredFrames) presented=$([uint64]$llpWarmOpenLast.materialPresentedFrames) dropped=$([uint64]$llpWarmOpenLast.materialDroppedScenes)"
+                throw
+            }
+            $llpWarmTimer.Stop()
+            $llpWarmOpenElapsed += [double]$llpWarmTimer.Elapsed.TotalMilliseconds
+            if ($llpWarmOpen -lt 30) {
+                [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
+                Wait-LlpPerformanceCondition {
+                    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+                    $script:llpPerformanceReady = Get-LlpReadyState
+                    -not [bool]$script:llpPerformanceReady.windowVisible -and [string]$script:llpPerformanceReady.materialState -eq 'hidden'
+                } 5000 "Warm open $llpWarmOpen did not return to Hidden."
+                $llpWarmHiddenPrivateBytes += [uint64]([LightLaunchpadSpotlightProbeNative]::GetProcessPerformance($llpProcess.Handle)[0])
+            }
+        }
+        $llpPerformanceReady = Get-LlpReadyState
+        $llpRecordedOpenSamples = @($llpPerformanceReady.hotkeyInputReadyMs | ForEach-Object { [double]$_ })
+        Assert-True ($llpRecordedOpenSamples.Count -ge 30) 'Performance flow did not record 30 warm input-ready samples.'
+        $llpWarmInputSamples = @($llpRecordedOpenSamples | Select-Object -Last 30)
+        $llpHotkeyP95 = Get-LlpP95 $llpWarmInputSamples
+
+        # Normalize the probe's hover state so frame zero is a real visual change
+        # even when the physical cursor happened to remain over the first result.
+        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x02A3, [UIntPtr]::Zero, [IntPtr]::Zero)
+        [void][LightLaunchpadSpotlightProbeNative]::UpdateWindow($llpWindow)
+        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+        $llpPerformanceReady = Get-LlpReadyState
+        $llpNormalizationScene = [uint64]$llpPerformanceReady.materialSceneGeneration
+        Wait-LlpPerformanceCondition {
+            [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+            $script:llpPerformanceReady = Get-LlpReadyState
+            [uint64]$script:llpPerformanceReady.materialPresentedSceneGeneration -ge $llpNormalizationScene
+        } 1000 'The normalized hover baseline was not presented.'
+        $llpInteractionPresentedBefore = [uint64]$llpPerformanceReady.materialPresentedFrames
+        foreach ($llpInteraction in 0..599) {
+            $llpInteractionSceneBefore = [uint64]$llpPerformanceReady.materialSceneGeneration
+            Send-LlpKey $llpWindow 0x09
+            Wait-LlpPerformanceCondition {
+                [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+                $script:llpPerformanceReady = Get-LlpReadyState
+                [uint64]$script:llpPerformanceReady.materialSceneGeneration -gt $llpInteractionSceneBefore
+            } 1000 "Visible interaction $llpInteraction did not create a new material scene."
+            $llpInteractionScene = [uint64]$llpPerformanceReady.materialSceneGeneration
+            Wait-LlpPerformanceCondition {
+                [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+                $script:llpPerformanceReady = Get-LlpReadyState
+                [uint64]$script:llpPerformanceReady.materialPresentedSceneGeneration -ge $llpInteractionScene
+            } 1000 "Visible interaction frame $llpInteraction was not presented."
+        }
+        $llpInteractionPresentedAfter = [uint64]$llpPerformanceReady.materialPresentedFrames
+        Assert-True (($llpInteractionPresentedAfter - $llpInteractionPresentedBefore) -ge 600) 'The renderer did not present all 600 paced interaction frames.'
+
+        $llpFocusFeedbackSamples = @()
+        foreach ($llpFocusChange in 1..20) {
+            $llpFocusBefore = [string]$llpPerformanceReady.focus
+            $llpFocusSceneBefore = [uint64]$llpPerformanceReady.materialPresentedSceneGeneration
+            $llpFocusTimer = [System.Diagnostics.Stopwatch]::StartNew()
+            Send-LlpKey $llpWindow 0x09
+            Wait-LlpPerformanceCondition {
+                [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+                $script:llpPerformanceReady = Get-LlpReadyState
+                [string]$script:llpPerformanceReady.focus -ne $llpFocusBefore -and
+                    [uint64]$script:llpPerformanceReady.materialSceneGeneration -gt $llpFocusSceneBefore
+            } 1000 "Focus change $llpFocusChange did not create a new material scene."
+            $llpFocusScene = [uint64]$llpPerformanceReady.materialSceneGeneration
+            Wait-LlpPerformanceCondition {
+                [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+                $script:llpPerformanceReady = Get-LlpReadyState
+                [string]$script:llpPerformanceReady.focus -ne $llpFocusBefore -and
+                    [uint64]$script:llpPerformanceReady.materialPresentedSceneGeneration -ge $llpFocusScene
+            } 1000 "Focus change $llpFocusChange was not presented."
+            $llpFocusTimer.Stop()
+            $llpFocusFeedbackSamples += [double]$llpFocusTimer.Elapsed.TotalMilliseconds
+        }
+        $llpFocusP95 = Get-LlpP95 $llpFocusFeedbackSamples
+        $llpVisiblePerformanceAfter = [LightLaunchpadSpotlightProbeNative]::GetProcessPerformance($llpProcess.Handle)
+        $llpVisibleElapsed = ([DateTime]::UtcNow - $llpVisibleStarted).TotalSeconds
+        $llpVisibleCpuPercent = Get-LlpCpuPercent $llpVisiblePerformanceBefore $llpVisiblePerformanceAfter $llpVisibleElapsed
+
+        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
+        Wait-LlpPerformanceCondition {
+            [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+            $script:llpPerformanceReady = Get-LlpReadyState
+            -not [bool]$script:llpPerformanceReady.windowVisible -and [string]$script:llpPerformanceReady.materialState -eq 'hidden'
+        } 5000 'Performance flow did not enter Hidden for the two-second observation.'
+        $llpHiddenPresentedBefore = [uint64]$llpPerformanceReady.materialPresentedFrames
+        $llpHiddenAcquiredBefore = [uint64]$llpPerformanceReady.materialAcquiredFrames
+        $llpHiddenPerformanceBefore = [LightLaunchpadSpotlightProbeNative]::GetProcessPerformance($llpProcess.Handle)
+        $llpHiddenStarted = [DateTime]::UtcNow
+        Start-Sleep -Milliseconds 2000
+        $llpHiddenElapsed = ([DateTime]::UtcNow - $llpHiddenStarted).TotalSeconds
+        $llpHiddenPerformanceAfter = [LightLaunchpadSpotlightProbeNative]::GetProcessPerformance($llpProcess.Handle)
+        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 100
+        $llpPerformanceReady = Get-LlpReadyState
+        $llpHiddenPresentedAfter = [uint64]$llpPerformanceReady.materialPresentedFrames
+        $llpHiddenAcquiredAfter = [uint64]$llpPerformanceReady.materialAcquiredFrames
+        $llpHiddenCpuPercent = Get-LlpCpuPercent $llpHiddenPerformanceBefore $llpHiddenPerformanceAfter $llpHiddenElapsed
+        $llpHiddenPrivateGrowthBytes = [uint64][Math]::Max(
+            0,
+            [double]([uint64]$llpHiddenPerformanceAfter[0] - $llpInitialHiddenPrivateBytes))
+
+        $llpPerformanceEvidence = [ordered]@{
+            schemaVersion = 1
+            executableSha256 = $llpExecutableSha256
+            buildIdentity = 'development:spotlightflowtest'
+            hotkeyInjection = 'WM_HOTKEY to isolated probe HWND'
+            monitorDevice = [string]$llpPerformanceReady.monitorDevice
+            effectiveDpi = [int]$llpPerformanceReady.effectiveDpi
+            warmOpenCount = 30
+            warmOpenObservedP95Ms = [Math]::Round((Get-LlpP95 $llpWarmOpenElapsed), 3)
+            hotkeyToInputReadyP95Ms = [Math]::Round($llpHotkeyP95, 3)
+            interactionFrameCount = 600
+            interactionPattern = 'tab-focus-cycle'
+            interactionPresentedDelta = [uint64]($llpInteractionPresentedAfter - $llpInteractionPresentedBefore)
+            interactionFrameP95Ms = [Math]::Round([double]$llpPerformanceReady.materialFrameP95Ms, 3)
+            focusChangeCount = 20
+            focusFeedbackP95Ms = [Math]::Round($llpFocusP95, 3)
+            hiddenObservationMilliseconds = [Math]::Round($llpHiddenElapsed * 1000.0, 3)
+            hiddenPresentedFramesBefore = $llpHiddenPresentedBefore
+            hiddenPresentedFramesAfter = $llpHiddenPresentedAfter
+            hiddenAcquiredFramesBefore = $llpHiddenAcquiredBefore
+            hiddenAcquiredFramesAfter = $llpHiddenAcquiredAfter
+            hiddenCpuPercent = [Math]::Round($llpHiddenCpuPercent, 4)
+            hiddenPrivateBytes = [uint64]$llpHiddenPerformanceAfter[0]
+            coldHiddenPrivateBytes = $llpColdHiddenPrivateBytes
+            initialHiddenPrivateBytes = $llpInitialHiddenPrivateBytes
+            hiddenPrivateGateBasis = 'growth after first complete graphics teardown'
+            hiddenPrivateGrowthBytes = $llpHiddenPrivateGrowthBytes
+            warmHiddenPrivateBytes = $llpWarmHiddenPrivateBytes
+            warmHiddenPrivateMaxBytes = [uint64](($llpWarmHiddenPrivateBytes | Measure-Object -Maximum).Maximum)
+            visibleCpuPercent = [Math]::Round($llpVisibleCpuPercent, 4)
+            visiblePrivateBytes = [uint64]$llpVisiblePerformanceAfter[0]
+            visibleWorkingSetBytes = [uint64]$llpVisiblePerformanceAfter[1]
+            adapter = [string]$llpPerformanceReady.materialAdapter
+            output = [string]$llpPerformanceReady.materialOutput
+            acquiredFrames = [uint64]$llpPerformanceReady.materialAcquiredFrames
+            presentedFrames = [uint64]$llpPerformanceReady.materialPresentedFrames
+            droppedScenes = [uint64]$llpPerformanceReady.materialDroppedScenes
+            firstFrameMs = [double]$llpPerformanceReady.materialFirstFrameMs
+            deviceRebuilds = [uint64]$llpPerformanceReady.materialDeviceRebuilds
+        }
+        $llpPerformancePath = Join-Path $llpEvidenceRoot 'performance.json'
+        $llpPerformanceEvidence | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $llpPerformancePath -Encoding UTF8
+        Write-Output "METRIC SpotlightPerformance hotkeyP95Ms=$([double]$llpPerformanceEvidence.hotkeyToInputReadyP95Ms) frameP95Ms=$([double]$llpPerformanceEvidence.interactionFrameP95Ms) focusP95Ms=$([double]$llpPerformanceEvidence.focusFeedbackP95Ms) hiddenCpuPercent=$([double]$llpPerformanceEvidence.hiddenCpuPercent) hiddenPrivateBytes=$([uint64]$llpPerformanceEvidence.hiddenPrivateBytes) hiddenPrivateGrowthBytes=$([uint64]$llpPerformanceEvidence.hiddenPrivateGrowthBytes)"
+        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)
+        if (-not $llpProcess.WaitForExit(10000)) { throw 'Performance probe did not exit.' }
+        Assert-Equal 0 $llpProcess.ExitCode 'Performance probe exit code mismatch.'
+        Write-Output 'PASS SpotlightFlow_Performance'
+        return
+    }
     if ($EvidenceOnly) {
         $llpInitialScreenPath = Join-Path $llpEvidenceRoot '00-live-ownership.png'
         if ($EvidenceBackgroundWindow -ne 0) {

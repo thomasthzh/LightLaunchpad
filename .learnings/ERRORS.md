@@ -1,5 +1,282 @@
 # Error Log
 
+## [ERR-20260824-009] visual-manifest-directory-name
+
+**Logged**: 2026-08-24T18:47:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: docs
+
+### Summary
+
+The first Task 10 evidence summary looked for the visual manifest in the performance directory instead of the retained material-evidence directory.
+
+### Error
+
+```text
+Cannot find path 'artifacts\native-ui-llp013-verification\manifest.json' because it does not exist.
+```
+
+### Context
+
+- Performance evidence is stored under `native-ui-llp013-verification`.
+- The 12+1 visual manifest is stored under `native-ui-llp013-material-evidence`.
+- The failed command was read-only and changed no evidence.
+
+### Suggested Fix
+
+Enumerate the retained LLP-013 artifact directories before aggregating evidence and read each artifact from its recorded owner directory.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `artifacts/native-ui-llp013-material-evidence/manifest.json`, `artifacts/native-ui-llp013-verification/performance.json`
+
+### Resolution
+
+- **Resolved**: 2026-08-24T18:47:00+08:00
+- **Commit/PR**: current LLP-013 Task 9 worktree
+- **Notes**: The visual manifest and performance JSON were read from their separate retained directories and both schemas were verified.
+
+---
+
+## [ERR-20260824-008] asynchronous-gpu-teardown-retained-memory
+
+**Logged**: 2026-08-24T18:43:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: frontend
+
+### Summary
+
+Two fresh 30-open performance runs retained 34-45 MB above the first hidden baseline even though capture/presentation counters and hidden CPU were stationary.
+
+### Error
+
+```text
+Hidden retained Private Bytes growth exceeded 15 MB after the first complete graphics teardown.
+```
+
+### Context
+
+- DirectComposition was detached and committed, all renderer-owned COM resources were released, the D3D context was cleared/flushed, `IDXGIDevice3::Trim` ran, and the renderer thread exited.
+- `Flush` is asynchronous, so repeated device recreation could begin before the prior GPU command stream had completed and released driver allocations.
+- The absolute hidden Private Bytes figure remains dominated by NVIDIA user-mode driver commitment and is recorded separately from renderer-retained growth.
+
+### Suggested Fix
+
+Before releasing the device, issue a `D3D11_QUERY_EVENT`, flush, and wait for completion with a strict renderer-thread-only deadline; then perform the existing release/trim sequence.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `src/LightLaunchpad.NativeUi/MaterialRenderer.cpp`, `tests/LightLaunchpad.NativeUi.Tests/SpotlightFlowBehavior.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-24T18:43:00+08:00
+- **Commit/PR**: current LLP-013 Task 9 worktree
+- **Notes**: Two consecutive real-EXE reruns passed: retained growth 0 bytes and 14,012,416 bytes; hidden CPU remained 0% and frame counters did not advance.
+
+---
+
+## [ERR-20260824-007] expired-exec-session-after-compaction
+
+**Logged**: 2026-08-24T18:30:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+Polling a previously yielded command after conversation compaction returned an unknown process id, so its final console tail was unavailable.
+
+### Error
+
+```text
+write_stdin failed: Unknown process id 50986
+```
+
+### Context
+
+- The process had already exited and the tool session had been retired.
+- The retained `performance.json` timestamp and contents provided the authoritative failed measurement.
+
+### Suggested Fix
+
+Inspect the command's durable evidence and process table, then rerun only the focused gate when the terminal tail cannot be recovered.
+
+### Metadata
+
+- Reproducible: no
+- Related Files: `artifacts/native-ui-llp013-verification/performance.json`
+
+### Resolution
+
+- **Resolved**: 2026-08-24T18:31:00+08:00
+- **Commit/PR**: current LLP-013 Task 9 worktree
+- **Notes**: The stale measurement was read directly and the focused performance gate was rerun with a captured exit code.
+
+---
+
+## [ERR-20260824-006] singleton-forwarded-diagnostics-invocation
+
+**Logged**: 2026-08-24T18:25:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+Directly invoking the precommit EXE returned success through the existing singleton-forwarding path without creating the requested diagnostics file.
+
+### Error
+
+```text
+The process exited 0 but the requested diagnostics JSON was absent.
+```
+
+### Context
+
+- The protected user runtime already owned the product singleton.
+- A bare invocation could therefore forward and exit before the isolated diagnostics path ran.
+
+### Suggested Fix
+
+Launch the exact absolute EXE with `Start-Process -Wait`, an absolute diagnostics path, and isolated test profile arguments; verify the file rather than trusting exit code alone.
+
+### Metadata
+
+- Reproducible: yes while the protected singleton is running
+- Related Files: `tools/build-native-ui.ps1`, `tests/LightLaunchpad.NativeUi.Tests/ExecutableIdentity.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-24T18:25:00+08:00
+- **Commit/PR**: current LLP-013 Task 9 worktree
+- **Notes**: The precommit probe was rerun through an explicit absolute process launch and its diagnostics file was verified.
+
+---
+
+## [ERR-20260824-005] clipboard-restore-contention
+
+**Logged**: 2026-08-24T18:22:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+The real text-input suite passed its product assertions, then a transient clipboard lock made its single-attempt user-clipboard restore fail in `finally`.
+
+### Error
+
+```text
+Requested Clipboard operation did not succeed.
+```
+
+### Context
+
+- The product probe had already exited successfully with the expected UIA/IME state.
+- The failure was in safety cleanup and therefore could not be ignored or downgraded.
+
+### Suggested Fix
+
+Restore the captured clipboard through a short bounded retry loop and still fail explicitly if all retries are exhausted.
+
+### Metadata
+
+- Reproducible: intermittent
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/TextInputBehavior.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-24T18:22:00+08:00
+- **Commit/PR**: current LLP-013 Task 9 worktree
+- **Notes**: Clipboard clear/set now retries up to twenty times at 50 ms intervals; the affected suite passed with the original clipboard restored.
+
+---
+
+## [ERR-20260824-004] performance-probe-observed-stale-state
+
+**Logged**: 2026-08-24T18:10:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+The first performance harness revisions treated a stale ready JSON snapshot and a globally occupied Alt+9 registration as renderer failures.
+
+### Error
+
+```text
+Performance setup did not reach the hidden warm-open baseline.
+Visible interaction frame 1 was not presented.
+```
+
+### Context
+
+- The protected user runtime already owned Alt+9, so physical key injection targeted that process rather than the isolated probe.
+- Hidden and asynchronous presentation state required an explicit status publication before reading the ready JSON.
+- Search-caret animation also meant a test must lock the generation created by an input instead of chasing the continuously newest generation.
+
+### Suggested Fix
+
+Drive the isolated probe's production `WM_HOTKEY` handler directly, explicitly refresh diagnostic state, and use two-phase fixed-generation presentation waits.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/SpotlightFlowBehavior.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-24T18:10:00+08:00
+- **Commit/PR**: current LLP-013 Task 9 worktree
+- **Notes**: The final 30-open/600-frame/20-focus real-EXE performance gate passes without touching the protected runtime.
+
+---
+
+## [ERR-20260824-003] performance-evidence-parameter-name
+
+**Logged**: 2026-08-24T17:25:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+The first manual performance command used `-EvidenceOutputDirectory`, but the new suite contract exposes `-EvidenceDirectory`.
+
+### Error
+
+```text
+Performance mode requires -EvidenceDirectory.
+```
+
+### Context
+
+- Parameter validation stopped before the performance probe or product executable started.
+- No runtime, repository, or evidence state was changed by the failed invocation.
+
+### Suggested Fix
+
+Read the script parameter block before issuing a new mode command and use the exact declared parameter name.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/MaterialRendererBehavior.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-24T17:26:00+08:00
+- **Commit/PR**: current LLP-013 Task 9 worktree
+- **Notes**: All subsequent focused and final performance runs used `-EvidenceDirectory`.
+
+---
+
 ## [ERR-20260824-002] windows-powershell-get-filehash-unavailable
 
 **Logged**: 2026-08-24T17:05:00+08:00
