@@ -1874,7 +1874,7 @@ public:
                 context->FillRoundedRectangle(tile, focusFill.Get());
                 ComOwner<ID2D1SolidColorBrush> focusRim;
                 failure = RequiredResourceResult(context->CreateSolidColorBrush(
-                    D2DColor(scene.policy.focus, 0.90f), focusRim.Put()));
+                    D2DColor(scene.policy.focus, 1.0f), focusRim.Put()));
                 if (failure != FailureReason::None) return failure;
                 context->DrawRoundedRectangle(tile, focusRim.Get(), 2.0f);
             }

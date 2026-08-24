@@ -1,6 +1,8 @@
 param(
-    [ValidateSet('Lifecycle', 'Host', 'Recovery')]
-    [string]$Mode = 'Lifecycle'
+    [ValidateSet('Lifecycle', 'Host', 'Recovery', 'Visual')]
+    [string]$Mode = 'Lifecycle',
+
+    [string]$EvidenceDirectory = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,6 +59,96 @@ function Assert-LlpDisplay1Containment {
         [int]$State.windowRect.right -le [int]$State.monitorBounds.right -and
         [int]$State.windowRect.bottom -le [int]$State.monitorBounds.bottom
     ) "$Context escaped DISPLAY1."
+}
+
+if ($Mode -eq 'Visual') {
+    Assert-True (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) 'Visual mode requires -EvidenceDirectory.'
+    $llpEvidenceRoot = if ([System.IO.Path]::IsPathRooted($EvidenceDirectory)) {
+        [System.IO.Path]::GetFullPath($EvidenceDirectory)
+    }
+    else {
+        [System.IO.Path]::GetFullPath((Join-Path $llpRepoRoot $EvidenceDirectory))
+    }
+    Assert-True (Test-Path -LiteralPath $llpEvidenceRoot -PathType Container) "Visual evidence directory does not exist: $llpEvidenceRoot."
+    $llpEvidenceItem = Get-Item -LiteralPath $llpEvidenceRoot -Force
+    Assert-True (($llpEvidenceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) 'Visual evidence directory must not be a reparse point.'
+    $llpCases = @(
+        'light-flat', 'light-gradient', 'light-low-contrast',
+        'dark-flat', 'dark-gradient', 'dark-low-contrast',
+        'text-grid', 'checker-fine', 'vertical-lines',
+        'saturated-warm', 'saturated-cool', 'black-white-extreme',
+        'supplemental-real-desktop'
+    )
+    $llpManifestPath = Join-Path $llpEvidenceRoot 'manifest.json'
+    Assert-True (Test-Path -LiteralPath $llpManifestPath -PathType Leaf) 'Visual evidence manifest is missing.'
+    $llpManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpManifestPath | ConvertFrom-Json
+    Assert-Equal 13 @($llpManifest.evidence).Count 'Visual evidence manifest case count mismatch.'
+    Assert-Equal '\\.\DISPLAY1' ([string]$llpManifest.monitorDevice) 'Visual evidence was not fixed to DISPLAY1.'
+    Assert-True (@($llpManifest.executableSha256s).Count -ge 1) 'Visual evidence manifest omitted its actual executable hashes.'
+    foreach ($llpExecutableHash in @($llpManifest.executableSha256s)) {
+        Assert-True ([string]$llpExecutableHash -match '^[0-9a-f]{64}$') 'Visual evidence manifest contains an invalid executable SHA256.'
+    }
+    Add-Type -AssemblyName System.Drawing
+    foreach ($llpCase in $llpCases) {
+        $llpPngPath = Join-Path $llpEvidenceRoot "$llpCase.png"
+        $llpDiagnosticsPath = Join-Path $llpEvidenceRoot "$llpCase.diagnostics.json"
+        Assert-True (Test-Path -LiteralPath $llpPngPath -PathType Leaf) "Visual evidence PNG missing: $llpCase."
+        Assert-True (Test-Path -LiteralPath $llpDiagnosticsPath -PathType Leaf) "Visual evidence diagnostics missing: $llpCase."
+        $llpDiagnostics = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpDiagnosticsPath | ConvertFrom-Json
+        Assert-Equal $llpCase ([string]$llpDiagnostics.background) "Visual evidence background label mismatch for $llpCase."
+        Assert-True ([uint32]$llpDiagnostics.nativeUiPid -gt 0) "Visual evidence NativeUi PID missing for $llpCase."
+        Assert-True ([string]$llpDiagnostics.executableSha256 -match '^[0-9a-f]{64}$') "Visual evidence executable SHA256 missing or invalid for $llpCase."
+        Assert-Equal 'high-fidelity' ([string]$llpDiagnostics.rendererPath) "Visual evidence renderer path mismatch for $llpCase."
+        Assert-Equal $true ([bool]$llpDiagnostics.frozenEvidence) "Visual evidence was not frozen for $llpCase."
+        Assert-Equal $true ([bool]$llpDiagnostics.terminal) "Visual evidence freeze was not terminal for $llpCase."
+        Assert-Equal '\\.\DISPLAY1' ([string]$llpDiagnostics.monitorDevice) "Visual evidence escaped DISPLAY1 for $llpCase."
+        $llpBitmap = [System.Drawing.Bitmap]::new($llpPngPath)
+        try {
+            $llpExpectedWidth = [int]$llpDiagnostics.viewport.right - [int]$llpDiagnostics.viewport.left
+            $llpExpectedHeight = [int]$llpDiagnostics.viewport.bottom - [int]$llpDiagnostics.viewport.top
+            Assert-Equal $llpExpectedWidth $llpBitmap.Width "Visual evidence width was not the exact physical window width for $llpCase."
+            Assert-Equal $llpExpectedHeight $llpBitmap.Height "Visual evidence height was not the exact physical window height for $llpCase."
+        }
+        finally { $llpBitmap.Dispose() }
+        $llpPixels = $llpDiagnostics.pixelAnalysis
+        Assert-True ([double]$llpPixels.searchCenterTranslationDip -le 0.5) "Search center translated above 0.5 DIP for $llpCase."
+        Assert-True ([double]$llpPixels.maximumEdgeDisplacementDip -le 1.5) "Search edge displacement exceeded 1.5 DIP for $llpCase."
+        Assert-True ([double]$llpPixels.duplicatedComponentRatio -le 0.05) "Duplicated component area exceeded 5% for $llpCase."
+        Assert-True ([double]$llpPixels.focusedTileScaleDeltaPercent -le 0.5) "Focused tile scale delta exceeded 0.5% for $llpCase."
+        Assert-True ([double]$llpPixels.textContrastMinimum -ge 4.5) "Text contrast fell below 4.5:1 for $llpCase."
+        Assert-True ([double]$llpPixels.focusBoundaryTargetMinimum -ge 3.0) "Focus boundary target fell below 3:1 for $llpCase."
+        if ([bool]$llpDiagnostics.controlled) {
+            Assert-True ([int]$llpPixels.outsideRoundedBoundaryMaxDelta255 -le 2) "Rounded-boundary material leak exceeded 2/255 for $llpCase."
+            Assert-True ($null -ne $llpDiagnostics.scene.search -and $null -ne $llpDiagnostics.scene.searchText) "Production search geometry missing for $llpCase."
+            Assert-True ($null -ne $llpDiagnostics.focusedTile) "Production focused-tile geometry missing for $llpCase."
+            Assert-Equal 'Flow' ([string]$llpDiagnostics.query) "Controlled evidence query mismatch for $llpCase."
+            Assert-Equal 'results' ([string]$llpDiagnostics.focus) "Controlled evidence focus mismatch for $llpCase."
+            Assert-Equal 5 @($llpPixels.edgeSampleVectors).Count "Controlled search edge-vector count mismatch for $llpCase."
+            $llpDipScale = 96.0 / [Math]::Max(1, [int]$llpDiagnostics.effectiveDpi)
+            $llpSearchLeft = [double]$llpDiagnostics.scene.search.left * $llpDipScale
+            $llpSearchTop = [double]$llpDiagnostics.scene.search.top * $llpDipScale
+            $llpSearchRight = [double]$llpDiagnostics.scene.search.right * $llpDipScale
+            $llpSearchBottom = [double]$llpDiagnostics.scene.search.bottom * $llpDipScale
+            foreach ($llpVector in @($llpPixels.edgeSampleVectors)) {
+                Assert-True ([double]$llpVector.displacementDip -le 1.5) "Recorded edge vector exceeded 1.5 DIP for $llpCase."
+                Assert-True (
+                    [double]$llpVector.sourceXDip -ge $llpSearchLeft -and
+                    [double]$llpVector.sourceXDip -le $llpSearchRight -and
+                    [double]$llpVector.sourceYDip -ge $llpSearchTop -and
+                    [double]$llpVector.sourceYDip -le $llpSearchBottom
+                ) "Recorded edge-vector source escaped the production search bounds for $llpCase."
+            }
+        }
+        if ($llpCase -in @('text-grid', 'saturated-cool')) {
+            Assert-Equal $true ([bool]$llpDiagnostics.liveAdvancedWithoutReopen) "Live desktop identity did not advance without hide/reopen for $llpCase."
+            Assert-True ([uint64]$llpDiagnostics.backgroundFrameIdentityAfter -gt [uint64]$llpDiagnostics.backgroundFrameIdentityBefore) "Live background frame identity did not advance for $llpCase."
+        }
+    }
+    $llpBackgroundSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'MaterialEvidenceBackground.cpp')
+    Assert-True $llpBackgroundSource.Contains('LightLaunchpadMaterialEvidenceBackground') 'Deterministic background exact class contract is missing.'
+    Assert-True ($llpBackgroundSource.Contains('WM_APP + 73') -and $llpBackgroundSource.Contains('WM_APP + 74')) 'Deterministic background message contract is missing.'
+    Write-Output 'PASS MaterialRendererBehavior_VisualEvidence'
+    return
 }
 
 try {

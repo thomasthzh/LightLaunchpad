@@ -15,7 +15,9 @@ param(
 
     [switch]$SelfCaptureTransition,
 
-    [switch]$EvidenceOnly
+    [switch]$EvidenceOnly,
+
+    [uint64]$EvidenceBackgroundWindow = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,6 +34,9 @@ if ($llpSpecialScenarioCount -gt 1) {
 }
 if ($EvidenceOnly -and ($MaterialFailure -ne 'None' -or $llpSpecialScenarioCount -ne 0)) {
     throw 'EvidenceOnly requires the normal high-fidelity flow without another scenario or forced failure.'
+}
+if ($EvidenceBackgroundWindow -ne 0 -and -not $EvidenceOnly) {
+    throw 'EvidenceBackgroundWindow is valid only with EvidenceOnly.'
 }
 if ($MaterialFailure -ne 'None' -and $llpSpecialScenarioCount -ne 0) {
     throw 'A forced material failure cannot be combined with a specialized Spotlight flow scenario.'
@@ -381,6 +386,8 @@ public static class LightLaunchpadSpotlightProbeNative {
     [DllImport("user32.dll")]
     public static extern bool UpdateWindow(IntPtr hwnd);
     [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")]
     public static extern bool GetCursorPos(out POINT point);
     [DllImport("user32.dll")]
     public static extern bool SetCursorPos(int x, int y);
@@ -400,6 +407,8 @@ public static class LightLaunchpadSpotlightProbeNative {
     public static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
     [DllImport("gdi32.dll")]
     public static extern bool BitBlt(IntPtr destination, int x, int y, int width, int height, IntPtr source, int sourceX, int sourceY, uint operation);
+    [DllImport("gdi32.dll")]
+    public static extern uint GetPixel(IntPtr dc, int x, int y);
     [DllImport("dwmapi.dll")]
     public static extern int DwmFlush();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -569,6 +578,15 @@ public static class LightLaunchpadSpotlightProbeNative {
 
     & (Join-Path $llpRepoRoot 'tools\build-native-ui.ps1') -OutputDirectory $llpOutputDirectory -ProductVersion '1.11.0' -BuildCommit 'spotlightflowtest' -BuildChannel Development | Out-Null
     $llpExecutable = Join-Path $llpOutputDirectory 'LightLaunchpad.NativeUi.exe'
+    $llpExecutableStream = [System.IO.File]::OpenRead($llpExecutable)
+    try {
+        $llpExecutableHasher = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $llpExecutableSha256 = ([System.BitConverter]::ToString($llpExecutableHasher.ComputeHash($llpExecutableStream))).Replace('-', '').ToLowerInvariant()
+        }
+        finally { $llpExecutableHasher.Dispose() }
+    }
+    finally { $llpExecutableStream.Dispose() }
 
     $llpPriorAppData = $env:APPDATA
     $llpPriorLocalAppData = $env:LOCALAPPDATA
@@ -614,6 +632,7 @@ public static class LightLaunchpadSpotlightProbeNative {
             $llpArguments += '--spotlight-force-compose-hide-lifetime'
         }
         $llpProcess = Start-Process -FilePath $llpExecutable -ArgumentList $llpArguments -PassThru
+        Write-Output "METRIC SpotlightExecutable pid=$($llpProcess.Id) sha256=$llpExecutableSha256 buildIdentity=development:spotlightflowtest"
     }
     finally {
         $env:APPDATA = $llpPriorAppData
@@ -641,6 +660,19 @@ public static class LightLaunchpadSpotlightProbeNative {
         $llpPreInteractionRect.Bottom -le [int]$llpReady.monitorBounds.bottom
     ) 'Hidden Spotlight test window escaped DISPLAY1 before interaction.'
     Assert-Equal 0 $llpVisibleInteractions 'Spotlight performed a visible interaction before DISPLAY1 containment was asserted.'
+    if ($EvidenceBackgroundWindow -ne 0) {
+        $llpEvidenceBackground = [IntPtr]::new([int64]$EvidenceBackgroundWindow)
+        Assert-True ([LightLaunchpadSpotlightProbeNative]::IsWindow($llpEvidenceBackground)) 'The exact evidence background window disappeared before Spotlight interaction.'
+        Assert-True ([LightLaunchpadSpotlightProbeNative]::SetWindowPos($llpEvidenceBackground, [IntPtr]::Zero, 0, 0, 0, 0, 0x0013)) 'Could not place the evidence background above the desktop before Spotlight interaction.'
+        Assert-True ([LightLaunchpadSpotlightProbeNative]::UpdateWindow($llpEvidenceBackground)) 'Could not synchronously repaint the evidence background before Spotlight interaction.'
+        [void][LightLaunchpadSpotlightProbeNative]::DwmFlush()
+        $llpEvidenceDc = [LightLaunchpadSpotlightProbeNative]::GetDC([IntPtr]::Zero)
+        try {
+            $llpEvidencePrePixel = [LightLaunchpadSpotlightProbeNative]::GetPixel($llpEvidenceDc, $llpPreInteractionRect.Left, $llpPreInteractionRect.Top)
+        }
+        finally { if ($llpEvidenceDc -ne [IntPtr]::Zero) { [void][LightLaunchpadSpotlightProbeNative]::ReleaseDC([IntPtr]::Zero, $llpEvidenceDc) } }
+        Write-Output "METRIC SpotlightEvidenceBackgroundPreInteraction pixel=$llpEvidencePrePixel"
+    }
     ++$llpVisibleInteractions
     [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Assert-True ([LightLaunchpadSpotlightProbeNative]::IsWindowVisible($llpWindow)) 'First Alt+D path did not show Spotlight.'
@@ -654,6 +686,14 @@ public static class LightLaunchpadSpotlightProbeNative {
         $llpWindowRect.Right -le [int]$llpMonitorReady.monitorBounds.right -and
         $llpWindowRect.Bottom -le [int]$llpMonitorReady.monitorBounds.bottom
     ) 'Visible Spotlight test window escaped the requested DISPLAY1 bounds.'
+    if ($EvidenceBackgroundWindow -ne 0) {
+        $llpEvidenceDc = [LightLaunchpadSpotlightProbeNative]::GetDC([IntPtr]::Zero)
+        try {
+            $llpEvidenceVisiblePixel = [LightLaunchpadSpotlightProbeNative]::GetPixel($llpEvidenceDc, $llpWindowRect.Left, $llpWindowRect.Top)
+        }
+        finally { if ($llpEvidenceDc -ne [IntPtr]::Zero) { [void][LightLaunchpadSpotlightProbeNative]::ReleaseDC([IntPtr]::Zero, $llpEvidenceDc) } }
+        Write-Output "METRIC SpotlightEvidenceBackgroundVisible pixel=$llpEvidenceVisiblePixel"
+    }
     Write-Output "METRIC SpotlightMonitor device=$([string]$llpMonitorReady.monitorDevice) window=$($llpWindowRect.Left),$($llpWindowRect.Top),$($llpWindowRect.Right),$($llpWindowRect.Bottom) bounds=$([int]$llpMonitorReady.monitorBounds.left),$([int]$llpMonitorReady.monitorBounds.top),$([int]$llpMonitorReady.monitorBounds.right),$([int]$llpMonitorReady.monitorBounds.bottom)"
     if ($SelfCaptureTransition) {
         [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0111, [UIntPtr]::new([uint64]1004), [IntPtr]::Zero)
@@ -745,11 +785,23 @@ public static class LightLaunchpadSpotlightProbeNative {
         Write-Output 'PASS SpotlightFlow_LaunchpadToSpotlightFallbackExcludesOwnedWindows'
         return
     }
-    $llpElement = [System.Windows.Automation.AutomationElement]::FromHandle($llpWindow)
+    $llpElement = $null
     $llpValueObject = $null
-    Assert-True ($llpElement.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$llpValueObject)) 'Spotlight search Value pattern is unavailable.'
-    $llpValue = [System.Windows.Automation.ValuePattern]$llpValueObject
-    Assert-Equal $true $llpElement.Current.HasKeyboardFocus 'Search was not the only focus after Alt+D.'
+    $llpValue = $null
+    if (-not $EvidenceOnly) {
+        Wait-LlpCondition {
+            $script:llpElement = [System.Windows.Automation.AutomationElement]::FromHandle($llpWindow)
+            $script:llpValueObject = $null
+            return $null -ne $script:llpElement -and
+                $script:llpElement.TryGetCurrentPattern(
+                    [System.Windows.Automation.ValuePattern]::Pattern,
+                    [ref]$script:llpValueObject)
+        } 3000 'Spotlight search Value pattern is unavailable.'
+        $llpElement = $script:llpElement
+        $llpValueObject = $script:llpValueObject
+        $llpValue = [System.Windows.Automation.ValuePattern]$llpValueObject
+        Assert-Equal $true $llpElement.Current.HasKeyboardFocus 'Search was not the only focus after Alt+D.'
+    }
     if ($ComposeHideLifetime) {
         Wait-LlpCondition {
             [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
@@ -880,6 +932,31 @@ public static class LightLaunchpadSpotlightProbeNative {
     New-Item -ItemType Directory -Force -Path $llpEvidenceRoot | Out-Null
     if ($EvidenceOnly) {
         $llpInitialScreenPath = Join-Path $llpEvidenceRoot '00-live-ownership.png'
+        if ($EvidenceBackgroundWindow -ne 0) {
+            $llpEvidenceQueryGeneration = [uint64]$llpMaterialReady.materialSceneGeneration
+            Send-LlpText $llpWindow 'Flow'
+            Wait-LlpCondition {
+                $script:llpMaterialReady = Get-LlpReadyState
+                return [string]$script:llpMaterialReady.searchValue -eq 'Flow' -and
+                    [uint64]$script:llpMaterialReady.materialSceneGeneration -gt $llpEvidenceQueryGeneration -and
+                    [string]$script:llpMaterialReady.materialPath -eq 'high-fidelity' -and
+                    [string]$script:llpMaterialReady.materialState -eq 'live' -and
+                    [uint64]$script:llpMaterialReady.materialPresentedSceneGeneration -ge [uint64]$script:llpMaterialReady.materialSceneGeneration
+            } 5000 'Controlled material evidence did not present the exact Flow query.'
+            $llpEvidenceFocusGeneration = [uint64]$llpMaterialReady.materialSceneGeneration
+            Send-LlpKey $llpWindow 0x28
+            Wait-LlpCondition {
+                $script:llpMaterialReady = Get-LlpReadyState
+                return [string]$script:llpMaterialReady.focus -eq 'results' -and
+                    [uint64]$script:llpMaterialReady.materialSceneGeneration -gt $llpEvidenceFocusGeneration -and
+                    [string]$script:llpMaterialReady.materialPath -eq 'high-fidelity' -and
+                    [string]$script:llpMaterialReady.materialState -eq 'live' -and
+                    [uint64]$script:llpMaterialReady.materialPresentedSceneGeneration -ge [uint64]$script:llpMaterialReady.materialSceneGeneration
+            } 5000 'Controlled material evidence did not present the exact focused-result state.'
+            Write-Output "METRIC SpotlightEvidenceState query='$([string]$llpMaterialReady.searchValue)' focus=$([string]$llpMaterialReady.focus) filtered=$([int]$llpMaterialReady.filteredCount) scene=$([uint64]$llpMaterialReady.materialSceneGeneration)"
+            $llpPresentedReadyPath = Join-Path $llpEvidenceRoot 'presented-ready.json'
+            $llpMaterialReady | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $llpPresentedReadyPath -Encoding UTF8
+        }
         [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::new([uint64]4), [IntPtr]::Zero)
         Wait-LlpCondition {
             $script:llpMaterialReady = Get-LlpReadyState
@@ -911,6 +988,11 @@ public static class LightLaunchpadSpotlightProbeNative {
         finally {
             [void][LightLaunchpadSpotlightProbeNative]::DestroyWindow($llpEvidenceCandidateWindow)
         }
+        if ($EvidenceBackgroundWindow -ne 0) {
+            Assert-True ([LightLaunchpadSpotlightProbeNative]::SetWindowPos($llpEvidenceBackground, $llpWindow, 0, 0, 0, 0, 0x0013)) 'Could not restore the evidence background behind Spotlight before the freeze commit.'
+            Assert-True ([LightLaunchpadSpotlightProbeNative]::UpdateWindow($llpEvidenceBackground)) 'Could not repaint the evidence background behind Spotlight before the freeze commit.'
+        }
+        [void][LightLaunchpadSpotlightProbeNative]::DwmFlush()
         [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::new([uint64]2), [IntPtr]::Zero)
         Wait-LlpCondition {
             $script:llpMaterialReady = Get-LlpReadyState
@@ -921,6 +1003,21 @@ public static class LightLaunchpadSpotlightProbeNative {
         Assert-Equal ([uint64]$llpEvidenceBaseline.materialEvidenceBaselineFrameIdentity) ([uint64]$llpMaterialReady.materialEvidenceFreezeFrameIdentity) 'Spotlight evidence freeze did not use the exact last presented desktop frame.'
         Assert-Equal ([uint64]$llpEvidenceBaseline.materialEvidenceBaselineSceneGeneration) ([uint64]$llpMaterialReady.materialEvidenceFreezeSceneGeneration) 'Spotlight evidence freeze did not use the exact last presented scene.'
         Assert-Equal ([uint64]$llpEvidenceCandidate.materialPresentedFrames + 1) ([uint64]$llpMaterialReady.materialPresentedFrames) 'Spotlight evidence freeze did not commit exactly one final redraw.'
+        if ($EvidenceBackgroundWindow -ne 0) {
+            Assert-True ([LightLaunchpadSpotlightProbeNative]::SetWindowPos($llpEvidenceBackground, $llpWindow, 0, 0, 0, 0, 0x0013)) 'Could not restore the evidence background directly behind frozen Spotlight.'
+            Assert-True ([LightLaunchpadSpotlightProbeNative]::UpdateWindow($llpEvidenceBackground)) 'Could not repaint the evidence background directly behind frozen Spotlight.'
+            [void][LightLaunchpadSpotlightProbeNative]::DwmFlush()
+            $llpEvidenceDc = [LightLaunchpadSpotlightProbeNative]::GetDC([IntPtr]::Zero)
+            try {
+                $llpEvidenceFrozenPixel = [LightLaunchpadSpotlightProbeNative]::GetPixel($llpEvidenceDc, $llpWindowRect.Left, $llpWindowRect.Top)
+            }
+            finally { if ($llpEvidenceDc -ne [IntPtr]::Zero) { [void][LightLaunchpadSpotlightProbeNative]::ReleaseDC([IntPtr]::Zero, $llpEvidenceDc) } }
+            Write-Output "METRIC SpotlightEvidenceBackgroundFrozen pixel=$llpEvidenceFrozenPixel"
+        }
+        $llpMaterialReady = Get-LlpReadyState
+        Assert-Equal 'frozen-evidence' ([string]$llpMaterialReady.materialState) 'The frozen evidence snapshot was not captured at the terminal compositor state.'
+        $llpFrozenReadyPath = Join-Path $llpEvidenceRoot 'frozen-ready.json'
+        $llpMaterialReady | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $llpFrozenReadyPath -Encoding UTF8
         $llpInitialMarkerPixels = Save-LlpScreenEvidence $llpWindow $llpInitialScreenPath $llpMaterialReady.materialOwnershipProbeBounds
         Assert-Equal 0 $llpInitialMarkerPixels 'The committed DComp frame still exposed the fallback-only ownership signature on the real desktop.'
         Assert-Equal $true ([bool]$llpMaterialReady.materialDirectLayerTransparent) 'The high-fidelity handoff did not make the layered HWND bottom pixels transparent.'

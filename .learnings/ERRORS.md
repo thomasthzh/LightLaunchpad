@@ -1,5 +1,83 @@
 # Error Log
 
+## [ERR-20260824-002] windows-powershell-get-filehash-unavailable
+
+**Logged**: 2026-08-24T17:05:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+The Windows PowerShell host used by the nested Spotlight evidence flow did not expose `Get-FileHash`, so EXE provenance capture stopped before product launch.
+
+### Error
+
+```text
+Get-FileHash is not recognized as the name of a cmdlet.
+```
+
+### Context
+
+- The parent PowerShell host supports `Get-FileHash`, but the nested compatibility host running the real-EXE suite does not.
+- The failure occurred before NativeUi started and removed the forced case evidence, so no stale case could pass.
+
+### Suggested Fix
+
+Use `System.Security.Cryptography.SHA256` over an explicitly disposed read stream in cross-version PowerShell test harnesses.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tests/LightLaunchpad.NativeUi.Tests/SpotlightFlowBehavior.Tests.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-24T17:05:00+08:00
+- **Commit/PR**: current LLP-013 Task 8 worktree
+- **Notes**: The evidence flow now computes lowercase SHA256 through the .NET cryptography API.
+
+---
+
+## [ERR-20260824-001] system-drawing-pathinfo-constructor
+
+**Logged**: 2026-08-24T16:45:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+A one-off pixel probe passed PowerShell's `PathInfo` object directly to `System.Drawing.Bitmap`, so overload resolution tried the image constructor and rejected the value.
+
+### Error
+
+```text
+Cannot convert argument "original" ... from type System.Management.Automation.PathInfo to System.Drawing.Image.
+```
+
+### Context
+
+- The probe inspected a retained Task 8 material-evidence PNG.
+- The failure was isolated to the read-only diagnostic command; the evidence image and product runtime were unchanged.
+
+### Suggested Fix
+
+Resolve the file first and pass its string path explicitly: `$path = (Resolve-Path -LiteralPath $file).Path; [System.Drawing.Bitmap]::new($path)`.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `tools/capture-material-evidence.ps1`
+
+### Resolution
+
+- **Resolved**: 2026-08-24T16:45:00+08:00
+- **Commit/PR**: current LLP-013 Task 8 worktree
+- **Notes**: Subsequent standalone bitmap probes use the resolved `.Path` string.
+
+---
+
 ## [ERR-20260812-019] task5-manual-build-identity-mismatch
 
 **Logged**: 2026-08-12T12:06:15+08:00
