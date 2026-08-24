@@ -2,16 +2,51 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-14 06:02:49 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-24 14:38:00 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `cf8489be500dfff6cf0d360206c84d4d4a459f4f`
+- HEAD: `a9032341540a34622e0a998db7396a0b0ac1f5e2`
 - Remote main: `origin/main@33e91c2`
 - Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
 - Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
 - Goal status: active; LLP-013 remains the only task in progress.
-- Current gate: LLP-013 Task 6 is complete after independent specification and code-quality re-review; Task 7 recovery, adaptive routing, diagnostics, and evidence freeze is the next gate and has not started.
+- Current gate: LLP-013 Task 7 is complete after independent specification and code-quality re-review; Task 8 deterministic 12-background pixel and live-refresh evidence is the next gate and has not started.
+
+## LLP-013 Task 7 Completion Evidence
+
+Status at 2026-08-24 14:38 +08:00: Task 7 complete; LLP-013 remains the sole project-level `in_progress` task, and Task 8 is the next implementation gate.
+
+Changed files and commit:
+
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` - fixed diagnostics JSON, Development/Stable argument isolation, real material probe controls, status-only file publication, real `EVENT_SYSTEM_DESKTOPSWITCH` hook routing, adaptive requests, and terminal evidence integration.
+- `src/LightLaunchpad.NativeUi/MaterialRenderer.{h,cpp}` - solid/reduced-motion routing, copied diagnostics, measured frame P95, bounded epoch recovery, complete DXGI device-loss classification, exact committed/candidate GPU evidence, terminal freeze, renderer-thread diagnostics synchronization, and pixel-identical parallel fallback blur.
+- `tests/LightLaunchpad.NativeUi.Tests/MaterialRenderer.Tests.cpp` - 43 focused production-boundary scenarios covering adaptive policy, one-rebuild recovery, actual HRESULT operations, truthful freeze, last-presented scene/desktop identity, diagnostics hot-copy counts, and candidate-loss recovery.
+- `tests/LightLaunchpad.NativeUi.Tests/{MaterialRendererBehavior,ExecutableIdentity,SpotlightFlowBehavior}.Tests.ps1` - real DISPLAY1 adaptive/recovery/freeze matrix, real WinEvent desktop switch, Stable switch rejection, pre-interaction containment, default canonical launch coverage, explicit terminal evidence mode, and truthful total/delta diagnostics metrics.
+- Implementation commit: `a9032341540a34622e0a998db7396a0b0ac1f5e2` (`feat: harden material recovery and evidence`), exactly seven files.
+
+TDD, debugging, and review evidence:
+
+- RED adaptive scenarios proved high contrast and disabled transparency still entered capture; production now publishes `live/solid/None` before affinity or backend startup. Reduced motion remains `live/high-fidelity` with zero material displacement.
+- Access-loss REDs covered successful recovery, failed rebuild, second loss, display change, real desktop switch, explicit display-rebuild budget consumption, composition device removal, capture/release loss, and candidate-evidence loss. All relevant DXGI `ACCESS_LOST`, `DEVICE_REMOVED`, and `DEVICE_RESET` boundaries now share one `RecoverOrFallback` budget per visible epoch; failure remains stable fallback with no recurring retry.
+- A final specification RED found candidate evidence loss returning without recovery and leaving preparation active. The faithful fake initially showed `starts=1`, `rebuilds=0`, `active=1`; GREEN uses explicit `Prepared/Recovered/Fallback`, clears active on every terminal path, and re-establishes the committed baseline after recovery. Scenarios 25-27 pass with one rebuild and no loop; active is read from the real `MaterialRenderer::Impl` member rather than inferred from the enum.
+- Freeze REDs proved the old path could use an uncommitted candidate, redraw before stopping duplication, and falsely report success after failed/non-presented Compose. The production backend now retains the last successfully committed scene and GPU texture, stops duplication, clears capture affinity, redraws/commits exactly once, and latches terminal `FrozenEvidence`; failure is terminal `CompositionUnavailable` fallback.
+- Real hash sensitivity was mutation-tested: deliberately retaining the candidate produced different committed/candidate hashes and an exact test failure. Restored Recovery reports a distinct candidate hash, freeze hash equal to the baseline committed hash, unchanged committed frame/scene identities, one additional presentation, WDA_NONE, and terminal state.
+- Diagnostics-copy RED measured `strings=18`, `vectors=12` over three repeated live publications. `SynchronizeDiagnostics` now updates scalars in place and assigns owned strings/vectors only when changed. Focused GREEN is `strings=0`, `vectors=0`; real Recovery truthfully reports `stringsTotal=1`, `vectorsTotal=0`, `stringsDelta=0`, `vectorsDelta=0` after steady capture.
+- The original serial fallback timing remained over budget because six exact-pixel blur passes dominated the synchronous pre-show path. Row/column-disjoint parallel passes preserve the same radius, six-pass order, integer math, bounds, and pixels; thread-launch failure joins started workers and finishes unstarted ranges serially. Real DISPLAY1 canonical P95 improved from repeated 188 ms RED to 125 ms, while Host normal/forced and visual ownership evidence remained green.
+- Independent final specification review: PASS C0/I0/M0. Independent final quality review: Ready Yes C0/I0/M0. The final narrow reviews specifically rechecked the candidate-loss recovery result, faithful baseline reset, actual worker active state, and no production semantic regression.
+
+Final verification and retained exact-HEAD identity:
+
+- Post-commit `MaterialRenderer.Tests.ps1`: 43/43 PASS; production fake symbol absent, immediate Hide caller 0 microseconds, candidate AccessLost/DeviceRemoved each rebuild exactly once, failed recovery remains fallback.
+- `MaterialRendererBehavior.Tests.ps1 -Mode Recovery`: exit 0; high-contrast/transparency-off solid, reduced-motion high fidelity, all recovery cases, real desktop-switch hook, exact GPU freeze hash, status-only publication, Stable isolation, `protectedPids=34940`, and startup unchanged.
+- `ExecutableIdentity.Tests.ps1`: all six named tests PASS, including Stable/Development singleton separation, real Settings diagnostics, package identity, and Stable rejection of Development switches before window creation.
+- Retained Development EXE: `C:\Users\thoma\Desktop\启动台\artifacts\task7-postcommit-a903234\development\LightLaunchpad.NativeUi.exe`, 1,863,168 bytes, SHA256 `3E89E445E6EE8AE44114266C5753637459C9B13C557291E8CBDDA90B64FC7BAD`. Diagnostics exit 0 with commit `a9032341540a34622e0a998db7396a0b0ac1f5e2`, build ID `development:a9032341540a34622e0a998db7396a0b0ac1f5e2`, channel `development`, and the exact retained path.
+
+Protection and next step:
+
+- The only NativeUi process remains protected PID `34940` at `C:\Users\thoma\Desktop\启动台\artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe`, SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run remains its exact quoted path. Stable remains absent, `C:\TOOL` remains unchanged, `LLP_reconstruction/` remains untracked/unstaged, and ignored `LightLaunchpad.NativeUi.o` remains untouched.
+- Start Task 8 RED for the deterministic 12-background plus real-desktop capture manifest, pixel/contrast limits, and two live-refresh identities. Keep LLP-013 as the only project task in progress; do not start Task 9 until Task 8 implementation, visual audit, independent reviews, and documentation close. No formal install, startup, `C:\TOOL`, push, tag, or release mutation has occurred.
 
 ## LLP-013 Task 6 Completion Evidence
 
