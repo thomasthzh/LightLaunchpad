@@ -38,6 +38,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -106,6 +107,7 @@ constexpr UINT WmShellBrokerResult = WM_APP + 74;
 constexpr UINT WmAdaptiveSnapshot = WM_APP + 75;
 constexpr UINT WmMaterialRendererStatus = WM_APP + 76;
 constexpr UINT WmMaterialProbeControl = WM_APP + 77;
+constexpr UINT WmDesktopSwitch = WM_APP + 78;
 constexpr wchar_t MaterialProbeProperty[] = L"LightLaunchpad.MaterialProbe";
 constexpr wchar_t WindowClassName[] = LLP_WINDOW_CLASS_NAME_WIDE;
 constexpr wchar_t SettingsWindowClassName[] = L"LightLaunchpadNativeSettingsWindow";
@@ -411,6 +413,9 @@ bool g_spotlightLayerDirty = true;
 SpotlightLayerBuffer g_spotlightLayerBuffer;
 SpotlightBackdropCapture g_spotlightBackdrop;
 UINT g_taskbarCreatedMessage = 0;
+UINT g_materialEvidenceFreezeMessage = 0;
+HWINEVENTHOOK g_desktopSwitchHook = nullptr;
+bool g_materialEvidenceActive = false;
 bool g_trayIconAdded = false;
 bool g_hotkeyRegistered = false;
 int g_activeHotkeyId = HotkeyId;
@@ -586,8 +591,11 @@ struct RegionUndoProbeState
 struct MaterialProbeHostState
 {
     llp::material::MaterialRenderer* renderer = nullptr;
+    llp::material::ShowRequest request;
     std::wstring outputPath;
+    std::wstring readyPath;
     std::uint64_t probeGeneration = 0;
+    bool readyWritten = false;
 };
 
 CatalogBrokerProbeState g_catalogBrokerProbe;
@@ -2824,6 +2832,14 @@ const char* MaterialStateName(llp::material::LifecycleState state)
     }
 }
 
+std::string MaterialEvidenceHash(std::uint64_t hash)
+{
+    if (hash == 0) return {};
+    char text[17] = {};
+    std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(hash));
+    return text;
+}
+
 bool WriteMaterialProbeState(HWND hwnd)
 {
     auto* state = reinterpret_cast<MaterialProbeHostState*>(
@@ -2849,12 +2865,34 @@ bool WriteMaterialProbeState(MaterialProbeHostState& state)
         { "path", MaterialRenderPathName(diagnostics.path) },
         { "failure", MaterialFailureName(diagnostics.failure) },
         { "state", MaterialStateName(diagnostics.state) },
+        { "adapter", llp::persistence::WideToUtf8(diagnostics.adapter) },
+        { "output", llp::persistence::WideToUtf8(diagnostics.output) },
+        { "dpi", diagnostics.dpi },
         { "acquiredFrames", diagnostics.acquiredFrames },
         { "presentedFrames", diagnostics.presentedFrames },
         { "droppedScenes", diagnostics.droppedScenes },
         { "deviceRebuilds", diagnostics.deviceRebuilds },
         { "lastFrameIdentity", diagnostics.lastFrameIdentity },
         { "firstFrameMs", diagnostics.firstFrameMs },
+        { "frameP95Ms", diagnostics.frameP95Ms },
+        { "evidenceFrozen", diagnostics.evidenceFrozen },
+        { "evidenceBaselineCaptured", diagnostics.evidenceBaselineCaptured },
+        { "evidenceBaselineDesktopHash", MaterialEvidenceHash(diagnostics.evidenceBaselineDesktopHash) },
+        { "evidenceBaselineFrameIdentity", diagnostics.evidenceBaselineFrameIdentity },
+        { "evidenceBaselineSceneGeneration", diagnostics.evidenceBaselineSceneGeneration },
+        { "evidenceCandidateCaptured", diagnostics.evidenceCandidateCaptured },
+        { "evidenceCandidateDesktopHash", MaterialEvidenceHash(diagnostics.evidenceCandidateDesktopHash) },
+        { "evidenceCandidateFrameIdentity", diagnostics.evidenceCandidateFrameIdentity },
+        { "evidenceFreezeCommitSucceeded", diagnostics.evidenceFreezeCommitSucceeded },
+        { "evidenceFreezeDesktopHash", MaterialEvidenceHash(diagnostics.evidenceFreezeDesktopHash) },
+        { "evidenceFreezeFrameIdentity", diagnostics.evidenceFreezeFrameIdentity },
+        { "evidenceFreezeSceneGeneration", diagnostics.evidenceFreezeSceneGeneration },
+        { "reducedMotion", diagnostics.reducedMotion },
+        { "statusPublications", diagnostics.statusPublications },
+        { "diagnosticsCaptureStepStringCopies", diagnostics.diagnosticsCaptureStepStringCopies },
+        { "diagnosticsCaptureStepVectorCopies", diagnostics.diagnosticsCaptureStepVectorCopies },
+        { "committedActivation", diagnostics.committedActivation },
+        { "presentedSceneGeneration", diagnostics.presentedSceneGeneration },
         { "monitorDevice", llp::persistence::WideToUtf8(monitorInfo.szDevice) },
         { "monitorBounds", Json{
             { "left", monitorInfo.rcMonitor.left },
@@ -2873,7 +2911,13 @@ bool WriteMaterialProbeState(MaterialProbeHostState& state)
         { "hiddenPresentedFrames", diagnostics.state == llp::material::LifecycleState::Hidden
             ? diagnostics.presentedFrames : 0 }
     };
-    return WriteFileUtf8(state.outputPath, document.dump(2) + "\n");
+    const std::string serialized = document.dump(2) + "\n";
+    const bool outputWritten = WriteFileUtf8(state.outputPath, serialized);
+    if (!state.readyWritten && !state.readyPath.empty())
+    {
+        state.readyWritten = WriteFileUtf8(state.readyPath, serialized);
+    }
+    return outputWritten && (state.readyPath.empty() || state.readyWritten);
 }
 
 std::string BuildPersistenceProbeJson(bool settingsSaved, bool layoutSaved)
@@ -3007,6 +3051,55 @@ bool CommandLineHasArgument(const wchar_t* expected)
     }
     LocalFree(arguments);
     return found;
+}
+
+bool HasDevelopmentOnlyCommandLineArgument()
+{
+    constexpr const wchar_t* arguments[] = {
+        L"--adaptive-test-dpi",
+        L"--adaptive-test-text-scale",
+        L"--adaptive-test-high-contrast",
+        L"--adaptive-test-transparency",
+        L"--adaptive-test-animations",
+        L"--catalog-broker-probe-file",
+        L"--catalog-broker-delay-ms",
+        L"--shell-import-probe-file",
+        L"--shell-import-root",
+        L"--shell-import-destination",
+        L"--shell-import-repeat",
+        L"--text-input-probe-file",
+        L"--text-input-ready-file",
+        L"--spotlight-flow-probe-file",
+        L"--spotlight-flow-ready-file",
+        L"--launchpad-flow-probe-file",
+        L"--launchpad-flow-ready-file",
+        L"--organization-probe-file",
+        L"--organization-probe-root",
+        L"--region-undo-probe-file",
+        L"--region-undo-probe-region",
+        L"--persistence-probe-file",
+        L"--persistence-resave",
+        L"--startup-probe-file",
+        L"--startup-registry-subkey",
+        L"--exit-after-startup-probe",
+        L"--simulate-taskbar-created",
+        L"--material-probe-file",
+        L"--material-probe-ready-file",
+        L"--material-evidence",
+        L"--material-force-failure",
+        L"--test-monitor-device",
+        L"--spotlight-ownership-probe",
+        L"--spotlight-force-transparent-transition-failure",
+        L"--spotlight-force-hide-scene-race",
+        L"--spotlight-force-latest-hide-race",
+        L"--spotlight-force-compose-hide-lifetime",
+        L"--spotlight-force-self-capture-evidence"
+    };
+    for (const auto* argument : arguments)
+    {
+        if (CommandLineHasArgument(argument)) return true;
+    }
+    return false;
 }
 
 int CommandLineIntValue(const wchar_t* name, int fallback, int minimum, int maximum)
@@ -3391,6 +3484,17 @@ bool WriteSpotlightFlowReadyState()
         { "materialRequestedSceneGeneration", g_requestedMaterialSceneGeneration },
         { "materialCommittedActivation", material.committedActivation },
         { "materialPresentedSceneGeneration", material.presentedSceneGeneration },
+        { "materialEvidenceBaselineCaptured", material.evidenceBaselineCaptured },
+        { "materialEvidenceBaselineDesktopHash", MaterialEvidenceHash(material.evidenceBaselineDesktopHash) },
+        { "materialEvidenceBaselineFrameIdentity", material.evidenceBaselineFrameIdentity },
+        { "materialEvidenceBaselineSceneGeneration", material.evidenceBaselineSceneGeneration },
+        { "materialEvidenceCandidateCaptured", material.evidenceCandidateCaptured },
+        { "materialEvidenceCandidateDesktopHash", MaterialEvidenceHash(material.evidenceCandidateDesktopHash) },
+        { "materialEvidenceCandidateFrameIdentity", material.evidenceCandidateFrameIdentity },
+        { "materialEvidenceFreezeCommitSucceeded", material.evidenceFreezeCommitSucceeded },
+        { "materialEvidenceFreezeDesktopHash", MaterialEvidenceHash(material.evidenceFreezeDesktopHash) },
+        { "materialEvidenceFreezeFrameIdentity", material.evidenceFreezeFrameIdentity },
+        { "materialEvidenceFreezeSceneGeneration", material.evidenceFreezeSceneGeneration },
         { "materialPresentationEvidenceItemCopies", material.presentationEvidenceItemCopies },
         { "materialHostIdentityCopies", g_materialHostIdentityCopies },
         { "materialQueuedSceneGeneration", material.queuedSceneGeneration },
@@ -4428,11 +4532,60 @@ void ApplySpotlightWindowRegion(int width, int height)
 }
 
 
-void BoxBlurHorizontalPass(DWORD* src, DWORD* dst, int width, int height, int radius)
+template <typename Work>
+void RunParallelBlurRanges(int itemCount, Work&& work)
 {
-    if (radius <= 0) return;
-    const int diameter = radius * 2 + 1;
-    for (int y = 0; y < height; ++y)
+    if (itemCount <= 0) return;
+    const unsigned int hardwareWorkers = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned int workerCount = std::min({
+        4u,
+        hardwareWorkers,
+        static_cast<unsigned int>(itemCount)
+    });
+    if (workerCount <= 1)
+    {
+        work(0, itemCount);
+        return;
+    }
+
+    const auto runRange = [&](unsigned int worker) {
+        const int begin = static_cast<int>(
+            static_cast<std::uint64_t>(itemCount) * worker / workerCount);
+        const int end = static_cast<int>(
+            static_cast<std::uint64_t>(itemCount) * (worker + 1) / workerCount);
+        work(begin, end);
+    };
+
+    std::vector<std::thread> workers;
+    unsigned int launched = 0;
+    try
+    {
+        workers.reserve(workerCount - 1);
+        for (; launched + 1 < workerCount; ++launched)
+        {
+            workers.emplace_back([&, launched]() { runRange(launched); });
+        }
+    }
+    catch (...)
+    {
+        for (auto& worker : workers) worker.join();
+        for (unsigned int worker = launched; worker < workerCount; ++worker) runRange(worker);
+        return;
+    }
+
+    runRange(workerCount - 1);
+    for (auto& worker : workers) worker.join();
+}
+
+void BoxBlurHorizontalRange(
+    DWORD* src,
+    DWORD* dst,
+    int width,
+    int radius,
+    int firstRow,
+    int lastRow)
+{
+    for (int y = firstRow; y < lastRow; ++y)
     {
         const int rowOffset = y * width;
         uint64_t r = 0, g = 0, b = 0, a = 0;
@@ -4474,10 +4627,24 @@ void BoxBlurHorizontalPass(DWORD* src, DWORD* dst, int width, int height, int ra
     }
 }
 
-void BoxBlurVerticalPass(DWORD* src, DWORD* dst, int width, int height, int radius)
+void BoxBlurHorizontalPass(DWORD* src, DWORD* dst, int width, int height, int radius)
 {
     if (radius <= 0) return;
-    for (int x = 0; x < width; ++x)
+    RunParallelBlurRanges(height, [&](int firstRow, int lastRow) {
+        BoxBlurHorizontalRange(src, dst, width, radius, firstRow, lastRow);
+    });
+}
+
+void BoxBlurVerticalRange(
+    DWORD* src,
+    DWORD* dst,
+    int width,
+    int height,
+    int radius,
+    int firstColumn,
+    int lastColumn)
+{
+    for (int x = firstColumn; x < lastColumn; ++x)
     {
         uint64_t r = 0, g = 0, b = 0, a = 0;
         int count = 0;
@@ -4516,6 +4683,14 @@ void BoxBlurVerticalPass(DWORD* src, DWORD* dst, int width, int height, int radi
             }
         }
     }
+}
+
+void BoxBlurVerticalPass(DWORD* src, DWORD* dst, int width, int height, int radius)
+{
+    if (radius <= 0) return;
+    RunParallelBlurRanges(width, [&](int firstColumn, int lastColumn) {
+        BoxBlurVerticalRange(src, dst, width, height, radius, firstColumn, lastColumn);
+    });
 }
 
 void ApplyBoxBlurToBackdrop(int width, int height, int radius)
@@ -4922,6 +5097,8 @@ llp::material::ShowRequest CurrentMaterialShowRequest(std::uint64_t requiredScen
 void RebuildVisibleMaterialRenderer()
 {
     if (!g_hwnd || !IsSpotlightMode() || !IsWindowVisible(g_hwnd)) return;
+    if (g_materialRenderer.SnapshotDiagnostics().state
+        == llp::material::LifecycleState::FrozenEvidence) return;
     g_spotlightFallbackRestorePending = false;
     g_spotlightFallbackRestoreActivation = 0;
     RECT client = {};
@@ -4934,6 +5111,48 @@ void RebuildVisibleMaterialRenderer()
     PaintSpotlightLayeredWindow(g_spotlightLayerDirty);
     g_materialRenderer.Rebuild(CurrentMaterialShowRequest(scene ? scene->generation : 0));
     if (g_spotlightFlowProbe.active) WriteSpotlightFlowReadyState();
+}
+
+void RebuildMaterialAfterDesktopEnvironmentChange(HWND hwnd, bool reposition)
+{
+    if (auto* state = reinterpret_cast<MaterialProbeHostState*>(
+            GetPropW(hwnd, MaterialProbeProperty)); state && state->renderer)
+    {
+        if (reposition) PositionWindow();
+        RECT windowRect = {};
+        GetWindowRect(hwnd, &windowRect);
+        state->request.monitor = g_testMonitorDevice.empty()
+            ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+            : SpotlightTargetMonitor();
+        state->request.windowDesktop = {
+            windowRect.left, windowRect.top, windowRect.right, windowRect.bottom };
+        state->request.dpi = static_cast<int>(g_windowDpi);
+        state->request.policy = g_adaptivePolicy;
+        state->request.forcedFailure = llp::material::FailureReason::None;
+        state->request.developmentRecoverAfterAccessLoss = false;
+        state->request.developmentFailAccessLossRebuild = false;
+        state->renderer->Rebuild(state->request);
+        return;
+    }
+    if (!IsWindowVisible(hwnd)) return;
+    if (reposition) PositionWindow();
+    if (IsSpotlightMode()) RebuildVisibleMaterialRenderer();
+    RequestSearchRepaint(hwnd, true);
+}
+
+void CALLBACK DesktopSwitchWinEvent(
+    HWINEVENTHOOK,
+    DWORD event,
+    HWND,
+    LONG,
+    LONG,
+    DWORD,
+    DWORD)
+{
+    if (event == EVENT_SYSTEM_DESKTOPSWITCH && g_hwnd)
+    {
+        PostMessageW(g_hwnd, WmDesktopSwitch, 0, 0);
+    }
 }
 
 void ShowSpotlightImmediately()
@@ -9731,6 +9950,11 @@ void AccessibilitySelectionChanged(void*)
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    if (message == WmDesktopSwitch)
+    {
+        RebuildMaterialAfterDesktopEnvironmentChange(hwnd, false);
+        return 0;
+    }
     if (message == WmMaterialRendererStatus)
     {
         WriteMaterialProbeState(hwnd);
@@ -9915,8 +10139,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         else if (state && state->renderer && wParam == 2)
         {
-            WriteMaterialProbeState(*state);
+            state->renderer->RequestStatusForDevelopment();
         }
+        else if (state && state->renderer && wParam == 3)
+        {
+            state->renderer->SnapshotCommittedEvidenceForDevelopment();
+        }
+        else if (state && state->renderer && wParam == 4)
+        {
+            state->renderer->AcquireUnpresentedEvidenceCandidateForDevelopment();
+        }
+        return 0;
+    }
+    if (g_materialEvidenceActive && g_materialEvidenceFreezeMessage != 0
+        && message == g_materialEvidenceFreezeMessage)
+    {
+        auto* state = reinterpret_cast<MaterialProbeHostState*>(
+            GetPropW(hwnd, MaterialProbeProperty));
+        if (state && state->renderer) state->renderer->FreezeEvidence();
+        else g_materialRenderer.FreezeEvidence();
         return 0;
     }
     if (message == g_taskbarCreatedMessage && g_taskbarCreatedMessage != 0)
@@ -10082,6 +10323,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                     RebuildVisibleMaterialRenderer();
                     return 0;
                 }
+                if (wParam == 4)
+                {
+                    g_materialRenderer.SnapshotCommittedEvidenceForDevelopment();
+                    return 0;
+                }
+                if (wParam == 5)
+                {
+                    g_materialRenderer.AcquireUnpresentedEvidenceCandidateForDevelopment();
+                    return 0;
+                }
             }
             if (wParam == 1)
             {
@@ -10125,12 +10376,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     case WM_DISPLAYCHANGE:
-        if (IsWindowVisible(hwnd))
-        {
-            PositionWindow();
-            if (IsSpotlightMode()) RebuildVisibleMaterialRenderer();
-            RequestSearchRepaint(hwnd, true);
-        }
+        RebuildMaterialAfterDesktopEnvironmentChange(hwnd, true);
         return 0;
     case WM_THEMECHANGED:
     case WM_SYSCOLORCHANGE:
@@ -10771,6 +11017,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_DESTROY:
     {
+        if (g_desktopSwitchHook)
+        {
+            UnhookWinEvent(g_desktopSwitchHook);
+            g_desktopSwitchHook = nullptr;
+        }
         KillTimer(hwnd, DragAnimationTimerId);
         KillTimer(hwnd, OrganizationFeedbackTimerId);
         if (!g_textInputProbePath.empty()) WriteFileUtf8(g_textInputProbePath, BuildTextInputProbeJson());
@@ -10822,19 +11073,27 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     g_processStartTick = GetTickCount64();
     g_instance = instance;
     const bool materialProbeArgument = CommandLineHasArgument(L"--material-probe-file");
+    const bool materialReadyArgument = CommandLineHasArgument(L"--material-probe-ready-file");
+    const bool materialEvidenceArgument = CommandLineHasArgument(L"--material-evidence");
     const bool materialFailureArgument = CommandLineHasArgument(L"--material-force-failure");
     const bool spotlightFlowArgument = CommandLineHasArgument(L"--spotlight-flow-probe-file");
     const bool testMonitorArgument = CommandLineHasArgument(L"--test-monitor-device");
-    const bool anyMaterialTestArgument = materialProbeArgument || materialFailureArgument;
+    const bool anyMaterialTestArgument = materialProbeArgument || materialReadyArgument
+        || materialEvidenceArgument || materialFailureArgument;
     const bool developmentBuild = CompareStringOrdinal(
         LLP_BUILD_CHANNEL_WIDE, -1, L"development", -1, TRUE) == CSTR_EQUAL;
-    if (anyMaterialTestArgument && !developmentBuild) return 2;
+    if (!developmentBuild && HasDevelopmentOnlyCommandLineArgument()) return 2;
     const std::wstring requestedTestMonitorDevice = CommandLineValue(L"--test-monitor-device");
     if (testMonitorArgument && (!developmentBuild || requestedTestMonitorDevice.empty())) return 2;
     const std::wstring materialProbePath = CommandLineValue(L"--material-probe-file");
+    const std::wstring materialReadyPath = CommandLineValue(L"--material-probe-ready-file");
     const std::wstring materialFailureText = CommandLineValue(L"--material-force-failure");
     if (anyMaterialTestArgument && materialProbePath.empty() && !spotlightFlowArgument) return 2;
+    if (materialReadyArgument && (materialReadyPath.empty() || !materialProbeArgument)) return 2;
+    if (materialEvidenceArgument && !materialProbeArgument) return 2;
     llp::material::FailureReason materialForcedFailure = llp::material::FailureReason::None;
+    bool materialRecoverAfterAccessLoss = false;
+    bool materialFailAccessLossRebuild = false;
     if (materialFailureArgument)
     {
         if (CompareStringOrdinal(materialFailureText.c_str(), -1, L"initialization", -1, TRUE) == CSTR_EQUAL)
@@ -10848,6 +11107,17 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         else if (CompareStringOrdinal(materialFailureText.c_str(), -1, L"access-lost", -1, TRUE) == CSTR_EQUAL)
         {
             materialForcedFailure = llp::material::FailureReason::AccessLost;
+        }
+        else if (CompareStringOrdinal(materialFailureText.c_str(), -1, L"access-lost-once", -1, TRUE) == CSTR_EQUAL)
+        {
+            materialForcedFailure = llp::material::FailureReason::AccessLost;
+            materialRecoverAfterAccessLoss = true;
+        }
+        else if (CompareStringOrdinal(materialFailureText.c_str(), -1, L"access-lost-rebuild-failure", -1, TRUE) == CSTR_EQUAL)
+        {
+            materialForcedFailure = llp::material::FailureReason::AccessLost;
+            materialRecoverAfterAccessLoss = true;
+            materialFailAccessLossRebuild = true;
         }
         else
         {
@@ -10923,6 +11193,13 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
             || !ProbeFileExists(g_organizationProbe.thirdPath))) return 2;
     g_diagnosticsUiMode = CommandLineHasArgument(L"--diagnostics-ui");
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
+    g_materialEvidenceActive = materialEvidenceArgument;
+    if (g_materialEvidenceActive)
+    {
+        g_materialEvidenceFreezeMessage = RegisterWindowMessageW(
+            L"LightLaunchpad.MaterialEvidenceFreeze");
+        if (g_materialEvidenceFreezeMessage == 0) return 2;
+    }
     const HRESULT coInitializeResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const bool comInitialized = SUCCEEDED(coInitializeResult);
     HANDLE mutex = CreateMutexW(nullptr, TRUE, LLP_SINGLETON_NAME_WIDE);
@@ -11018,6 +11295,18 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         if (initialDpi > 0) g_windowDpi = initialDpi;
     }
     AppendStartupLog(L"window-created", true, LLP_WINDOW_CLASS_NAME_WIDE);
+    g_desktopSwitchHook = SetWinEventHook(
+        EVENT_SYSTEM_DESKTOPSWITCH,
+        EVENT_SYSTEM_DESKTOPSWITCH,
+        nullptr,
+        DesktopSwitchWinEvent,
+        0,
+        0,
+        WINEVENT_OUTOFCONTEXT);
+    AppendStartupLog(
+        L"desktop-switch-hook",
+        g_desktopSwitchHook != nullptr,
+        g_desktopSwitchHook ? L"EVENT_SYSTEM_DESKTOPSWITCH" : std::to_wstring(GetLastError()));
     llp::accessibility::Callbacks accessibilityCallbacks;
     accessibilityCallbacks.focus = AccessibilityFocus;
     accessibilityCallbacks.hasFocus = AccessibilitySearchHasFocus;
@@ -11107,6 +11396,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         materialProbeRenderer = std::make_unique<llp::material::MaterialRenderer>();
         materialProbeState.renderer = materialProbeRenderer.get();
         materialProbeState.outputPath = materialProbePath;
+        materialProbeState.readyPath = materialReadyPath;
         if (!SetPropW(g_hwnd, MaterialProbeProperty, &materialProbeState))
         {
             materialProbeRenderer.reset();
@@ -11123,9 +11413,26 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         request.windowDesktop = { windowRect.left, windowRect.top, windowRect.right, windowRect.bottom };
         request.dpi = static_cast<int>(g_windowDpi);
         request.policy = g_adaptivePolicy;
+        request.developmentEvidence = materialEvidenceArgument;
         request.forcedFailure = materialForcedFailure;
+        request.developmentRecoverAfterAccessLoss = materialRecoverAfterAccessLoss;
+        request.developmentFailAccessLossRebuild = materialFailAccessLossRebuild;
         request.statusMessage = WmMaterialRendererStatus;
+        std::shared_ptr<const llp::material::SceneSnapshot> evidenceScene;
+        if (materialEvidenceArgument)
+        {
+            RECT client = {};
+            if (GetClientRect(g_hwnd, &client))
+            {
+                evidenceScene = BuildMaterialSceneSnapshot(client);
+                request.requiredSceneGeneration = evidenceScene
+                    ? evidenceScene->generation
+                    : 0;
+            }
+        }
+        materialProbeState.request = request;
         materialProbeRenderer->Show(std::move(request));
+        if (evidenceScene) materialProbeRenderer->Submit(std::move(evidenceScene));
     }
 
     if (textInputProbeActive)

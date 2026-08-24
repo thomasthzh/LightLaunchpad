@@ -15,10 +15,27 @@ param(
 
     [switch]$SelfCaptureTransition,
 
-    [switch]$OrdinaryPresentationEvidence
+    [switch]$EvidenceOnly
 )
 
 $ErrorActionPreference = 'Stop'
+
+$llpSpecialScenarioCount = @(
+    $TransparentTransitionFailure.IsPresent,
+    $HideSceneRace.IsPresent,
+    ($LatestHideRace -ne 'None'),
+    $ComposeHideLifetime.IsPresent,
+    $SelfCaptureTransition.IsPresent
+).Where({ $_ }).Count
+if ($llpSpecialScenarioCount -gt 1) {
+    throw 'Only one specialized Spotlight flow scenario may run at a time.'
+}
+if ($EvidenceOnly -and ($MaterialFailure -ne 'None' -or $llpSpecialScenarioCount -ne 0)) {
+    throw 'EvidenceOnly requires the normal high-fidelity flow without another scenario or forced failure.'
+}
+if ($MaterialFailure -ne 'None' -and $llpSpecialScenarioCount -ne 0) {
+    throw 'A forced material failure cannot be combined with a specialized Spotlight flow scenario.'
+}
 
 $llpRepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $llpTempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("lightlaunchpad-spotlight-flow-" + [System.Guid]::NewGuid().ToString('N'))
@@ -562,10 +579,16 @@ public static class LightLaunchpadSpotlightProbeNative {
         $env:LOCALAPPDATA = $llpLocalAppData
         $env:USERPROFILE = $llpUserProfile
         $env:LLP_FLOW_MARKER = $llpMarker
-        $llpArguments = @('--spotlight-flow-probe-file', $llpProbePath, '--spotlight-flow-ready-file', $llpReadyPath, '--diagnostics-log-file', $llpLogPath, '--test-monitor-device', $llpTestMonitorDevice)
-        if (-not $OrdinaryPresentationEvidence) {
-            $llpArguments += '--spotlight-ownership-probe'
-        }
+        $llpArguments = @(
+            '--spotlight-flow-probe-file', $llpProbePath,
+            '--spotlight-flow-ready-file', $llpReadyPath,
+            '--diagnostics-log-file', $llpLogPath,
+            '--test-monitor-device', $llpTestMonitorDevice,
+            '--adaptive-test-high-contrast', '0',
+            '--adaptive-test-transparency', '1',
+            '--adaptive-test-animations', '1'
+        )
+        $llpArguments += '--spotlight-ownership-probe'
         if ($MaterialFailure -ne 'None') {
             $llpArguments += @('--material-force-failure', $MaterialFailure)
         }
@@ -607,6 +630,18 @@ public static class LightLaunchpadSpotlightProbeNative {
     $llpWindow = [LightLaunchpadSpotlightProbeNative]::FindWindowForProcess([uint32]$llpProcess.Id)
     Assert-True ($llpWindow -ne [IntPtr]::Zero) 'Could not discover the hidden real NativeUi window.'
 
+    $llpVisibleInteractions = 0
+    Assert-Equal $llpTestMonitorDevice ([string]$llpReady.monitorDevice) 'Hidden Spotlight test window was not fixed to DISPLAY1 before interaction.'
+    $llpPreInteractionRect = [LightLaunchpadSpotlightProbeNative+RECT]::new()
+    Assert-True ([LightLaunchpadSpotlightProbeNative]::GetWindowRect($llpWindow, [ref]$llpPreInteractionRect)) 'Could not inspect the hidden Spotlight window before interaction.'
+    Assert-True (
+        $llpPreInteractionRect.Left -ge [int]$llpReady.monitorBounds.left -and
+        $llpPreInteractionRect.Top -ge [int]$llpReady.monitorBounds.top -and
+        $llpPreInteractionRect.Right -le [int]$llpReady.monitorBounds.right -and
+        $llpPreInteractionRect.Bottom -le [int]$llpReady.monitorBounds.bottom
+    ) 'Hidden Spotlight test window escaped DISPLAY1 before interaction.'
+    Assert-Equal 0 $llpVisibleInteractions 'Spotlight performed a visible interaction before DISPLAY1 containment was asserted.'
+    ++$llpVisibleInteractions
     [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Assert-True ([LightLaunchpadSpotlightProbeNative]::IsWindowVisible($llpWindow)) 'First Alt+D path did not show Spotlight.'
     $script:llpMonitorReady = Get-LlpReadyState
@@ -841,63 +876,72 @@ public static class LightLaunchpadSpotlightProbeNative {
         return [string]$script:llpMaterialReady.materialPath -eq 'fallback' -and [string]$script:llpMaterialReady.materialState -eq 'fallback' -and [string]$script:llpMaterialReady.materialFailure -eq 'ForcedForTest'
     } 10000 'Spotlight did not commit the current activation and immutable scene before accepting input.'
     $llpInitialMaterialGeneration = [uint64]$llpMaterialReady.materialSceneGeneration
-    if ($OrdinaryPresentationEvidence) {
-        Assert-Equal 0 ([uint64]$llpMaterialReady.materialHostIdentityCopies) 'Ordinary host copied per-item identities into its immutable scene.'
-        Assert-Equal 0 ([uint64]$llpMaterialReady.materialPresentationEvidenceItemCopies) 'Ordinary renderer copied per-item presentation evidence on a live frame.'
-        Assert-Equal 0 @($llpMaterialReady.materialPresentedItemStableIds).Count 'Ordinary renderer published per-item stable-ID evidence.'
-        Assert-Equal 0 @($llpMaterialReady.materialPresentedItemSourcePaths).Count 'Ordinary renderer published per-item source-path evidence.'
-        Write-Output "METRIC SpotlightOrdinaryPresentationEvidence monitor=$([string]$llpMaterialReady.monitorDevice) path=$([string]$llpMaterialReady.materialPath) presented=$([uint64]$llpMaterialReady.materialPresentedFrames) hostCopies=$([uint64]$llpMaterialReady.materialHostIdentityCopies) rendererCopies=$([uint64]$llpMaterialReady.materialPresentationEvidenceItemCopies) stableIds=$(@($llpMaterialReady.materialPresentedItemStableIds).Count) sourcePaths=$(@($llpMaterialReady.materialPresentedItemSourcePaths).Count)"
-        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)
-        if (-not $llpProcess.WaitForExit(10000)) { throw 'Ordinary presentation-evidence probe did not exit.' }
-        Assert-Equal 0 $llpProcess.ExitCode 'Ordinary presentation-evidence probe exit code mismatch.'
-        Write-Output 'PASS SpotlightFlow_OrdinaryRendererSkipsPerItemPresentationEvidence'
-        return
-    }
     $llpEvidenceRoot = if ([string]::IsNullOrWhiteSpace($EvidenceDirectory)) { $llpTempRoot } else { [System.IO.Path]::GetFullPath($EvidenceDirectory) }
     New-Item -ItemType Directory -Force -Path $llpEvidenceRoot | Out-Null
-    $llpInitialScreenPath = Join-Path $llpEvidenceRoot $(if ($MaterialFailure -eq 'None') { '00-live-ownership.png' } else { '00-fallback-ownership.png' })
-    if ($MaterialFailure -eq 'None') {
+    if ($EvidenceOnly) {
+        $llpInitialScreenPath = Join-Path $llpEvidenceRoot '00-live-ownership.png'
+        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::new([uint64]4), [IntPtr]::Zero)
+        Wait-LlpCondition {
+            $script:llpMaterialReady = Get-LlpReadyState
+            return $null -ne $script:llpMaterialReady.PSObject.Properties['materialEvidenceBaselineCaptured'] -and
+                [bool]$script:llpMaterialReady.materialEvidenceBaselineCaptured
+        } 10000 'Spotlight did not snapshot and pause on its last committed desktop evidence.'
+        $llpEvidenceBaseline = $llpMaterialReady
+        Assert-True (-not [string]::IsNullOrWhiteSpace([string]$llpEvidenceBaseline.materialEvidenceBaselineDesktopHash)) 'Spotlight committed desktop evidence did not publish a stable GPU texture hash.'
+        Assert-True ([uint64]$llpEvidenceBaseline.materialEvidenceBaselineFrameIdentity -gt 0) 'Spotlight committed desktop evidence did not publish the last presented frame identity.'
+        Assert-True ([uint64]$llpEvidenceBaseline.materialEvidenceBaselineSceneGeneration -gt 0) 'Spotlight committed desktop evidence did not publish the last presented scene generation.'
+        $llpEvidenceCandidateWindow = [LightLaunchpadSpotlightProbeNative]::CreateAuxiliaryWindow(
+            ([int]$llpEvidenceBaseline.monitorBounds.left + 48),
+            ([int]$llpEvidenceBaseline.monitorBounds.top + 48),
+            240,
+            160)
+        Assert-True ($llpEvidenceCandidateWindow -ne [IntPtr]::Zero) 'Could not create the real DISPLAY1 Spotlight candidate delta.'
+        try {
+            [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::new([uint64]5), [IntPtr]::Zero)
+            Wait-LlpCondition {
+                $script:llpMaterialReady = Get-LlpReadyState
+                return $null -ne $script:llpMaterialReady.PSObject.Properties['materialEvidenceCandidateCaptured'] -and
+                    [bool]$script:llpMaterialReady.materialEvidenceCandidateCaptured
+            } 10000 'Spotlight did not acquire the intentionally unpresented real desktop candidate.'
+            $llpEvidenceCandidate = $llpMaterialReady
+            Assert-True ([string]$llpEvidenceCandidate.materialEvidenceCandidateDesktopHash -ne [string]$llpEvidenceBaseline.materialEvidenceBaselineDesktopHash) 'Spotlight candidate desktop pixels did not differ from the committed desktop pixels.'
+            Assert-True ([uint64]$llpEvidenceCandidate.materialEvidenceCandidateFrameIdentity -ne [uint64]$llpEvidenceBaseline.materialEvidenceBaselineFrameIdentity) 'Spotlight candidate frame identity did not differ from the committed frame identity.'
+            Assert-Equal ([uint64]$llpEvidenceBaseline.materialPresentedFrames) ([uint64]$llpEvidenceCandidate.materialPresentedFrames) 'Spotlight intentionally unpresented candidate advanced the presentation count.'
+        }
+        finally {
+            [void][LightLaunchpadSpotlightProbeNative]::DestroyWindow($llpEvidenceCandidateWindow)
+        }
         [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::new([uint64]2), [IntPtr]::Zero)
         Wait-LlpCondition {
             $script:llpMaterialReady = Get-LlpReadyState
             return [string]$script:llpMaterialReady.materialPath -eq 'high-fidelity' -and [string]$script:llpMaterialReady.materialState -eq 'frozen-evidence'
         } 10000 'Spotlight did not freeze its committed DComp frame for compositor-level ownership evidence.'
-    }
-    $llpInitialMarkerPixels = Save-LlpScreenEvidence $llpWindow $llpInitialScreenPath $llpMaterialReady.materialOwnershipProbeBounds
-    if ($MaterialFailure -eq 'None') {
+        Assert-Equal $true ([bool]$llpMaterialReady.materialEvidenceFreezeCommitSucceeded) 'Spotlight evidence freeze did not publish a successful real DComp commit.'
+        Assert-Equal ([string]$llpEvidenceBaseline.materialEvidenceBaselineDesktopHash) ([string]$llpMaterialReady.materialEvidenceFreezeDesktopHash) 'Spotlight evidence freeze did not use the exact last committed desktop texture.'
+        Assert-Equal ([uint64]$llpEvidenceBaseline.materialEvidenceBaselineFrameIdentity) ([uint64]$llpMaterialReady.materialEvidenceFreezeFrameIdentity) 'Spotlight evidence freeze did not use the exact last presented desktop frame.'
+        Assert-Equal ([uint64]$llpEvidenceBaseline.materialEvidenceBaselineSceneGeneration) ([uint64]$llpMaterialReady.materialEvidenceFreezeSceneGeneration) 'Spotlight evidence freeze did not use the exact last presented scene.'
+        Assert-Equal ([uint64]$llpEvidenceCandidate.materialPresentedFrames + 1) ([uint64]$llpMaterialReady.materialPresentedFrames) 'Spotlight evidence freeze did not commit exactly one final redraw.'
+        $llpInitialMarkerPixels = Save-LlpScreenEvidence $llpWindow $llpInitialScreenPath $llpMaterialReady.materialOwnershipProbeBounds
         Assert-Equal 0 $llpInitialMarkerPixels 'The committed DComp frame still exposed the fallback-only ownership signature on the real desktop.'
         Assert-Equal $true ([bool]$llpMaterialReady.materialDirectLayerTransparent) 'The high-fidelity handoff did not make the layered HWND bottom pixels transparent.'
+        $llpFrozenEvidence = $llpMaterialReady
         [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::new([uint64]3), [IntPtr]::Zero)
-        try {
-            Wait-LlpCondition {
-                $script:llpMaterialReady = Get-LlpReadyState
-                return [string]$script:llpMaterialReady.materialPath -eq 'high-fidelity' -and
-                    [string]$script:llpMaterialReady.materialState -eq 'live' -and
-                    [bool]$script:llpMaterialReady.materialDirectLayerTransparent
-            } 10000 'Spotlight did not resume its live renderer after compositor-level ownership evidence.'
-        }
-        catch {
-            $llpResumeState = Get-LlpReadyState
-            throw "$($_.Exception.Message) state=$([string]$llpResumeState.materialState) path=$([string]$llpResumeState.materialPath) failure=$([string]$llpResumeState.materialFailure) requestedActivation=$([uint64]$llpResumeState.materialRequestedActivation) committedActivation=$([uint64]$llpResumeState.materialCommittedActivation) requestedSceneGeneration=$([uint64]$llpResumeState.materialRequestedSceneGeneration) sceneGeneration=$([uint64]$llpResumeState.materialSceneGeneration) presentedSceneGeneration=$([uint64]$llpResumeState.materialPresentedSceneGeneration) directTransparent=$([bool]$llpResumeState.materialDirectLayerTransparent)"
-        }
-        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::new([uint64]2), [IntPtr]::Zero)
-        Wait-LlpCondition {
-            $script:llpMaterialReady = Get-LlpReadyState
-            return [string]$script:llpMaterialReady.materialState -eq 'frozen-evidence'
-        } 10000 'Spotlight did not freeze its rebuilt DComp frame for compositor-level ownership evidence.'
-        $llpRebuildScreenPath = Join-Path $llpEvidenceRoot '01-live-rebuild-ownership.png'
-        $llpRebuildMarkerPixels = Save-LlpScreenEvidence $llpWindow $llpRebuildScreenPath $llpMaterialReady.materialOwnershipProbeBounds
-        Assert-Equal 0 $llpRebuildMarkerPixels 'The rebuilt DComp frame exposed stale fallback-only direct pixels on the real desktop.'
-        Assert-Equal $true ([bool]$llpMaterialReady.materialDirectLayerTransparent) 'The rebuilt DComp frame did not own a transparent direct bottom layer.'
-        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::new([uint64]3), [IntPtr]::Zero)
-        Wait-LlpCondition {
-            $script:llpMaterialReady = Get-LlpReadyState
-            return [string]$script:llpMaterialReady.materialState -eq 'live' -and
-                [bool]$script:llpMaterialReady.materialDirectLayerTransparent
-        } 10000 'Spotlight did not resume after rebuilt ownership evidence.'
-        Write-Output "METRIC SpotlightRebuildOwnership directTransparent=$([bool]$llpMaterialReady.materialDirectLayerTransparent) markerPixels=$llpRebuildMarkerPixels screenshot='$llpRebuildScreenPath'"
+        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+        $llpTerminalEvidence = Get-LlpReadyState
+        Assert-Equal 'frozen-evidence' ([string]$llpTerminalEvidence.materialState) 'A rebuild request resumed terminal Spotlight evidence.'
+        Assert-Equal ([uint64]$llpFrozenEvidence.materialPresentedFrames) ([uint64]$llpTerminalEvidence.materialPresentedFrames) 'Terminal Spotlight evidence presented another frame.'
+        Assert-Equal ([string]$llpFrozenEvidence.materialEvidenceFreezeDesktopHash) ([string]$llpTerminalEvidence.materialEvidenceFreezeDesktopHash) 'Terminal Spotlight evidence changed its committed desktop proof.'
+        Assert-Equal $true ([bool]$llpTerminalEvidence.materialDirectLayerTransparent) 'A rebuild request restored opaque fallback over terminal Spotlight evidence.'
+        Write-Output "METRIC SpotlightOwnership state=$([string]$llpTerminalEvidence.materialState) directTransparent=$([bool]$llpTerminalEvidence.materialDirectLayerTransparent) markerPixels=$llpInitialMarkerPixels baselineHash=$([string]$llpEvidenceBaseline.materialEvidenceBaselineDesktopHash) candidateHash=$([string]$llpEvidenceCandidate.materialEvidenceCandidateDesktopHash) freezeHash=$([string]$llpFrozenEvidence.materialEvidenceFreezeDesktopHash) baselineFrame=$([uint64]$llpEvidenceBaseline.materialEvidenceBaselineFrameIdentity) candidateFrame=$([uint64]$llpEvidenceCandidate.materialEvidenceCandidateFrameIdentity) scene=$([uint64]$llpFrozenEvidence.materialEvidenceFreezeSceneGeneration) presentedBefore=$([uint64]$llpEvidenceCandidate.materialPresentedFrames) presentedAfter=$([uint64]$llpFrozenEvidence.materialPresentedFrames) screenshot='$llpInitialScreenPath' terminal=true"
+        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)
+        if (-not $llpProcess.WaitForExit(10000)) { throw 'Terminal ownership-evidence probe did not exit.' }
+        Assert-Equal 0 $llpProcess.ExitCode 'Terminal ownership-evidence probe exit code mismatch.'
+        Write-Output 'PASS SpotlightFlow_HighFidelityEvidenceFreezeIsTerminal'
+        return
     }
-    else {
+    if ($MaterialFailure -ne 'None') {
+        $llpInitialScreenPath = Join-Path $llpEvidenceRoot '00-fallback-ownership.png'
+        $llpInitialMarkerPixels = Save-LlpScreenEvidence $llpWindow $llpInitialScreenPath $llpMaterialReady.materialOwnershipProbeBounds
         Assert-True ($null -ne $llpMaterialReady.PSObject.Properties['spotlightFallbackRegionHeaderCount']) 'Fallback diagnostics did not report the actually painted region-header count.'
         Assert-True ($null -ne $llpMaterialReady.PSObject.Properties['spotlightFallbackFavoriteBadgeCount']) 'Fallback diagnostics did not report the actually painted favorite-badge count.'
         Assert-True ($null -ne $llpMaterialReady.PSObject.Properties['spotlightFallbackPresentedItemStableIds']) 'Fallback diagnostics did not report the actually painted immutable item identities.'
@@ -938,8 +982,8 @@ public static class LightLaunchpadSpotlightProbeNative {
         }
         Assert-True ($llpInitialMarkerPixels -ge 240) 'Forced fallback did not retain its fallback-only ownership signature on the real desktop.'
         Assert-Equal $false ([bool]$llpMaterialReady.materialDirectLayerTransparent) 'Forced fallback unexpectedly discarded its layered HWND pixels.'
+        Write-Output "METRIC SpotlightOwnership state=$([string]$llpMaterialReady.materialState) directTransparent=$([bool]$llpMaterialReady.materialDirectLayerTransparent) markerPixels=$llpInitialMarkerPixels screenshot='$llpInitialScreenPath'"
     }
-    Write-Output "METRIC SpotlightOwnership state=$([string]$llpMaterialReady.materialState) directTransparent=$([bool]$llpMaterialReady.materialDirectLayerTransparent) markerPixels=$llpInitialMarkerPixels screenshot='$llpInitialScreenPath'"
     $llpModeTransitionOpenOffset = 0
     if ($MaterialFailure -eq 'None') {
         $llpTransitionActivation = [uint64]$llpMaterialReady.materialRequestedActivation
@@ -1153,21 +1197,6 @@ public static class LightLaunchpadSpotlightProbeNative {
                 [uint64]$script:llpMaterialReady.materialPresentedSceneGeneration -ge [uint64]$script:llpMaterialReady.materialRequestedSceneGeneration -and
                 [bool]$script:llpMaterialReady.materialDirectLayerTransparent
         } 10000 'Reopened Spotlight cleared its fallback before the current activation and immutable scene committed.'
-        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::new([uint64]2), [IntPtr]::Zero)
-        Wait-LlpCondition {
-            $script:llpMaterialReady = Get-LlpReadyState
-            return [string]$script:llpMaterialReady.materialState -eq 'frozen-evidence'
-        } 10000 'Reopened Spotlight did not freeze for compositor-level ownership evidence.'
-        $llpReopenScreenPath = Join-Path $llpEvidenceRoot '02-live-reopen-ownership.png'
-        $llpReopenMarkerPixels = Save-LlpScreenEvidence $llpWindow $llpReopenScreenPath $llpMaterialReady.materialOwnershipProbeBounds
-        Assert-Equal 0 $llpReopenMarkerPixels 'Hide/show left stale fallback-only direct pixels beneath the reopened DComp frame.'
-        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::new([uint64]3), [IntPtr]::Zero)
-        Wait-LlpCondition {
-            $script:llpMaterialReady = Get-LlpReadyState
-            return [string]$script:llpMaterialReady.materialState -eq 'live' -and
-                [bool]$script:llpMaterialReady.materialDirectLayerTransparent
-        } 10000 'Reopened Spotlight did not resume after ownership evidence.'
-        Write-Output "METRIC SpotlightReopenOwnership directTransparent=$([bool]$llpMaterialReady.materialDirectLayerTransparent) markerPixels=$llpReopenMarkerPixels screenshot='$llpReopenScreenPath'"
     }
     if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
         Save-LlpWindowEvidence $llpWindow (Join-Path $llpEvidenceRoot '00-empty-search.png')

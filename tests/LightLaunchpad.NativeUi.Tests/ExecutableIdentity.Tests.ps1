@@ -10,6 +10,7 @@ $llpPackageTestId = [System.Guid]::NewGuid().ToString('N')
 $llpPackageOutputRelative = "release\identity-tests-$llpPackageTestId"
 $llpPackageOutputAbsolute = [System.IO.Path]::GetFullPath((Join-Path $llpRepoRoot $llpPackageOutputRelative))
 $llpDirtyMarker = Join-Path $llpRepoRoot ".llp-package-dirty-test-$llpPackageTestId.tmp"
+$llpTestMonitorDevice = '\\.\DISPLAY1'
 
 function Assert-Equal {
     param(
@@ -128,6 +129,19 @@ namespace LightLaunchpad.Tests
         private const uint WmGetText = 0x000D;
         private const uint WmGetTextLength = 0x000E;
         private delegate bool EnumWindowsCallback(IntPtr window, IntPtr parameter);
+        private delegate bool EnumDisplayMonitorsCallback(IntPtr monitor, IntPtr deviceContext, IntPtr monitorRect, IntPtr state);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int left; public int top; public int right; public int bottom; }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct MONITORINFOEX {
+            public uint size;
+            public RECT monitor;
+            public RECT work;
+            public uint flags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string device;
+        }
 
         [DllImport("user32.dll")]
         private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr parameter);
@@ -149,6 +163,15 @@ namespace LightLaunchpad.Tests
 
         [DllImport("user32.dll")]
         private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr window, out RECT rect);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumDisplayMonitors(IntPtr deviceContext, IntPtr clip, EnumDisplayMonitorsCallback callback, IntPtr state);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFOEX info);
 
         public static IntPtr FindWindowForProcess(int processId, string expectedClassName)
         {
@@ -181,6 +204,25 @@ namespace LightLaunchpad.Tests
             StringBuilder value = new StringBuilder(length + 1);
             SendMessage(window, WmGetText, new IntPtr(value.Capacity), value);
             return value.ToString();
+        }
+
+        public static bool IsFullyContainedByMonitor(IntPtr window, string expectedDevice)
+        {
+            RECT windowRect;
+            if (!GetWindowRect(window, out windowRect)) return false;
+            bool found = false;
+            bool contained = false;
+            EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, delegate(IntPtr monitor, IntPtr dc, IntPtr rect, IntPtr state) {
+                MONITORINFOEX info = new MONITORINFOEX();
+                info.size = (uint)Marshal.SizeOf(typeof(MONITORINFOEX));
+                if (!GetMonitorInfo(monitor, ref info)) return true;
+                if (!String.Equals(info.device, expectedDevice, StringComparison.OrdinalIgnoreCase)) return true;
+                found = true;
+                contained = windowRect.left >= info.monitor.left && windowRect.top >= info.monitor.top
+                    && windowRect.right <= info.monitor.right && windowRect.bottom <= info.monitor.bottom;
+                return false;
+            }, IntPtr.Zero);
+            return found && contained;
         }
 
         public static void CloseWindow(IntPtr window)
@@ -369,10 +411,74 @@ try {
         throw 'Stable and development executables share a singleton name.'
     }
 
+    $llpStableDevelopmentCase = 0
+    foreach ($llpStableDevelopmentArguments in @(
+        @('--material-probe-file', (Join-Path $llpTempRoot 'stable-material-probe.json')),
+        @('--material-probe-ready-file', (Join-Path $llpTempRoot 'stable-material-ready.json')),
+        @('--material-evidence'),
+        @('--material-force-failure', 'duplication'),
+        @('--test-monitor-device', '\\.\DISPLAY1'),
+        @('--adaptive-test-dpi', '144'),
+        @('--adaptive-test-text-scale', '125'),
+        @('--adaptive-test-high-contrast', '1'),
+        @('--adaptive-test-transparency', '0'),
+        @('--adaptive-test-animations', '0'),
+        @('--catalog-broker-probe-file', (Join-Path $llpTempRoot 'stable-catalog.json')),
+        @('--catalog-broker-delay-ms', '100'),
+        @('--shell-import-probe-file', (Join-Path $llpTempRoot 'stable-shell.json')),
+        @('--shell-import-root', $llpTempRoot),
+        @('--shell-import-destination', $llpTempRoot),
+        @('--shell-import-repeat', '2'),
+        @('--text-input-probe-file', (Join-Path $llpTempRoot 'stable-text.json')),
+        @('--text-input-ready-file', (Join-Path $llpTempRoot 'stable-text-ready.json')),
+        @('--spotlight-flow-probe-file', (Join-Path $llpTempRoot 'stable-spotlight.json')),
+        @('--spotlight-flow-ready-file', (Join-Path $llpTempRoot 'stable-spotlight-ready.json')),
+        @('--launchpad-flow-probe-file', (Join-Path $llpTempRoot 'stable-launchpad.json')),
+        @('--launchpad-flow-ready-file', (Join-Path $llpTempRoot 'stable-launchpad-ready.json')),
+        @('--organization-probe-file', (Join-Path $llpTempRoot 'stable-organization.json')),
+        @('--organization-probe-root', $llpTempRoot),
+        @('--region-undo-probe-file', (Join-Path $llpTempRoot 'stable-region.json')),
+        @('--region-undo-probe-region', 'work'),
+        @('--persistence-probe-file', (Join-Path $llpTempRoot 'stable-persistence.json')),
+        @('--persistence-resave'),
+        @('--startup-probe-file', (Join-Path $llpTempRoot 'stable-startup.json')),
+        @('--startup-registry-subkey', 'Software\LightLaunchpadTest'),
+        @('--exit-after-startup-probe'),
+        @('--simulate-taskbar-created'),
+        @('--spotlight-ownership-probe'),
+        @('--spotlight-force-transparent-transition-failure'),
+        @('--spotlight-force-hide-scene-race'),
+        @('--spotlight-force-latest-hide-race', 'show-hide'),
+        @('--spotlight-force-compose-hide-lifetime'),
+        @('--spotlight-force-self-capture-evidence')
+    )) {
+        ++$llpStableDevelopmentCase
+        $llpRejectedDiagnostics = Join-Path $llpTempRoot ("stable-development-rejected-$llpStableDevelopmentCase.json")
+        $llpStableDevelopmentProcess = Start-Process `
+            -FilePath $llpStableExecutable `
+            -ArgumentList ([string[]]($llpStableDevelopmentArguments + @('--diagnostics-file', $llpRejectedDiagnostics))) `
+            -PassThru `
+            -Wait `
+            -WindowStyle Hidden
+        Assert-Equal 2 $llpStableDevelopmentProcess.ExitCode 'Stable build accepted a Development-only switch.'
+        if (Test-Path -LiteralPath $llpRejectedDiagnostics) {
+            throw 'Stable build processed diagnostics after a rejected Development-only switch.'
+        }
+    }
+    if ((Test-Path -LiteralPath (Join-Path $llpTempRoot 'stable-material-probe.json')) -or
+        (Test-Path -LiteralPath (Join-Path $llpTempRoot 'stable-material-ready.json'))) {
+        throw 'Stable build created Development material evidence before rejecting its switch.'
+    }
+
     Write-Output 'PASS ExecutableIdentity_SeparatesStableAndDevelopmentSingletonChannels'
 
     Initialize-NativeWindowInspector
-    $llpUiProcess = Start-Process -FilePath $llpExecutable -ArgumentList @('--diagnostics-ui') -PassThru -WindowStyle Hidden
+    $llpUiMaterialProbePath = Join-Path $llpTempRoot 'identity-settings-material.json'
+    $llpUiProcess = Start-Process -FilePath $llpExecutable -ArgumentList @(
+        '--diagnostics-ui',
+        '--material-probe-file', $llpUiMaterialProbePath,
+        '--test-monitor-device', $llpTestMonitorDevice
+    ) -PassThru -WindowStyle Hidden
     $llpSettingsWindow = [IntPtr]::Zero
     $llpDeadline = [DateTime]::UtcNow.AddSeconds(8)
     while ($llpSettingsWindow -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $llpDeadline) {
@@ -381,6 +487,9 @@ try {
     }
     if ($llpSettingsWindow -eq [IntPtr]::Zero) {
         throw 'The real NativeUi EXE did not open its settings window for diagnostics inspection.'
+    }
+    if (-not [LightLaunchpad.Tests.NativeWindows]::IsFullyContainedByMonitor($llpSettingsWindow, $llpTestMonitorDevice)) {
+        throw 'The visible diagnostics settings window was not fully contained by DISPLAY1.'
     }
 
     $llpDiagnosticsControl = [LightLaunchpad.Tests.NativeWindows]::GetDlgItem($llpSettingsWindow, 3015)

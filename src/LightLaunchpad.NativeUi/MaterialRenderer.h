@@ -152,6 +152,8 @@ struct ShowRequest
     std::uint64_t requiredSceneGeneration = 0;
     bool developmentStoppingBarrier = false;
     bool developmentComposeLifetimeProbe = false;
+    bool developmentRecoverAfterAccessLoss = false;
+    bool developmentFailAccessLossRebuild = false;
 };
 
 struct Diagnostics
@@ -159,6 +161,10 @@ struct Diagnostics
     RenderPath path = RenderPath::Fallback;
     FailureReason failure = FailureReason::None;
     LifecycleState state = LifecycleState::Hidden;
+    std::wstring adapter;
+    std::wstring output;
+    int dpi = 96;
+    bool reducedMotion = false;
     std::uint64_t acquiredFrames = 0;
     std::uint64_t presentedFrames = 0;
     std::uint64_t droppedScenes = 0;
@@ -167,6 +173,7 @@ struct Diagnostics
     double firstFrameMs = 0.0;
     double frameP95Ms = 0.0;
     bool evidenceFrozen = false;
+    std::uint64_t statusPublications = 0;
     bool auxiliaryRendered = false;
     std::uint64_t auxiliarySceneGeneration = 0;
     llp::geometry::Rect auxiliaryBounds;
@@ -176,6 +183,17 @@ struct Diagnostics
     std::vector<std::wstring> presentedItemSourcePaths;
     std::uint64_t committedActivation = 0;
     std::uint64_t presentedSceneGeneration = 0;
+    bool evidenceBaselineCaptured = false;
+    std::uint64_t evidenceBaselineDesktopHash = 0;
+    std::uint64_t evidenceBaselineFrameIdentity = 0;
+    std::uint64_t evidenceBaselineSceneGeneration = 0;
+    bool evidenceCandidateCaptured = false;
+    std::uint64_t evidenceCandidateDesktopHash = 0;
+    std::uint64_t evidenceCandidateFrameIdentity = 0;
+    bool evidenceFreezeCommitSucceeded = false;
+    std::uint64_t evidenceFreezeDesktopHash = 0;
+    std::uint64_t evidenceFreezeFrameIdentity = 0;
+    std::uint64_t evidenceFreezeSceneGeneration = 0;
     std::uint64_t presentationEvidenceItemCopies = 0;
     std::uint64_t queuedSceneGeneration = 0;
     std::uint64_t currentSceneGeneration = 0;
@@ -184,6 +202,8 @@ struct Diagnostics
     bool composeLifetimeProbeEntered = false;
     bool composeLifetimeProbeCompleted = false;
     bool composeSceneExpiredDuringHide = false;
+    std::uint64_t diagnosticsCaptureStepStringCopies = 0;
+    std::uint64_t diagnosticsCaptureStepVectorCopies = 0;
 };
 
 class LatestSceneSlot
@@ -210,9 +230,16 @@ public:
     void Hide();
     void Shutdown();
     void FreezeEvidence();
+    void SnapshotCommittedEvidenceForDevelopment();
+    void AcquireUnpresentedEvidenceCandidateForDevelopment();
+    void RequestStatusForDevelopment();
     void AcknowledgeStoppingStatusForDevelopment();
     Diagnostics SnapshotDiagnostics() const;
     bool WaitUntilHiddenForTest(std::uint32_t timeoutMs) const;
+#if defined(LLP_MATERIAL_TESTING)
+    void ApplyEvidenceCandidateResultForTest(int result);
+    bool EvidencePreparationActiveForTest() const;
+#endif
 
 private:
     class Impl;

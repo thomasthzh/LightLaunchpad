@@ -29,6 +29,7 @@ struct MaterialLifecycleTestReport
     int redraws = 0;
     int rebuilds = 0;
     std::uint64_t acquiredFrames = 0;
+    std::uint64_t presentedFrames = 0;
     std::uint64_t lastFrameIdentity = 0;
     int finalState = 0;
     int finalPath = 0;
@@ -44,10 +45,34 @@ struct MaterialLifecycleTestReport
     int affinityCleared = 0;
     int partialCropRejected = 0;
     int selectionOperationCalls = 0;
+    int reducedMotionObserved = 0;
+    int startCalls = 0;
+    int freezeComposeCalls = 0;
+    int diagnosticsDpi = 0;
+    int diagnosticsReducedMotion = 0;
+    int diagnosticsAdapterMatched = 0;
+    int diagnosticsOutputMatched = 0;
+    long long frameP95Microseconds = 0;
+    std::uint64_t freezeSceneGeneration = 0;
+    int freezeCalls = 0;
+    int freezeStopOrder = 0;
+    int freezeClearOrder = 0;
+    int freezeComposeOrder = 0;
+    std::uint64_t freezeDesktopIdentity = 0;
+    int stopCalls = 0;
+    int evidenceCandidateInitialResult = -1;
+    int evidenceCandidateRetryResult = -1;
+    int evidencePreparationActiveAfterInitial = 0;
+    int evidencePreparationActiveAfterRetry = 0;
+    int evidenceBaselineSnapshotCalls = 0;
 };
 
 extern "C" int LLP_MaterialRunFakeLifecycleScenario(
     int scenario,
+    std::int64_t* values,
+    std::size_t valueCount);
+
+extern "C" int LLP_MaterialRunDiagnosticsPublicationScenario(
     std::int64_t* values,
     std::size_t valueCount);
 
@@ -110,6 +135,27 @@ enum MaterialLifecycleValue : std::size_t
     AffinityCleared,
     PartialCropRejected,
     SelectionOperationCalls,
+    ReducedMotionObserved,
+    StartCalls,
+    PresentedFrames,
+    FreezeComposeCalls,
+    DiagnosticsDpi,
+    DiagnosticsReducedMotion,
+    DiagnosticsAdapterMatched,
+    DiagnosticsOutputMatched,
+    FrameP95Microseconds,
+    FreezeSceneGeneration,
+    FreezeCalls,
+    FreezeStopOrder,
+    FreezeClearOrder,
+    FreezeComposeOrder,
+    FreezeDesktopIdentity,
+    StopCalls,
+    EvidenceCandidateInitialResult,
+    EvidenceCandidateRetryResult,
+    EvidencePreparationActiveAfterInitial,
+    EvidencePreparationActiveAfterRetry,
+    EvidenceBaselineSnapshotCalls,
     MaterialLifecycleValueCount
 };
 
@@ -809,6 +855,7 @@ MaterialLifecycleTestReport RunFakeLifecycle(int scenario)
     report.redraws = static_cast<int>(values[Redraws]);
     report.rebuilds = static_cast<int>(values[Rebuilds]);
     report.acquiredFrames = static_cast<std::uint64_t>(values[AcquiredFrames]);
+    report.presentedFrames = static_cast<std::uint64_t>(values[PresentedFrames]);
     report.lastFrameIdentity = static_cast<std::uint64_t>(values[LastFrameIdentity]);
     report.finalState = static_cast<int>(values[FinalState]);
     report.finalPath = static_cast<int>(values[FinalPath]);
@@ -824,6 +871,29 @@ MaterialLifecycleTestReport RunFakeLifecycle(int scenario)
     report.affinityCleared = static_cast<int>(values[AffinityCleared]);
     report.partialCropRejected = static_cast<int>(values[PartialCropRejected]);
     report.selectionOperationCalls = static_cast<int>(values[SelectionOperationCalls]);
+    report.reducedMotionObserved = static_cast<int>(values[ReducedMotionObserved]);
+    report.startCalls = static_cast<int>(values[StartCalls]);
+    report.freezeComposeCalls = static_cast<int>(values[FreezeComposeCalls]);
+    report.diagnosticsDpi = static_cast<int>(values[DiagnosticsDpi]);
+    report.diagnosticsReducedMotion = static_cast<int>(values[DiagnosticsReducedMotion]);
+    report.diagnosticsAdapterMatched = static_cast<int>(values[DiagnosticsAdapterMatched]);
+    report.diagnosticsOutputMatched = static_cast<int>(values[DiagnosticsOutputMatched]);
+    report.frameP95Microseconds = values[FrameP95Microseconds];
+    report.freezeSceneGeneration = static_cast<std::uint64_t>(values[FreezeSceneGeneration]);
+    report.freezeCalls = static_cast<int>(values[FreezeCalls]);
+    report.freezeStopOrder = static_cast<int>(values[FreezeStopOrder]);
+    report.freezeClearOrder = static_cast<int>(values[FreezeClearOrder]);
+    report.freezeComposeOrder = static_cast<int>(values[FreezeComposeOrder]);
+    report.freezeDesktopIdentity = static_cast<std::uint64_t>(values[FreezeDesktopIdentity]);
+    report.stopCalls = static_cast<int>(values[StopCalls]);
+    report.evidenceCandidateInitialResult = static_cast<int>(values[EvidenceCandidateInitialResult]);
+    report.evidenceCandidateRetryResult = static_cast<int>(values[EvidenceCandidateRetryResult]);
+    report.evidencePreparationActiveAfterInitial =
+        static_cast<int>(values[EvidencePreparationActiveAfterInitial]);
+    report.evidencePreparationActiveAfterRetry =
+        static_cast<int>(values[EvidencePreparationActiveAfterRetry]);
+    report.evidenceBaselineSnapshotCalls =
+        static_cast<int>(values[EvidenceBaselineSnapshotCalls]);
     return report;
 }
 
@@ -1010,6 +1080,11 @@ void TestRequiredCompositionResourceFailuresStopBeforeCommit()
             && LLP_MaterialClassifyRequiredOperation(E_OUTOFMEMORY)
                 == static_cast<int>(llp::material::FailureReason::CompositionUnavailable),
         "A failed required composition operation was not classified for propagation.");
+    Require(LLP_MaterialClassifyRequiredOperation(DXGI_ERROR_DEVICE_REMOVED)
+                == static_cast<int>(llp::material::FailureReason::DeviceRemoved)
+            && LLP_MaterialClassifyRequiredOperation(DXGI_ERROR_DEVICE_RESET)
+                == static_cast<int>(llp::material::FailureReason::DeviceRemoved),
+        "A required composition operation collapsed DXGI device loss into CompositionUnavailable.");
     constexpr std::array<const char*, 4> names = {
         "material desktop bitmap",
         "material blur effect",
@@ -1055,6 +1130,53 @@ void TestActualRequiredResourceFailuresStopTheProductionFrame()
             operations[operation]);
     }
     Pass("MaterialRenderer_ActualResourceFailuresStopBeforeCommit");
+}
+
+void TestActualCommitDeviceLossUsesTheProductionClassifier()
+{
+    for (const int operation : { 4, 5 })
+    {
+        std::array<std::int64_t, RealRequiredResourceFailureValueCount> values = {};
+        Require(LLP_MaterialRunRealRequiredResourceFailureScenario(
+                    operation, values.data(), values.size()) == 0,
+            "The production DirectComposition commit/wait device-loss scenario did not run.");
+        Require(values[RealFailureNamedOperationCalls] == 1,
+            "The selected actual Commit/Wait operation was not reached exactly once.");
+        Require(values[RealFailureReason]
+                    == static_cast<int>(llp::material::FailureReason::DeviceRemoved)
+                && values[RealFailurePresentedFrames] == 0,
+            "An actual Commit/Wait device-loss HRESULT did not propagate as DeviceRemoved before presentation.");
+    }
+    Pass("MaterialRenderer_ActualCommitDeviceLossUsesProductionClassifier");
+}
+
+void TestActualProductionHresultBoundariesPreserveDeviceLoss()
+{
+    constexpr std::array<const char*, 3> operations = {
+        "CreateTargetForHwnd",
+        "IDCompositionSurface::BeginDraw",
+        "retained desktop CreateTexture2D"
+    };
+    for (std::size_t index = 0; index < operations.size(); ++index)
+    {
+        std::array<std::int64_t, RealRequiredResourceFailureValueCount> values = {};
+        Require(LLP_MaterialRunRealRequiredResourceFailureScenario(
+                    static_cast<int>(index + 6), values.data(), values.size()) == 0,
+            "The actual production HRESULT boundary scenario did not run.");
+        Require(values[RealFailureNamedOperationCalls] == 1,
+            "The selected production HRESULT boundary was not reached exactly once after success.");
+        Require(values[RealFailureReason]
+                    == static_cast<int>(llp::material::FailureReason::DeviceRemoved)
+                && values[RealFailureCommittedFrames] == 0
+                && values[RealFailurePresentedFrames] == 0,
+            operations[index]);
+    }
+
+    const auto acquireRecovery = RunFakeLifecycle(11);
+    const auto compositionRecovery = RunFakeLifecycle(23);
+    Require(acquireRecovery.rebuilds == 1 && compositionRecovery.rebuilds == 1,
+        "A production DeviceRemoved classification did not retain the one-rebuild lifecycle contract.");
+    Pass("MaterialRenderer_ActualProductionHresultBoundariesPreserveDeviceLoss");
 }
 
 void TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport()
@@ -1130,6 +1252,83 @@ void TestAcquireDeviceRemovalUsesOneBoundedRebuild()
               << " rebuilds=" << report.rebuilds
               << " duplicateCalls=" << report.duplicateCalls << "\n";
     Pass("MaterialRenderer_AcquireDeviceRemovalUsesOneRebuild");
+}
+
+void TestEvidenceCandidateLossUsesTheBoundedRecoveryContract()
+{
+    for (const int scenario : { 25, 26 })
+    {
+        const auto report = RunFakeLifecycle(scenario);
+        std::cout << "METRIC MaterialEvidenceCandidateRecovery scenario=" << scenario
+                  << " starts=" << report.startCalls
+                  << " stops=" << report.stopCalls
+                  << " rebuilds=" << report.rebuilds
+                  << " initialResult=" << report.evidenceCandidateInitialResult
+                  << " initialPreparationActive="
+                  << report.evidencePreparationActiveAfterInitial
+                  << " retryResult=" << report.evidenceCandidateRetryResult
+                  << " retryPreparationActive="
+                  << report.evidencePreparationActiveAfterRetry << "\n";
+        Require(report.startCalls == 2 && report.stopCalls == 2
+                && report.rebuilds == 1,
+            "Evidence candidate loss did not consume exactly one bounded reconstruction.");
+        Require(report.evidenceCandidateInitialResult == 1
+                && report.evidencePreparationActiveAfterInitial == 0,
+            "Recovered evidence candidate loss left preparation active.");
+        Require(report.evidenceCandidateRetryResult == 0
+                && report.evidencePreparationActiveAfterRetry == 1
+                && report.evidenceBaselineSnapshotCalls == 2,
+            "Evidence preparation could not be explicitly requested again after recovery.");
+        Require(report.finalState == static_cast<int>(llp::material::LifecycleState::Live)
+                && report.finalPath == static_cast<int>(llp::material::RenderPath::HighFidelity)
+                && report.finalFailure == static_cast<int>(llp::material::FailureReason::None),
+            "Recovered evidence candidate loss did not return to live capture.");
+    }
+
+    const auto failed = RunFakeLifecycle(27);
+    std::cout << "METRIC MaterialEvidenceCandidateFallback starts=" << failed.startCalls
+              << " stops=" << failed.stopCalls
+              << " rebuilds=" << failed.rebuilds
+              << " acquireCalls=" << failed.acquireCalls
+              << " initialResult=" << failed.evidenceCandidateInitialResult
+              << " preparationActive="
+              << failed.evidencePreparationActiveAfterInitial << "\n";
+    Require(failed.startCalls == 2 && failed.stopCalls == 3 && failed.rebuilds == 1
+            && failed.acquireCalls == 2,
+        "Failed evidence reconstruction retried or resumed candidate acquisition.");
+    Require(failed.evidenceCandidateInitialResult == 2
+            && failed.evidencePreparationActiveAfterInitial == 0
+            && failed.evidenceCandidateRetryResult == 2
+            && failed.evidencePreparationActiveAfterRetry == 0,
+        "Failed evidence reconstruction left preparation active.");
+    Require(failed.finalState == static_cast<int>(llp::material::LifecycleState::Fallback)
+            && failed.finalPath == static_cast<int>(llp::material::RenderPath::Fallback)
+            && failed.finalFailure
+                == static_cast<int>(llp::material::FailureReason::DuplicationUnavailable),
+        "Failed evidence reconstruction did not publish truthful stable fallback.");
+    Pass("MaterialRenderer_EvidenceCandidateLossUsesBoundedRecovery");
+}
+
+void TestCompositionDeviceRemovalUsesOneBoundedRebuild()
+{
+    const auto recovered = RunFakeLifecycle(23);
+    Require(recovered.rebuilds == 1 && recovered.startCalls == 2
+            && recovered.duplicateCalls == 2,
+        "Composition device removal did not consume exactly one bounded rebuild.");
+    Require(recovered.presentedFrames == 1
+            && recovered.finalState == static_cast<int>(llp::material::LifecycleState::Fallback)
+            && recovered.finalFailure == static_cast<int>(llp::material::FailureReason::DeviceRemoved),
+        "A second composition device loss did not remain in fallback for the epoch.");
+
+    const auto failed = RunFakeLifecycle(24);
+    Require(failed.rebuilds == 1 && failed.startCalls == 2
+            && failed.duplicateCalls == 1,
+        "A failed composition-device reconstruction retried the backend.");
+    Require(failed.finalState == static_cast<int>(llp::material::LifecycleState::Fallback)
+            && failed.finalFailure
+                == static_cast<int>(llp::material::FailureReason::DuplicationUnavailable),
+        "A failed composition-device reconstruction did not publish truthful fallback.");
+    Pass("MaterialRenderer_CompositionDeviceRemovalUsesOneRebuild");
 }
 
 void TestReleaseGenericFailureFallsBackWithoutRebuild()
@@ -1215,6 +1414,120 @@ void TestSecondAccessLossFallsBackWithoutRecurringRetry()
     Pass("MaterialRenderer_AccessLossConsumesExactlyOneRebuild");
 }
 
+void TestFailedImmediateRebuildFallsBackWithoutRecurringRetry()
+{
+    const auto report = RunFakeLifecycle(16);
+    Require(report.rebuilds == 1 && report.duplicateCalls == 1,
+        "A failed immediate reconstruction retried Desktop Duplication.");
+    Require(report.finalState == static_cast<int>(llp::material::LifecycleState::Fallback)
+            && report.finalPath == static_cast<int>(llp::material::RenderPath::Fallback)
+            && report.finalFailure == static_cast<int>(llp::material::FailureReason::DuplicationUnavailable),
+        "A failed immediate reconstruction did not publish stable fallback diagnostics.");
+    Require(report.acquireCalls == 1 && report.affinityCleared >= 1,
+        "Failed reconstruction resumed acquisition or retained display affinity.");
+    Pass("MaterialRenderer_FailedRebuildFallsBackWithoutRecurringRetry");
+}
+
+void TestDisplayChangeStartsANewRecoveryEpochAfterFallback()
+{
+    const auto report = RunFakeLifecycle(17);
+    Require(report.finalState == static_cast<int>(llp::material::LifecycleState::Live)
+            && report.finalPath == static_cast<int>(llp::material::RenderPath::HighFidelity)
+            && report.finalFailure == static_cast<int>(llp::material::FailureReason::None),
+        "A display-change rebuild did not leave prior fallback and return live.");
+    Require(report.rebuilds == 2 && report.duplicateCalls == 3,
+        "Display change did not establish exactly one new reconstruction epoch.");
+    Require(report.acquiredFrames == 2 && report.lastFrameIdentity == 172,
+        "Display-change recovery did not present a new desktop frame.");
+    Pass("MaterialRenderer_DisplayChangeRebuildStartsNewRecoveryEpoch");
+}
+
+void TestDisplayChangeRebuildConsumesTheEpochRecoveryBudget()
+{
+    const auto report = RunFakeLifecycle(19);
+    std::cout << "METRIC MaterialDisplayEpochAccessLost rebuilds=" << report.rebuilds
+              << " starts=" << report.startCalls
+              << " duplicateCalls=" << report.duplicateCalls
+              << " acquireCalls=" << report.acquireCalls
+              << " state=" << report.finalState << "\n";
+    Require(report.rebuilds == 1 && report.startCalls == 2
+            && report.duplicateCalls == 2,
+        "Access loss after a successful display rebuild consumed a second rebuild in the same epoch.");
+    Require(report.acquireCalls == 1 && report.acquiredFrames == 0,
+        "Access loss after a display rebuild resumed capture before a new recovery epoch.");
+    Require(report.finalState == static_cast<int>(llp::material::LifecycleState::Fallback)
+            && report.finalPath == static_cast<int>(llp::material::RenderPath::Fallback)
+            && report.finalFailure == static_cast<int>(llp::material::FailureReason::AccessLost),
+        "Access loss after a display rebuild did not remain in fallback until a new epoch.");
+    Pass("MaterialRenderer_DisplayRebuildConsumesRecoveryBudget");
+}
+
+void TestAdaptiveSolidSurfaceNeverStartsDesktopCapture()
+{
+    for (const int scenario : { 13, 14 })
+    {
+        const auto report = RunFakeLifecycle(scenario);
+        Require(report.finalState == static_cast<int>(llp::material::LifecycleState::Live)
+                && report.finalPath == static_cast<int>(llp::material::RenderPath::Solid)
+                && report.finalFailure == static_cast<int>(llp::material::FailureReason::None),
+            "An adaptive solid surface did not publish a ready Solid render path.");
+        Require(report.affinityExcluded == 0 && report.selectionOperationCalls == 0
+                && report.duplicateCalls == 0 && report.acquireCalls == 0,
+            "An adaptive solid surface touched display affinity or Desktop Duplication.");
+        Require(report.rebuilds == 0 && report.redraws == 0,
+            "An adaptive solid surface entered capture recovery or presented a captured frame.");
+    }
+    Pass("MaterialRenderer_AdaptiveSolidSurfaceSkipsDesktopCapture");
+}
+
+void TestReducedMotionKeepsLiveMaterialWithoutSearchDisplacement()
+{
+    const auto report = RunFakeLifecycle(15);
+    Require(report.reducedMotionObserved == 1 && report.diagnosticsReducedMotion == 1,
+        "Reduced-motion policy was not recorded at the production capture/diagnostics boundary.");
+    Require(report.diagnosticsDpi == 144 && report.diagnosticsAdapterMatched == 1
+            && report.diagnosticsOutputMatched == 1,
+        "Copied diagnostics did not retain renderer-owned adapter/output/DPI identity.");
+    Require(report.finalState == static_cast<int>(llp::material::LifecycleState::Live)
+            && report.finalPath == static_cast<int>(llp::material::RenderPath::HighFidelity)
+            && report.acquiredFrames == 1,
+        "Reduced motion disabled the allowed live blur/tint material path.");
+    const auto composition = RunCompositionScenario();
+    Require(composition[CompositionReducedMotionMaximumDisplacementMilli] == 0,
+        "Reduced motion retained non-identity search sampling.");
+    Pass("MaterialRenderer_ReducedMotionKeepsLiveMaterialWithoutDisplacement");
+}
+
+void TestDiagnosticsSchemaHasOwnedValueSemantics()
+{
+    llp::material::Diagnostics source;
+    source.adapter = L"Adapter Alpha";
+    source.output = L"\\\\.\\DISPLAY1";
+    source.dpi = 144;
+    source.reducedMotion = true;
+    const llp::material::Diagnostics copied = source;
+    source.adapter.clear();
+    source.output.clear();
+    source.dpi = 96;
+    source.reducedMotion = false;
+    Require(copied.adapter == L"Adapter Alpha" && copied.output == L"\\\\.\\DISPLAY1"
+            && copied.dpi == 144 && copied.reducedMotion,
+        "Diagnostics snapshot did not own a stable copy of the fixed device/adaptive schema.");
+    Pass("MaterialRenderer_DiagnosticsSchemaUsesOwnedCopiedValues");
+}
+
+void TestCaptureStepDiagnosticsAvoidOwnedValueCopies()
+{
+    std::array<std::int64_t, 2> values = {};
+    Require(LLP_MaterialRunDiagnosticsPublicationScenario(values.data(), values.size()) == 0,
+        "Diagnostics publication scenario rejected its exact private ABI.");
+    std::cout << "METRIC MaterialDiagnosticsCaptureCopies strings=" << values[0]
+        << " vectors=" << values[1] << "\n";
+    Require(values[0] == 0 && values[1] == 0,
+        "Repeated capture-step diagnostics copied owned strings or vectors.");
+    Pass("MaterialRenderer_CaptureStepDiagnosticsAvoidOwnedValueCopies");
+}
+
 void TestDevelopmentForcedFailuresMapToStableReason()
 {
     for (const int scenario : { 4, 5, 6 })
@@ -1245,6 +1558,66 @@ void TestFreezeReleasesCaptureAndClearsAffinity()
     Pass("MaterialRenderer_FreezeReleasesFrameAndCaptureAffinity");
 }
 
+void TestFrozenEvidenceCommitsOnceAndNeverResumesCapture()
+{
+    const auto report = RunFakeLifecycle(18);
+    Require(report.finalState == static_cast<int>(llp::material::LifecycleState::FrozenEvidence),
+        "A later Show request escaped terminal FrozenEvidence state.");
+    Require(report.startCalls == 1 && report.duplicateCalls == 1
+            && report.acquireCalls == 1 && report.acquiredFrames == 1,
+        "Frozen evidence resumed Desktop Duplication in the same process.");
+    Require(report.freezeComposeCalls == 1 && report.presentedFrames == 2,
+        "Freeze did not commit the retained exact frame exactly once.");
+    Require(report.releaseBeforeFreeze == 1 && report.affinityCleared >= 1,
+        "Frozen evidence retained an acquired frame or display affinity.");
+    Pass("MaterialRenderer_FrozenEvidenceCommitsOnceAndNeverResumesCapture");
+}
+
+void TestFreezeUsesTheLastSuccessfullyPresentedScene()
+{
+    const auto report = RunFakeLifecycle(20);
+    std::cout << "METRIC MaterialFreezePresentedScene generation="
+              << report.freezeSceneGeneration
+              << " desktopIdentity=" << report.freezeDesktopIdentity
+              << " presented=" << report.presentedFrames << "\n";
+    Require(report.freezeSceneGeneration == 1,
+        "A pending uncommitted scene replaced the last successfully presented scene during freeze.");
+    Require(report.freezeDesktopIdentity == 201,
+        "A newly acquired but uncommitted desktop texture replaced the last committed desktop frame during freeze.");
+    Require(report.finalState == static_cast<int>(llp::material::LifecycleState::FrozenEvidence)
+            && report.presentedFrames == 2,
+        "The retained successfully presented scene was not committed exactly once for evidence.");
+    Pass("MaterialRenderer_FreezeUsesLastSuccessfullyPresentedScene");
+}
+
+void TestFreezeFailureDoesNotPublishFrozenEvidence()
+{
+    for (const int scenario : { 21, 22 })
+    {
+        const auto report = RunFakeLifecycle(scenario);
+        std::cout << "METRIC MaterialFreezeFailure scenario=" << scenario
+                  << " state=" << report.finalState
+                  << " failure=" << report.finalFailure
+                  << " order=" << report.freezeStopOrder << ','
+                  << report.freezeClearOrder << ',' << report.freezeComposeOrder
+                  << " presented=" << report.presentedFrames << "\n";
+        Require(report.freezeCalls == 1 && report.freezeComposeCalls == 1,
+            "Freeze did not make exactly one terminal retained-frame redraw attempt.");
+        Require(report.freezeStopOrder > 0
+                && report.freezeStopOrder < report.freezeClearOrder
+                && report.freezeClearOrder < report.freezeComposeOrder,
+            "Freeze did not stop duplication and clear display affinity before redrawing evidence.");
+        Require(report.finalState == static_cast<int>(llp::material::LifecycleState::Fallback)
+                && report.finalPath == static_cast<int>(llp::material::RenderPath::Fallback)
+                && report.finalFailure
+                    == static_cast<int>(llp::material::FailureReason::CompositionUnavailable),
+            "A failed or non-presented freeze redraw was reported as FrozenEvidence.");
+        Require(report.presentedFrames == 1,
+            "A failed or non-presented freeze redraw advanced the committed frame count.");
+    }
+    Pass("MaterialRenderer_FreezeFailureIsTruthfulAndTerminal");
+}
+
 void TestLateFirstFrameIsReleasedAndFallsBack()
 {
     const auto report = RunFakeLifecycle(8);
@@ -1266,6 +1639,8 @@ void TestBackendStartupDoesNotConsumeFirstFrameAcquireBudget()
     Require(report.firstFrameMicroseconds == 5000
             && report.finalPath == static_cast<int>(llp::material::RenderPath::HighFidelity),
         "First-frame timing did not begin after successful backend startup.");
+    Require(report.frameP95Microseconds == 5000,
+        "Frame P95 diagnostics remained a placeholder instead of measuring presented work.");
     Pass("MaterialRenderer_BackendStartupPrecedesFirstFrameDeadline");
 }
 
@@ -1307,19 +1682,33 @@ int main()
         TestCompositionContractRejectsDiscardedCommands();
         TestRequiredCompositionResourceFailuresStopBeforeCommit();
         TestActualRequiredResourceFailuresStopTheProductionFrame();
+        TestActualCommitDeviceLossUsesTheProductionClassifier();
+        TestActualProductionHresultBoundariesPreserveDeviceLoss();
         TestCaptureCoordinatesCoverAllRotationsAndRejectPartialViewport();
         TestFirstFrameDeadlineAndTimeoutDoNotRedraw();
         TestFramesReleaseBeforeReacquireRebuildAndHide();
         TestSecondAccessLossFallsBackWithoutRecurringRetry();
+        TestFailedImmediateRebuildFallsBackWithoutRecurringRetry();
+        TestDisplayChangeStartsANewRecoveryEpochAfterFallback();
+        TestDisplayChangeRebuildConsumesTheEpochRecoveryBudget();
+        TestAdaptiveSolidSurfaceNeverStartsDesktopCapture();
+        TestReducedMotionKeepsLiveMaterialWithoutSearchDisplacement();
+        TestDiagnosticsSchemaHasOwnedValueSemantics();
+        TestCaptureStepDiagnosticsAvoidOwnedValueCopies();
         TestDevelopmentForcedFailuresMapToStableReason();
         TestFreezeReleasesCaptureAndClearsAffinity();
+        TestFrozenEvidenceCommitsOnceAndNeverResumesCapture();
+        TestFreezeFailureDoesNotPublishFrozenEvidence();
+        TestFreezeUsesTheLastSuccessfullyPresentedScene();
         TestLateFirstFrameIsReleasedAndFallsBack();
         TestBackendStartupDoesNotConsumeFirstFrameAcquireBudget();
         TestReleaseAccessLossRecoversBeforeAnotherAcquire();
         TestAcquireDeviceRemovalUsesOneBoundedRebuild();
+        TestEvidenceCandidateLossUsesTheBoundedRecoveryContract();
+        TestCompositionDeviceRemovalUsesOneBoundedRebuild();
         TestReleaseGenericFailureFallsBackWithoutRebuild();
         TestHideRequestRemainsAsynchronous();
-        constexpr int expected = 29;
+        constexpr int expected = 43;
         std::cout << passed << "/" << expected << " tests passed\n";
         return passed == expected ? 0 : 1;
     }

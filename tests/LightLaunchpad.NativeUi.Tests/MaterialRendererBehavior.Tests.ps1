@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Lifecycle', 'Host')]
+    [ValidateSet('Lifecycle', 'Host', 'Recovery')]
     [string]$Mode = 'Lifecycle'
 )
 
@@ -14,7 +14,9 @@ $llpUserProfile = Join-Path $llpTempRoot 'profile'
 $llpDataDirectory = Join-Path $llpAppData 'LightLaunchpad'
 $llpLaunchpad = Join-Path $llpTempRoot 'Launchpad'
 $llpProbePath = Join-Path $llpTempRoot 'material-probe.json'
+$llpReadyPath = Join-Path $llpTempRoot 'material-ready.json'
 $llpNormalProbePath = Join-Path $llpTempRoot 'material-normal-probe.json'
+$llpNormalReadyPath = Join-Path $llpTempRoot 'material-normal-ready.json'
 $llpLogPath = Join-Path $llpTempRoot 'material-startup.log'
 $llpStableSource = Join-Path $llpTempRoot 'stable-source'
 $llpStableOutput = Join-Path $llpTempRoot 'stable-output'
@@ -46,6 +48,17 @@ function Wait-LlpFile {
     Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) "Timed out waiting for $Path."
 }
 
+function Assert-LlpDisplay1Containment {
+    param([object]$State, [string]$Context)
+    Assert-Equal $llpTestMonitorDevice ([string]$State.monitorDevice) "$Context was not fixed to DISPLAY1."
+    Assert-True (
+        [int]$State.windowRect.left -ge [int]$State.monitorBounds.left -and
+        [int]$State.windowRect.top -ge [int]$State.monitorBounds.top -and
+        [int]$State.windowRect.right -le [int]$State.monitorBounds.right -and
+        [int]$State.windowRect.bottom -le [int]$State.monitorBounds.bottom
+    ) "$Context escaped DISPLAY1."
+}
+
 try {
     if ($Mode -eq 'Host') {
         $llpHostSourcePath = Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp'
@@ -69,15 +82,29 @@ try {
         Assert-True (-not $llpHostSource.Substring($llpShowHideStart, $llpShowHideEnd - $llpShowHideStart).Contains('Sleep(')) 'ARCHITECTURE Spotlight show/hide contains a blocking Sleep call.'
 
         $llpSpotlightScript = Join-Path $PSScriptRoot 'SpotlightFlowBehavior.Tests.ps1'
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $llpSpotlightScript
-        Assert-Equal 0 $LASTEXITCODE 'Normal high-fidelity Spotlight host flow failed.'
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $llpSpotlightScript -MaterialFailure initialization
-        Assert-Equal 0 $LASTEXITCODE 'Forced-initialization fallback Spotlight host flow failed.'
+        function Invoke-LlpCanonicalHostFlow {
+            param([string]$Name, [string[]]$FlowArguments = @())
+            $llpFlowOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $llpSpotlightScript @FlowArguments 2>&1)
+            $llpFlowExitCode = $LASTEXITCODE
+            $llpFlowOutput | ForEach-Object { Write-Output $_ }
+            Assert-Equal 0 $llpFlowExitCode "$Name Spotlight host flow failed."
+            Assert-True (@($llpFlowOutput | Where-Object { [string]$_ -eq 'PASS SpotlightFlow_AltDSearchEnterAndResultNavigationLaunchExactTargets' }).Count -eq 1) "$Name Spotlight host flow omitted the canonical PASS marker."
+            $llpLaunchMetrics = @($llpFlowOutput | Where-Object { [string]$_ -match '^METRIC SpotlightFlow hotkeyToInputReadyP95Ms=' })
+            Assert-Equal 1 $llpLaunchMetrics.Count "$Name Spotlight host flow omitted its canonical launch metric."
+            $llpLaunchMatch = [regex]::Match([string]$llpLaunchMetrics[0], '(?:^| )launches=([0-9]+)(?: |$)')
+            Assert-True ($llpLaunchMatch.Success -and [int]$llpLaunchMatch.Groups[1].Value -ge 2) "$Name Spotlight host flow did not perform both real Shell launches."
+        }
+        Invoke-LlpCanonicalHostFlow -Name 'Normal high-fidelity'
+        Invoke-LlpCanonicalHostFlow -Name 'Forced-initialization fallback' -FlowArguments @('-MaterialFailure', 'initialization')
         Write-Output 'PASS MaterialRendererBehavior_HostHighFidelityAndFallbackCanonicalFlows'
         return
     }
 
-    Assert-Equal 'Lifecycle' $Mode 'Unsupported material behavior mode.'
+    $llpMaterialHostSource = Get-Content -Raw -LiteralPath (Join-Path $llpRepoRoot 'src\LightLaunchpad.NativeUi\LightLaunchpad.NativeUi.cpp')
+    $llpDesktopSwitchBypassName = 'LightLaunchpad.MaterialDesktopSwitch' + 'ForDevelopment'
+    Assert-True (-not $llpMaterialHostSource.Contains($llpDesktopSwitchBypassName)) 'ARCHITECTURE desktop-switch recovery retained its private registered-message bypass.'
+    Assert-True ($llpMaterialHostSource.Contains('SetWinEventHook(') -and $llpMaterialHostSource.Contains('EVENT_SYSTEM_DESKTOPSWITCH')) 'ARCHITECTURE desktop-switch recovery lost its real User32 event hook.'
+    Assert-True ($Mode -in @('Lifecycle', 'Recovery')) 'Unsupported material behavior mode.'
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
     Add-Type -TypeDefinition @'
@@ -109,6 +136,21 @@ public static class LightLaunchpadMaterialProbeNative {
     [DllImport("user32.dll")] private static extern bool TranslateMessage(ref MSG message);
     [DllImport("user32.dll")] private static extern IntPtr DispatchMessage(ref MSG message);
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern uint RegisterWindowMessage(string message);
+    [DllImport("user32.dll")] public static extern void NotifyWinEvent(uint eventType, IntPtr hwnd, int objectId, int childId);
+    [DllImport("user32.dll")] public static extern bool GetWindowDisplayAffinity(IntPtr hwnd, out uint affinity);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
+    [DllImport("user32.dll")] public static extern bool DestroyWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool UpdateWindow(IntPtr hwnd);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern IntPtr CreateWindowExW(uint extendedStyle, string className, string title, uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+    public static IntPtr CreateAuxiliaryWindow(int x, int y, int width, int height) {
+        const uint ToolWindow = 0x00000080;
+        const uint OverlappedWindowVisible = 0x10CF0000;
+        IntPtr window = CreateWindowExW(ToolWindow, "STATIC", "LightLaunchpad committed evidence candidate", OverlappedWindowVisible, x, y, width, height, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        if (window != IntPtr.Zero) UpdateWindow(window);
+        return window;
+    }
     public static IntPtr FindWindowForProcess(uint expectedProcessId) {
         IntPtr result = IntPtr.Zero;
         EnumWindows((hwnd, state) => {
@@ -154,6 +196,125 @@ public static class LightLaunchpadMaterialProbeNative {
 }
 '@
 
+    function Invoke-LlpAdaptiveProbe {
+        param(
+            [string]$Name,
+            [int]$HighContrast,
+            [int]$Transparency,
+            [int]$Animations,
+            [string]$ExpectedPath,
+            [bool]$ExpectedReducedMotion,
+            [bool]$ExpectedCapture,
+            [string]$ForceFailure = '',
+            [string]$ExpectedState = 'live',
+            [string]$ExpectedFailure = 'None',
+            [uint64]$ExpectedRebuilds = 0,
+            [bool]$RebuildAfterFallback = $false,
+            [bool]$DesktopSwitchAfterFallback = $false
+        )
+        $llpAdaptiveProbePath = Join-Path $llpTempRoot ("adaptive-$Name.json")
+        $llpAdaptiveReadyPath = Join-Path $llpTempRoot ("adaptive-$Name-ready.json")
+        $llpAdaptiveProcess = $null
+        $llpPriorAppData = $env:APPDATA
+        $llpPriorLocalAppData = $env:LOCALAPPDATA
+        $llpPriorUserProfile = $env:USERPROFILE
+        try {
+            $env:APPDATA = $llpAppData
+            $env:LOCALAPPDATA = $llpLocalAppData
+            $env:USERPROFILE = $llpUserProfile
+            $llpAdaptiveArguments = @(
+                '--material-probe-file', $llpAdaptiveProbePath,
+                '--material-probe-ready-file', $llpAdaptiveReadyPath,
+                '--test-monitor-device', $llpTestMonitorDevice,
+                '--adaptive-test-high-contrast', [string]$HighContrast,
+                '--adaptive-test-transparency', [string]$Transparency,
+                '--adaptive-test-animations', [string]$Animations
+            )
+            if (-not [string]::IsNullOrEmpty($ForceFailure)) {
+                $llpAdaptiveArguments += @('--material-force-failure', $ForceFailure)
+            }
+            $llpAdaptiveProcess = Start-Process -FilePath $llpExecutable -ArgumentList $llpAdaptiveArguments -PassThru -WindowStyle Hidden
+            $script:llpCapturedProcesses += $llpAdaptiveProcess
+        }
+        finally {
+            $env:APPDATA = $llpPriorAppData
+            $env:LOCALAPPDATA = $llpPriorLocalAppData
+            $env:USERPROFILE = $llpPriorUserProfile
+        }
+
+        $llpAdaptiveWindow = [IntPtr]::Zero
+        $llpAdaptiveDeadline = [DateTime]::UtcNow.AddSeconds(8)
+        while ($llpAdaptiveWindow -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $llpAdaptiveDeadline) {
+            Start-Sleep -Milliseconds 25
+            $llpAdaptiveProcess.Refresh()
+            if ($llpAdaptiveProcess.HasExited) { break }
+            $llpAdaptiveWindow = [LightLaunchpadMaterialProbeNative]::FindWindowForProcess([uint32]$llpAdaptiveProcess.Id)
+        }
+        Assert-True (-not $llpAdaptiveProcess.HasExited) "$Name adaptive probe exited before creating a NativeUi window."
+        Assert-True ($llpAdaptiveWindow -ne [IntPtr]::Zero) "$Name adaptive probe did not create a NativeUi window."
+
+        Wait-LlpFile $llpAdaptiveReadyPath
+        $llpAdaptiveReady = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpAdaptiveReadyPath | ConvertFrom-Json
+        Assert-LlpDisplay1Containment $llpAdaptiveReady "$Name adaptive ready state"
+        [void][LightLaunchpadMaterialProbeNative]::ShowWindow($llpAdaptiveWindow, 5)
+        [void][LightLaunchpadMaterialProbeNative]::SetForegroundWindow($llpAdaptiveWindow)
+
+        Wait-LlpFile $llpAdaptiveProbePath
+        $llpAdaptiveStateDeadline = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            Start-Sleep -Milliseconds 25
+            $llpAdaptiveProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpAdaptiveProbePath | ConvertFrom-Json
+        } while (([string]$llpAdaptiveProbe.state -ne $ExpectedState -or [string]$llpAdaptiveProbe.path -ne $ExpectedPath) -and [DateTime]::UtcNow -lt $llpAdaptiveStateDeadline)
+        Assert-LlpDisplay1Containment $llpAdaptiveProbe "$Name visible adaptive state"
+        Assert-Equal $ExpectedState ([string]$llpAdaptiveProbe.state) "$Name adaptive route selected the wrong lifecycle state."
+        Assert-Equal $ExpectedPath ([string]$llpAdaptiveProbe.path) "$Name adaptive route selected the wrong render path."
+        Assert-Equal $ExpectedFailure ([string]$llpAdaptiveProbe.failure) "$Name adaptive route reported the wrong stable failure."
+        Assert-Equal $ExpectedReducedMotion ([bool]$llpAdaptiveProbe.reducedMotion) "$Name adaptive route reported the wrong reduced-motion state."
+        Assert-Equal $ExpectedRebuilds ([uint64]$llpAdaptiveProbe.deviceRebuilds) "$Name adaptive route used the wrong rebuild count."
+        Assert-True ([int]$llpAdaptiveProbe.dpi -gt 0) "$Name adaptive route did not report a measured DPI."
+        if ($ExpectedCapture) {
+            Assert-True ([uint64]$llpAdaptiveProbe.acquiredFrames -gt 0) "$Name adaptive route did not acquire a real desktop frame."
+            Assert-True (-not [string]::IsNullOrWhiteSpace([string]$llpAdaptiveProbe.adapter)) "$Name adaptive route did not report its copied adapter identity."
+            Assert-Equal $llpTestMonitorDevice ([string]$llpAdaptiveProbe.output) "$Name adaptive route reported the wrong captured output."
+        }
+        else {
+            Assert-Equal 0 ([uint64]$llpAdaptiveProbe.acquiredFrames) "$Name solid route acquired desktop frames."
+            Assert-Equal 0 ([uint64]$llpAdaptiveProbe.presentedFrames) "$Name solid route presented Desktop Duplication frames."
+            if ($ExpectedPath -eq 'solid') {
+                Assert-True ([string]::IsNullOrEmpty([string]$llpAdaptiveProbe.adapter)) "$Name solid route exposed a capture adapter."
+                Assert-True ([string]::IsNullOrEmpty([string]$llpAdaptiveProbe.output)) "$Name solid route exposed a capture output."
+            }
+            $llpAdaptiveAffinity = [uint32]::MaxValue
+            Assert-True ([LightLaunchpadMaterialProbeNative]::GetWindowDisplayAffinity($llpAdaptiveWindow, [ref]$llpAdaptiveAffinity)) "$Name non-capture route affinity could not be read."
+            Assert-Equal 0 $llpAdaptiveAffinity "$Name non-capture route retained capture exclusion."
+        }
+
+        if ($RebuildAfterFallback -or $DesktopSwitchAfterFallback) {
+            if ($DesktopSwitchAfterFallback) {
+                [LightLaunchpadMaterialProbeNative]::NotifyWinEvent(0x0020, $llpAdaptiveWindow, 0, 0)
+            }
+            else {
+                [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpAdaptiveWindow, 0x007E, [UIntPtr]::Zero, [IntPtr]::Zero)
+            }
+            $llpAdaptiveRebuildDeadline = [DateTime]::UtcNow.AddSeconds(5)
+            do {
+                Start-Sleep -Milliseconds 25
+                $llpAdaptiveRebuilt = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpAdaptiveProbePath | ConvertFrom-Json
+            } while (([string]$llpAdaptiveRebuilt.state -ne 'live' -or [string]$llpAdaptiveRebuilt.path -ne 'high-fidelity') -and [DateTime]::UtcNow -lt $llpAdaptiveRebuildDeadline)
+            Assert-LlpDisplay1Containment $llpAdaptiveRebuilt "$Name rebuilt display state"
+            Assert-Equal 'live' ([string]$llpAdaptiveRebuilt.state) "$Name environment rebuild did not return live."
+            Assert-Equal 'high-fidelity' ([string]$llpAdaptiveRebuilt.path) "$Name environment rebuild did not restore high fidelity."
+            Assert-Equal 'None' ([string]$llpAdaptiveRebuilt.failure) "$Name environment rebuild retained the old failure."
+            Assert-True ([uint64]$llpAdaptiveRebuilt.deviceRebuilds -gt $ExpectedRebuilds) "$Name environment rebuild did not start a new recovery epoch."
+            Assert-True ([uint64]$llpAdaptiveRebuilt.acquiredFrames -gt 0) "$Name environment rebuild did not acquire a new real frame."
+        }
+
+        [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpAdaptiveWindow, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)
+        Assert-True ($llpAdaptiveProcess.WaitForExit(8000)) "$Name adaptive probe did not exit."
+        Assert-Equal 0 $llpAdaptiveProcess.ExitCode "$Name adaptive probe exit code mismatch."
+        Write-Output "METRIC MaterialAdaptive name=$Name path=$([string]$llpAdaptiveProbe.path) reducedMotion=$([bool]$llpAdaptiveProbe.reducedMotion) acquired=$([uint64]$llpAdaptiveProbe.acquiredFrames) presented=$([uint64]$llpAdaptiveProbe.presentedFrames) dpi=$([int]$llpAdaptiveProbe.dpi)"
+    }
+
     New-Item -ItemType Directory -Force -Path $llpOutputDirectory, $llpDataDirectory, $llpLocalAppData, $llpUserProfile, $llpLaunchpad | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $llpLaunchpad 'Alpha.url'), "[InternetShortcut]`r`nURL=https://example.invalid/alpha`r`n", [System.Text.UTF8Encoding]::new($false))
     $llpSettings = [ordered]@{
@@ -190,7 +351,7 @@ public static class LightLaunchpadMaterialProbeNative {
         $env:APPDATA = $llpAppData
         $env:LOCALAPPDATA = $llpLocalAppData
         $env:USERPROFILE = $llpUserProfile
-        $llpProcess = Start-Process -FilePath $llpExecutable -ArgumentList @('--material-probe-file', $llpProbePath, '--material-force-failure', 'duplication', '--diagnostics-log-file', $llpLogPath, '--test-monitor-device', $llpTestMonitorDevice) -PassThru -WindowStyle Hidden
+        $llpProcess = Start-Process -FilePath $llpExecutable -ArgumentList @('--material-probe-file', $llpProbePath, '--material-probe-ready-file', $llpReadyPath, '--material-force-failure', 'duplication', '--diagnostics-log-file', $llpLogPath, '--test-monitor-device', $llpTestMonitorDevice, '--adaptive-test-high-contrast', '0', '--adaptive-test-transparency', '1', '--adaptive-test-animations', '1') -PassThru -WindowStyle Hidden
         $llpCapturedProcesses += $llpProcess
     }
     finally {
@@ -210,9 +371,22 @@ public static class LightLaunchpadMaterialProbeNative {
     Assert-True (-not $llpProcess.HasExited) 'Development material probe exited before creating its isolated window.'
     Assert-True ($llpWindow -ne [IntPtr]::Zero) 'Development material probe did not create a real NativeUi window.'
 
+    Wait-LlpFile $llpReadyPath
+    $llpReady = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpReadyPath | ConvertFrom-Json
+    Assert-Equal $llpTestMonitorDevice ([string]$llpReady.monitorDevice) 'Material probe ready state was not fixed to DISPLAY1 before interaction.'
+    Assert-True (
+        [int]$llpReady.windowRect.left -ge [int]$llpReady.monitorBounds.left -and
+        [int]$llpReady.windowRect.top -ge [int]$llpReady.monitorBounds.top -and
+        [int]$llpReady.windowRect.right -le [int]$llpReady.monitorBounds.right -and
+        [int]$llpReady.windowRect.bottom -le [int]$llpReady.monitorBounds.bottom
+    ) 'Material probe window escaped DISPLAY1 before interaction.'
+
     [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Wait-LlpFile $llpProbePath
     $llpProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpProbePath | ConvertFrom-Json
+    foreach ($llpField in @('path', 'failure', 'state', 'adapter', 'output', 'dpi', 'acquiredFrames', 'presentedFrames', 'droppedScenes', 'deviceRebuilds', 'lastFrameIdentity', 'firstFrameMs', 'frameP95Ms', 'evidenceFrozen', 'reducedMotion', 'statusPublications', 'diagnosticsCaptureStepStringCopies', 'diagnosticsCaptureStepVectorCopies')) {
+        Assert-True ($llpProbe.PSObject.Properties.Name -contains $llpField) "Material diagnostics schema is missing '$llpField'."
+    }
     Assert-Equal $llpTestMonitorDevice ([string]$llpProbe.monitorDevice) 'Visible fallback material probe was not fixed to DISPLAY1.'
     Assert-True (
         [int]$llpProbe.windowRect.left -ge [int]$llpProbe.monitorBounds.left -and
@@ -246,6 +420,7 @@ public static class LightLaunchpadMaterialProbeNative {
     $llpHiddenAcquired = [uint64]$llpHidden.acquiredFrames
     $llpHiddenPresented = [uint64]$llpHidden.presentedFrames
     $llpHiddenGeneration = [uint64]$llpHidden.probeGeneration
+    $llpHiddenStatusPublications = [uint64]$llpHidden.statusPublications
     Assert-True ($llpHiddenGeneration -gt 0) 'Hidden probe JSON did not expose a real snapshot generation.'
     Start-Sleep -Seconds 2
     [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpWindow, 0x804D, [UIntPtr]::new([uint64]2), [IntPtr]::Zero)
@@ -255,6 +430,7 @@ public static class LightLaunchpadMaterialProbeNative {
         $llpHiddenAgain = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpProbePath | ConvertFrom-Json
     } while ([uint64]$llpHiddenAgain.probeGeneration -le $llpHiddenGeneration -and [DateTime]::UtcNow -lt $llpRefreshDeadline)
     Assert-True ([uint64]$llpHiddenAgain.probeGeneration -gt $llpHiddenGeneration) 'Explicit hidden snapshot did not refresh probe JSON after two idle seconds.'
+    Assert-True ([uint64]$llpHiddenAgain.statusPublications -gt $llpHiddenStatusPublications) 'Explicit hidden snapshot bypassed a renderer status publication.'
     Assert-Equal $llpHiddenAcquired ([uint64]$llpHiddenAgain.acquiredFrames) 'Hidden renderer continued acquiring desktop frames.'
     Assert-Equal $llpHiddenPresented ([uint64]$llpHiddenAgain.presentedFrames) 'Hidden renderer continued presenting frames.'
 
@@ -276,6 +452,15 @@ public static class LightLaunchpadMaterialProbeNative {
         Assert-Equal 2 $llpBadProcess.ExitCode 'Invalid development material switches were not rejected with exit 2.'
     }
 
+    Invoke-LlpAdaptiveProbe -Name 'high-contrast' -HighContrast 1 -Transparency 1 -Animations 1 -ExpectedPath 'solid' -ExpectedReducedMotion $false -ExpectedCapture $false
+    Invoke-LlpAdaptiveProbe -Name 'transparency-disabled' -HighContrast 0 -Transparency 0 -Animations 1 -ExpectedPath 'solid' -ExpectedReducedMotion $false -ExpectedCapture $false
+    Invoke-LlpAdaptiveProbe -Name 'reduced-motion' -HighContrast 0 -Transparency 1 -Animations 0 -ExpectedPath 'high-fidelity' -ExpectedReducedMotion $true -ExpectedCapture $true
+    Invoke-LlpAdaptiveProbe -Name 'access-loss-recovered' -HighContrast 0 -Transparency 1 -Animations 1 -ExpectedPath 'high-fidelity' -ExpectedReducedMotion $false -ExpectedCapture $true -ForceFailure 'access-lost-once' -ExpectedRebuilds 1
+    Invoke-LlpAdaptiveProbe -Name 'access-loss-rebuild-failed' -HighContrast 0 -Transparency 1 -Animations 1 -ExpectedPath 'fallback' -ExpectedReducedMotion $false -ExpectedCapture $false -ForceFailure 'access-lost-rebuild-failure' -ExpectedState 'fallback' -ExpectedFailure 'ForcedForTest' -ExpectedRebuilds 1
+    Invoke-LlpAdaptiveProbe -Name 'second-access-loss' -HighContrast 0 -Transparency 1 -Animations 1 -ExpectedPath 'fallback' -ExpectedReducedMotion $false -ExpectedCapture $false -ForceFailure 'access-lost' -ExpectedState 'fallback' -ExpectedFailure 'ForcedForTest' -ExpectedRebuilds 1
+    Invoke-LlpAdaptiveProbe -Name 'display-change-after-fallback' -HighContrast 0 -Transparency 1 -Animations 1 -ExpectedPath 'fallback' -ExpectedReducedMotion $false -ExpectedCapture $false -ForceFailure 'access-lost' -ExpectedState 'fallback' -ExpectedFailure 'ForcedForTest' -ExpectedRebuilds 1 -RebuildAfterFallback $true
+    Invoke-LlpAdaptiveProbe -Name 'desktop-switch-after-fallback' -HighContrast 0 -Transparency 1 -Animations 1 -ExpectedPath 'fallback' -ExpectedReducedMotion $false -ExpectedCapture $false -ForceFailure 'access-lost' -ExpectedState 'fallback' -ExpectedFailure 'ForcedForTest' -ExpectedRebuilds 1 -DesktopSwitchAfterFallback $true
+
     $llpPriorAppData = $env:APPDATA
     $llpPriorLocalAppData = $env:LOCALAPPDATA
     $llpPriorUserProfile = $env:USERPROFILE
@@ -283,7 +468,7 @@ public static class LightLaunchpadMaterialProbeNative {
         $env:APPDATA = $llpAppData
         $env:LOCALAPPDATA = $llpLocalAppData
         $env:USERPROFILE = $llpUserProfile
-        $llpNormalProcess = Start-Process -FilePath $llpExecutable -ArgumentList @('--material-probe-file', $llpNormalProbePath, '--test-monitor-device', $llpTestMonitorDevice) -PassThru -WindowStyle Hidden
+        $llpNormalProcess = Start-Process -FilePath $llpExecutable -ArgumentList @('--material-probe-file', $llpNormalProbePath, '--material-probe-ready-file', $llpNormalReadyPath, '--material-evidence', '--test-monitor-device', $llpTestMonitorDevice, '--adaptive-test-high-contrast', '0', '--adaptive-test-transparency', '1', '--adaptive-test-animations', '1') -PassThru -WindowStyle Hidden
         $llpCapturedProcesses += $llpNormalProcess
     }
     finally {
@@ -300,13 +485,24 @@ public static class LightLaunchpadMaterialProbeNative {
         $llpNormalWindow = [LightLaunchpadMaterialProbeNative]::FindWindowForProcess([uint32]$llpNormalProcess.Id)
     }
     Assert-True ($llpNormalWindow -ne [IntPtr]::Zero) 'Normal material probe did not create its isolated NativeUi window.'
+    Wait-LlpFile $llpNormalReadyPath
+    $llpNormalReady = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpNormalReadyPath | ConvertFrom-Json
+    Assert-Equal $llpTestMonitorDevice ([string]$llpNormalReady.monitorDevice) 'Normal material ready state was not fixed to DISPLAY1 before interaction.'
+    Assert-True (
+        [int]$llpNormalReady.windowRect.left -ge [int]$llpNormalReady.monitorBounds.left -and
+        [int]$llpNormalReady.windowRect.top -ge [int]$llpNormalReady.monitorBounds.top -and
+        [int]$llpNormalReady.windowRect.right -le [int]$llpNormalReady.monitorBounds.right -and
+        [int]$llpNormalReady.windowRect.bottom -le [int]$llpNormalReady.monitorBounds.bottom
+    ) 'Normal material window escaped DISPLAY1 before interaction.'
     [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpNormalWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
     Wait-LlpFile $llpNormalProbePath
     $llpNormalStateDeadline = [DateTime]::UtcNow.AddSeconds(5)
     do {
         Start-Sleep -Milliseconds 25
         $llpNormalProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpNormalProbePath | ConvertFrom-Json
-    } while ([string]$llpNormalProbe.state -notin @('live', 'fallback') -and [DateTime]::UtcNow -lt $llpNormalStateDeadline)
+    } while (([string]$llpNormalProbe.state -notin @('live', 'fallback') -or
+        ([string]$llpNormalProbe.state -eq 'live' -and [uint64]$llpNormalProbe.presentedSceneGeneration -eq 0)) -and
+        [DateTime]::UtcNow -lt $llpNormalStateDeadline)
     Assert-Equal $llpTestMonitorDevice ([string]$llpNormalProbe.monitorDevice) 'Visible normal material probe was not fixed to DISPLAY1.'
     Assert-True (
         [int]$llpNormalProbe.windowRect.left -ge [int]$llpNormalProbe.monitorBounds.left -and
@@ -315,6 +511,87 @@ public static class LightLaunchpadMaterialProbeNative {
         [int]$llpNormalProbe.windowRect.bottom -le [int]$llpNormalProbe.monitorBounds.bottom
     ) 'Visible normal material probe escaped the requested DISPLAY1 bounds.'
     Assert-True (([string]$llpNormalProbe.state -eq 'live' -and [string]$llpNormalProbe.path -eq 'high-fidelity' -and [uint64]$llpNormalProbe.acquiredFrames -gt 0) -or ([string]$llpNormalProbe.state -eq 'fallback' -and [string]$llpNormalProbe.path -eq 'fallback' -and [string]$llpNormalProbe.failure -ne 'None')) 'Normal material probe reported neither a captured frame nor a stable machine-specific fallback.'
+    Assert-Equal 'live' ([string]$llpNormalProbe.state) 'Evidence freeze requires a live real Desktop Duplication frame.'
+    $llpCopyBaselineGeneration = [uint64]$llpNormalProbe.probeGeneration
+    $llpCopyBaselineStrings = [uint64]$llpNormalProbe.diagnosticsCaptureStepStringCopies
+    $llpCopyBaselineVectors = [uint64]$llpNormalProbe.diagnosticsCaptureStepVectorCopies
+    Start-Sleep -Milliseconds 250
+    [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpNormalWindow, 0x804D, [UIntPtr]::new([uint64]2), [IntPtr]::Zero)
+    $llpCopyDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
+        Start-Sleep -Milliseconds 25
+        $llpCopyProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpNormalProbePath | ConvertFrom-Json
+    } while ([uint64]$llpCopyProbe.probeGeneration -le $llpCopyBaselineGeneration -and [DateTime]::UtcNow -lt $llpCopyDeadline)
+    $llpCopyStringsTotal = [uint64]$llpCopyProbe.diagnosticsCaptureStepStringCopies
+    $llpCopyVectorsTotal = [uint64]$llpCopyProbe.diagnosticsCaptureStepVectorCopies
+    $llpCopyStringsDelta = [uint64]($llpCopyStringsTotal - $llpCopyBaselineStrings)
+    $llpCopyVectorsDelta = [uint64]($llpCopyVectorsTotal - $llpCopyBaselineVectors)
+    Assert-Equal $llpCopyBaselineStrings $llpCopyStringsTotal 'Ordinary real capture steps copied adapter/output/auxiliary strings.'
+    Assert-Equal $llpCopyBaselineVectors $llpCopyVectorsTotal 'Ordinary real capture steps copied presentation evidence vectors.'
+    Assert-Equal ([uint64]0) $llpCopyStringsDelta 'Ordinary real capture-step string-copy delta was not zero.'
+    Assert-Equal ([uint64]0) $llpCopyVectorsDelta 'Ordinary real capture-step vector-copy delta was not zero.'
+    Write-Output "METRIC MaterialDiagnosticsRealCaptureCopies stringsTotal=$llpCopyStringsTotal vectorsTotal=$llpCopyVectorsTotal stringsDelta=$llpCopyStringsDelta vectorsDelta=$llpCopyVectorsDelta presented=$([uint64]$llpCopyProbe.presentedFrames)"
+    [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpNormalWindow, 0x804D, [UIntPtr]::new([uint64]3), [IntPtr]::Zero)
+    $llpBaselineDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        Start-Sleep -Milliseconds 25
+        $llpBaselineProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpNormalProbePath | ConvertFrom-Json
+    } while (($null -eq $llpBaselineProbe.PSObject.Properties['evidenceBaselineCaptured'] -or -not [bool]$llpBaselineProbe.evidenceBaselineCaptured) -and [DateTime]::UtcNow -lt $llpBaselineDeadline)
+    Assert-Equal $true ([bool]$llpBaselineProbe.evidenceBaselineCaptured) 'Real backend did not capture the last committed desktop evidence before the candidate frame.'
+    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$llpBaselineProbe.evidenceBaselineDesktopHash)) 'Committed desktop evidence did not publish a stable GPU texture hash.'
+    Assert-True ([uint64]$llpBaselineProbe.evidenceBaselineFrameIdentity -gt 0) 'Committed desktop evidence did not publish the last presented frame identity.'
+    Assert-True ([uint64]$llpBaselineProbe.evidenceBaselineSceneGeneration -gt 0) 'Committed desktop evidence did not publish the last presented scene generation.'
+    $llpEvidenceCandidateWindow = [LightLaunchpadMaterialProbeNative]::CreateAuxiliaryWindow(
+        ([int]$llpBaselineProbe.monitorBounds.left + 48),
+        ([int]$llpBaselineProbe.monitorBounds.top + 48),
+        240,
+        160)
+    Assert-True ($llpEvidenceCandidateWindow -ne [IntPtr]::Zero) 'Could not create the real DISPLAY1 unpresented-candidate delta.'
+    try {
+        [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpNormalWindow, 0x804D, [UIntPtr]::new([uint64]4), [IntPtr]::Zero)
+        $llpCandidateDeadline = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            Start-Sleep -Milliseconds 25
+            $llpCandidateProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpNormalProbePath | ConvertFrom-Json
+        } while (($null -eq $llpCandidateProbe.PSObject.Properties['evidenceCandidateCaptured'] -or -not [bool]$llpCandidateProbe.evidenceCandidateCaptured) -and [DateTime]::UtcNow -lt $llpCandidateDeadline)
+        Assert-Equal $true ([bool]$llpCandidateProbe.evidenceCandidateCaptured) 'Real backend did not acquire the intentionally unpresented desktop candidate.'
+        Assert-True ([string]$llpCandidateProbe.evidenceCandidateDesktopHash -ne [string]$llpBaselineProbe.evidenceBaselineDesktopHash) 'The real candidate desktop pixels did not differ from the committed desktop pixels.'
+        Assert-True ([uint64]$llpCandidateProbe.evidenceCandidateFrameIdentity -ne [uint64]$llpBaselineProbe.evidenceBaselineFrameIdentity) 'The real candidate frame identity did not differ from the committed frame identity.'
+        Assert-Equal ([uint64]$llpBaselineProbe.presentedFrames) ([uint64]$llpCandidateProbe.presentedFrames) 'The intentionally unpresented candidate advanced the presentation count.'
+    }
+    finally {
+        [void][LightLaunchpadMaterialProbeNative]::DestroyWindow($llpEvidenceCandidateWindow)
+    }
+    $llpFreezeMessage = [LightLaunchpadMaterialProbeNative]::RegisterWindowMessage('LightLaunchpad.MaterialEvidenceFreeze')
+    Assert-True ($llpFreezeMessage -ne 0) 'Could not register the material evidence freeze message.'
+    [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpNormalWindow, $llpFreezeMessage, [UIntPtr]::Zero, [IntPtr]::Zero)
+    $llpFreezeDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        Start-Sleep -Milliseconds 25
+        $llpFrozenProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpNormalProbePath | ConvertFrom-Json
+    } while ([string]$llpFrozenProbe.state -ne 'frozen-evidence' -and [DateTime]::UtcNow -lt $llpFreezeDeadline)
+    Assert-Equal 'frozen-evidence' ([string]$llpFrozenProbe.state) 'Registered evidence message did not freeze the real renderer.'
+    Assert-Equal $true ([bool]$llpFrozenProbe.evidenceFrozen) 'Frozen renderer diagnostics did not set evidenceFrozen.'
+    Assert-Equal $true ([bool]$llpFrozenProbe.evidenceFreezeCommitSucceeded) 'Evidence freeze did not publish a successful real DComp commit.'
+    Assert-Equal ([string]$llpBaselineProbe.evidenceBaselineDesktopHash) ([string]$llpFrozenProbe.evidenceFreezeDesktopHash) 'Evidence freeze did not use the exact last committed desktop texture.'
+    Assert-Equal ([uint64]$llpBaselineProbe.evidenceBaselineFrameIdentity) ([uint64]$llpFrozenProbe.evidenceFreezeFrameIdentity) 'Evidence freeze did not use the exact last presented desktop frame.'
+    Assert-Equal ([uint64]$llpBaselineProbe.evidenceBaselineSceneGeneration) ([uint64]$llpFrozenProbe.evidenceFreezeSceneGeneration) 'Evidence freeze did not use the exact last presented scene.'
+    Assert-Equal ([uint64]$llpCandidateProbe.presentedFrames + 1) ([uint64]$llpFrozenProbe.presentedFrames) 'Evidence freeze did not commit exactly one final redraw.'
+    $llpAffinity = [uint32]::MaxValue
+    Assert-True ([LightLaunchpadMaterialProbeNative]::GetWindowDisplayAffinity($llpNormalWindow, [ref]$llpAffinity)) 'Could not read frozen window display affinity.'
+    Assert-Equal 0 $llpAffinity 'Frozen evidence retained WDA_EXCLUDEFROMCAPTURE.'
+    $llpFrozenGeneration = [uint64]$llpFrozenProbe.probeGeneration
+    [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpNormalWindow, $llpFreezeMessage, [UIntPtr]::Zero, [IntPtr]::Zero)
+    [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpNormalWindow, 0x804D, [UIntPtr]::new([uint64]2), [IntPtr]::Zero)
+    $llpTerminalDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
+        Start-Sleep -Milliseconds 25
+        $llpTerminalProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath $llpNormalProbePath | ConvertFrom-Json
+    } while ([uint64]$llpTerminalProbe.probeGeneration -le $llpFrozenGeneration -and [DateTime]::UtcNow -lt $llpTerminalDeadline)
+    Assert-Equal 'frozen-evidence' ([string]$llpTerminalProbe.state) 'A second freeze request resumed the terminal real renderer.'
+    Assert-Equal ([uint64]$llpFrozenProbe.presentedFrames) ([uint64]$llpTerminalProbe.presentedFrames) 'Terminal frozen evidence presented another frame.'
+    Assert-Equal ([string]$llpFrozenProbe.evidenceFreezeDesktopHash) ([string]$llpTerminalProbe.evidenceFreezeDesktopHash) 'Terminal frozen evidence changed its committed desktop proof.'
+    Write-Output "METRIC MaterialFreezeEvidence baselineHash=$([string]$llpBaselineProbe.evidenceBaselineDesktopHash) candidateHash=$([string]$llpCandidateProbe.evidenceCandidateDesktopHash) freezeHash=$([string]$llpFrozenProbe.evidenceFreezeDesktopHash) baselineFrame=$([uint64]$llpBaselineProbe.evidenceBaselineFrameIdentity) candidateFrame=$([uint64]$llpCandidateProbe.evidenceCandidateFrameIdentity) scene=$([uint64]$llpFrozenProbe.evidenceFreezeSceneGeneration) presentedBefore=$([uint64]$llpCandidateProbe.presentedFrames) presentedAfter=$([uint64]$llpFrozenProbe.presentedFrames) terminal=true"
     [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpNormalWindow, 0x804D, [UIntPtr]::new([uint64]1), [IntPtr]::Zero)
     [void][LightLaunchpadMaterialProbeNative]::SendMessage($llpNormalWindow, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)
     Assert-True ($llpNormalProcess.WaitForExit(8000)) 'Normal material probe did not exit.'
@@ -350,6 +627,8 @@ public static class LightLaunchpadMaterialProbeNative {
     $llpStableWindowEvents = 0
     foreach ($llpStableArguments in @(
         @('--material-probe-file', (Join-Path $llpTempRoot 'stable-probe.json')),
+        @('--material-probe-ready-file', (Join-Path $llpTempRoot 'stable-ready.json')),
+        @('--material-evidence'),
         @('--material-force-failure', 'duplication'),
         @('--test-monitor-device', $llpTestMonitorDevice)
     )) {
@@ -393,6 +672,7 @@ public static class LightLaunchpadMaterialProbeNative {
         }
     }
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $llpTempRoot 'stable-probe.json'))) 'Stable material switch created a probe file before rejection.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $llpTempRoot 'stable-ready.json'))) 'Stable material ready switch created a file before rejection.'
 
     $llpRunAfter = $null
     try { $llpRunAfter = (Get-ItemProperty -LiteralPath $llpRunKeyPath -Name LightLaunchpad -ErrorAction Stop).LightLaunchpad } catch {}
