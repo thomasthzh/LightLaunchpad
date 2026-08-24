@@ -2,16 +2,55 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-24 14:38:00 +08:00, Asia/Hong_Kong
+- Updated: 2026-08-24 18:49:00 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
-- HEAD: `a9032341540a34622e0a998db7396a0b0ac1f5e2`
+- Verified implementation HEAD: `1dabee0a49acc57e71896c255cae7cb16423e0b3`
 - Remote main: `origin/main@33e91c2`
-- Active task: `LLP-013 - Unified Adaptive Material Renderer` (`in_progress`)
-- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`
+- Active task: `LLP-014 - Continuous Focus And Nonblocking Motion` (`in_progress`)
+- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`, `LLP-013`
 - Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
-- Goal status: active; LLP-013 remains the only task in progress.
-- Current gate: LLP-013 Task 7 is complete after independent specification and code-quality re-review; Task 8 deterministic 12-background pixel and live-refresh evidence is the next gate and has not started.
+- Goal status: active; LLP-013 is complete and LLP-014 is the sole task in progress.
+- Current gate: begin LLP-014 RED from its approved timing, input-readiness, reduced-motion, and compositor ownership requirements.
+
+## LLP-013 Completion Evidence
+
+Status at 2026-08-24 18:49 +08:00: complete. LLP-014 is now the sole project-level `in_progress` task.
+
+Changed product, test, and evidence scope:
+
+- `src/LightLaunchpad.NativeUi/MaterialRenderer.{h,cpp}` owns the one renderer thread, exact-monitor DXGI Desktop Duplication, D3D11/D2D/DirectComposition resources, immutable latest-only scenes, one three-layer composition tree, adaptive tint/contrast/search-edge commands, terminal evidence freeze, one bounded recovery epoch, and complete hidden teardown.
+- `src/LightLaunchpad.NativeUi/LightLaunchpad.NativeUi.cpp` owns canonical Spotlight input/application state, complete immutable scene submission, diagnostics publication, UIA/IME, real hotkey readiness samples, and the sole stable no-displacement fallback; old nested/magnifying lens paths are absent from the high-fidelity route.
+- `tests/LightLaunchpad.NativeUi.Tests/{MaterialRenderer,MaterialRendererBehavior,SpotlightFlowBehavior,LaunchpadFlowBehavior,TextInputBehavior}.Tests.*` plus `tools/capture-material-evidence.ps1` cover direct production policy/lifecycle, actual GPU/compositor failures, Stable switch rejection, canonical input/launch/organization behavior, 12 controlled backgrounds plus the real desktop, and real-process performance.
+- `tests/LightLaunchpad.App.Tests/HostedAppModeSourceTests.cs` keeps the historical source-only regression aligned with the material renderer. `.learnings/ERRORS.md` records the exact REDs, command mistakes, clipboard contention, driver-memory behavior, and their bounded resolutions.
+
+RED/GREEN and implementation history:
+
+- The initial Task 1 RED lacked production material boundaries. Subsequent REDs exposed icon alpha ownership, missing renderer bootstrap, first-frame deadline placement, stale hidden evidence, invalid D2D source flags, leaked edge-transform state, rotated luminance sampling, incomplete immutable scenes, handoff races, candidate-loss recovery, false freeze success, copied hot-path diagnostics, nondeterministic visual ownership, stale performance status, occupied global Alt+9, asynchronous GPU destruction, and clipboard restoration contention.
+- GREEN retains one DDA/D3D11/D2D/DComp route, one layered fallback, one latest-only scene slot, one rebuild per visible epoch, no hidden wake loop, no UI-thread capture/GPU wait/Sleep, no system Acrylic/DWM backdrop, no 1.16x focus scale, and no second material truth source.
+- The complete LLP-013 chain is preserved in the task checkpoints below, beginning with design `0cf5a51` and plan `3d70d18`. Final implementation/evidence commits are `a903234` (`feat: harden material recovery and evidence`), `aff89f3` (`docs: record LLP-013 task 7 verification`), `abd3b70` (`test: verify LLP-013 material pixels`), and `1dabee0` (`fix: complete LLP-013 material gates`).
+
+Visual and pixel evidence:
+
+- `artifacts/native-ui-llp013-material-evidence/manifest.json` contains 13 fresh real-EXE cases on `\\.\DISPLAY1`: 12 deterministic controlled backgrounds plus one supplemental current desktop. The visual gate passes 13/13 with exact viewport/monitor/path/process/hash provenance.
+- Controlled-background minima are text contrast `6.363:1` and focus-boundary contrast `3.204:1`; across all 13 cases the minima are `4.5:1` and `3.0:1`. Search center translation is `0 DIP`, maximum edge displacement is `1.5 DIP`, and maximum duplicated-component ratio, focused-tile scale delta, and rounded-boundary leak are all zero.
+- Screenshots and diagnostics show one continuous cool white-blue material, crisp text/icons above it, no upward ghost, duplicated text/icon, rectangular corner leak, glass-on-glass, selected-tile magnification, or out-of-bounds search sampling. The real evidence freeze uses the last committed GPU desktop/scene and never resumes capture.
+
+Performance and regression verification:
+
+- `MaterialRendererBehavior.Tests.ps1 -Mode Performance -EvidenceDirectory artifacts\native-ui-llp013-verification` runs 30 warm opens, 600 paced visible interaction frames, 20 focus changes, and a two-second hidden observation against an isolated real Development EXE. Final measurements: hotkey-to-input-ready P95 `94 ms` (`<=180`), renderer frame P95 `8.486 ms` (`<=16.7`), focus feedback P95 `30.827 ms` (`<=50`), hidden CPU `0%`, hidden acquired/presented counters `2197 -> 2197`, retained Private Bytes growth `14,012,416` bytes (`<=15 MiB`), first frame `0.3137 ms`, rebuilds `0`, adapter `NVIDIA GeForce RTX 4060 Laptop GPU`, output `\\.\DISPLAY1`.
+- Absolute hidden Private Bytes are recorded without relabeling as `120,479,744` bytes. This exceeds the aspirational 15 MB absolute target on this NVIDIA driver even after surfaces, duplication, D3D/D2D/DComp devices, renderer thread, and GPU queue are released/trimmed; the enforced product-owned gate is growth after the first complete graphics teardown. Visible Private Bytes are `169,476,096`, working set `111,628,288`, and visible CPU `4.2787%`.
+- Fresh final affected gates pass MaterialRenderer `43/43`, real Material lifecycle/freeze, default Spotlight, Launchpad organization/launch, and UIA/IME TextInput. The complete serial NativeUi aggregate passed `18/18`; Core passed `33/33`; historical App passed `74/74`. Changed PowerShell files parse cleanly and `git diff --check`/staged diff checks pass.
+
+Real EXE and host protection:
+
+- Final dirty precommit EXE: `C:\Users\thoma\Desktop\启动台\artifacts\native-ui-llp013-precommit\LightLaunchpad.NativeUi.exe`, 1,866,240 bytes, SHA256 `FF74AEE1392F85807BE60822972E4EE36E6DECA217B83E1F35C564FE957DB71F`. Diagnostics exit 0 with version `1.11.0-dev+abd3b70e61bc.dirty`, commit `abd3b70e61bc`, channel `development`, Per-Monitor V2, exact artifact path, and `isStableInstall=false`.
+- Exactly one protected NativeUi process remains: PID `34940`, path `C:\Users\thoma\Desktop\启动台\artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe`, SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`. HKCU Run remains the exact quoted protected path; Stable install remains absent; `C:\TOOL\LightLaunchpad-nativeui-win-x64-V1.10\LightLaunchpad.NativeUi.exe` remains SHA256 `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`.
+- `LLP_reconstruction/` remains untracked and unstaged. No protected process termination, stable install, startup change, `C:\TOOL` overwrite, push, tag, package release, or GitHub Release occurred.
+
+Next step:
+
+- Start LLP-014 with its failing timing/ownership tests and retain `LightLaunchpad.NativeUi.exe` as the one product route. Do not start LLP-015 until LLP-014 timing, reduced-motion behavior, real input readiness, and visual motion evidence are verified.
 
 ## LLP-013 Task 7 Completion Evidence
 
