@@ -2,16 +2,41 @@
 
 ## Handoff Snapshot
 
-- Updated: 2026-08-24 18:49:00 +08:00, Asia/Hong_Kong
+- Updated: 2026-09-22 18:20:00 +08:00, Asia/Hong_Kong
 - Workspace: `C:\Users\thoma\Desktop\启动台`
 - Branch: `codex/apple-first-v1.1`
 - Verified implementation HEAD: `1dabee0a49acc57e71896c255cae7cb16423e0b3`
 - Remote main: `origin/main@33e91c2`
 - Active task: `LLP-014 - Continuous Focus And Nonblocking Motion` (`in_progress`)
-- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`, `LLP-013`
-- Next task after verification: `LLP-014 - Continuous Focus And Nonblocking Motion`
-- Goal status: active; LLP-013 is complete and LLP-014 is the sole task in progress.
-- Current gate: begin LLP-014 RED from its approved timing, input-readiness, reduced-motion, and compositor ownership requirements.
+- Completed tasks: `LLP-001`, `LLP-002`, `LLP-003`, `LLP-004`, `LLP-005`, `LLP-006`, `LLP-007`, `LLP-008`, `LLP-009`, `LLP-010`, `LLP-011`, `LLP-012`, `LLP-013`, `LLP-014`
+- Next task after verification: `LLP-015 - Settings Information Architecture`
+- Goal status: active; LLP-014 is complete and LLP-015 is the first pending task.
+- Current gate: LLP-014 is closed with implementation, real EXE, performance, adaptive, identity, and protection evidence.
+
+## LLP-014 Current Checkpoint
+
+Status at 2026-09-22 18:38 +08:00: complete. The approved motion slice, affected gates, clean-source identity build, and protection audit are green.
+
+Implementation and behavior:
+
+- Added `MotionTimeline.{h,cpp}` as a pure QPC-sampled timeline. It owns independent visibility, focus, and press channels with 170/140/100/72 ms normal durations, 90/90/80/60 ms reduced-motion durations, cubic/sine easing, 10 DIP maximum offset, and a 1.015 focus-scale cap.
+- `MaterialRenderer.{h,cpp}` now accepts latest-only `MotionVisual` requests on the renderer thread and commits the DirectComposition root offset without UI-thread sleeps or capture polling. Layered fallback uses the same timeline and alpha channel.
+- `LightLaunchpad.NativeUi.cpp` starts/stops a 16 ms motion timer, keeps the HWND focusable from the opening call, reverses a close from its current frame on rapid Alt+D, preserves the current query, and adds focus/press feedback to the existing scene. Fallback opening defers the full bitmap rebuild to the first motion tick so input readiness is not blocked.
+- `SpotlightFlowBehavior.Tests.ps1` now waits for the intentional close animation and emits motion diagnostics when repeated performance closes fail; this replaces stale synchronous-visibility assertions.
+
+RED/GREEN and verification:
+
+- Focused RED: `MotionTimeline.Tests.ps1` failed to compile before the production timeline existed. GREEN is 4/4.
+- `MaterialRenderer.Tests.ps1`: 43/43.
+- Normal real `SpotlightFlowBehavior.Tests.ps1`: PASS on `\\.\DISPLAY1`, high-fidelity path, real Alt+D, search/result navigation, refresh focus retention, Settings, and delayed close.
+- Forced fallback real `SpotlightFlowBehavior.Tests.ps1 -MaterialFailure initialization`: PASS with fallback ownership and canonical launch flow.
+- Real performance `SpotlightFlowBehavior.Tests.ps1 -PerformanceOnly -EvidenceDirectory $env:TEMP\llp014-final-performance`: PASS. Hotkey-to-input-ready P95 94 ms, frame P95 8.759 ms, focus P95 31.93 ms, hidden CPU 0%, hidden counters stationary, retained hidden Private Bytes growth 39,022,592 bytes after the first complete graphics teardown. Warm-open observed P95 includes renderer presentation; the enforced input-ready gate is 94 ms. The retained memory number is reported as measured, not relabeled as a lower absolute footprint.
+- `AdaptiveWindowBehavior.Tests.ps1`: 4/4, including reduced-motion cases. `ExecutableIdentity.Tests.ps1`: 6/6 after adding the new timeline files to the clean-source build fixture. Core/App: 33/33 and 74/74. Native build `artifacts\native-ui-llp014-dev\LightLaunchpad.NativeUi.exe` succeeded at 1,871,360 bytes, SHA256 `770F2C21A63578E8E4C6950FC48A1701AA5B6EDAE8873EE7405415E5A6320EF2`. `git diff --check` and PowerShell parse checks pass.
+
+Current risk and close action:
+
+- DirectComposition's portable MinGW interface exposes root offset but not visual opacity; high-fidelity motion therefore uses compositor offset while layered fallback owns opacity. Reduced motion still removes offset/scale and shortens fades.
+- Final protection audit: the protected runtime remains `C:\Users\thoma\Desktop\启动台\artifacts\native-ui-final-fix\LightLaunchpad.NativeUi.exe` with SHA256 `EBD9363316F45B8449CDA57218A8349C039EFDB6001FC030B69648436C47A0BD`; HKCU Run still points to that exact quoted path; `C:\TOOL\LightLaunchpad-nativeui-win-x64-V1.10\LightLaunchpad.NativeUi.exe` remains SHA256 `2E44A11A27C96787EA85873B28CE782FCE9257A8918D10D4F619A27D50679C1A`. `LLP_reconstruction/` remains untracked and unstaged. LLP-015 is now the next pending task.
 
 ## LLP-013 Completion Evidence
 

@@ -19,6 +19,7 @@
 #include "Catalog.h"
 #include "InteractionState.h"
 #include "MaterialRenderer.h"
+#include "MotionTimeline.h"
 #include "OrganizationState.h"
 #include "Persistence.h"
 #include "SceneGeometry.h"
@@ -131,6 +132,7 @@ constexpr double DragReflowSmoothing = 0.24;
 constexpr UINT_PTR HotkeyEditSubclassId = 0x4C5602;
 constexpr UINT_PTR TrayIconRetryTimerId = 0x4C5603;
 constexpr UINT_PTR OrganizationFeedbackTimerId = 0x4C5604;
+constexpr UINT_PTR MotionTimerId = 0x4C5605;
 constexpr UINT TrayIconRetryMs = 1000;
 constexpr int TrayIconRetryMaxAttempts = 8;
 constexpr DWORD ActivationIpcTimeoutMs = 2000;
@@ -351,6 +353,10 @@ OrganizationFeedback g_organizationFeedback;
 llp::adaptive::Environment g_adaptiveEnvironment;
 llp::adaptive::Policy g_adaptivePolicy;
 llp::material::MaterialRenderer g_materialRenderer;
+llp::motion::MotionTimeline g_motionTimeline;
+llp::motion::Frame g_motionFrame;
+bool g_motionFocusInitialized = false;
+llp::interaction::FocusArea g_motionFocusArea = llp::interaction::FocusArea::Search;
 std::uint64_t g_materialSceneGeneration = 0;
 std::uint64_t g_materialHostIdentityCopies = 0;
 std::uint64_t g_materialActivation = 0;
@@ -690,6 +696,11 @@ void RefreshAdaptiveEnvironment();
 void ResetScaleSensitiveResources();
 std::shared_ptr<const llp::material::SceneSnapshot> BuildMaterialSceneSnapshot(const RECT& client);
 void SubmitMaterialSceneIfVisible();
+double MotionNowMs();
+void ApplyMotionFrame(bool forcePaint = false);
+void FinishHideNativeUi();
+void StartMotionTimer();
+void StopMotionTimer();
 void RebuildVisibleMaterialRenderer();
 bool WriteSpotlightFlowReadyState();
 bool WriteMaterialProbeState(HWND hwnd);
@@ -3458,6 +3469,10 @@ bool WriteSpotlightFlowReadyState()
         { "searchValue", llp::persistence::WideToUtf8(SearchCommittedText()) },
         { "searchComposing", g_searchInput.IsComposing() },
         { "windowVisible", g_hwnd && IsWindowVisible(g_hwnd) },
+        { "motionActive", g_motionFrame.active },
+        { "motionTargetVisible", g_motionFrame.targetVisible },
+        { "motionOpacity", g_motionFrame.opacity },
+        { "motionOffsetYDip", g_motionFrame.offsetYDip },
         { "hotkeyInputReadyMs", g_spotlightFlowProbe.inputReadyMilliseconds },
         { "foregroundWindow", static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(foregroundWindow)) },
         { "foregroundProcessId", foregroundProcessId },
@@ -3808,6 +3823,7 @@ void RefreshAdaptiveEnvironment()
     const bool scaleChanged = nextPolicy.textScalePercent != g_adaptivePolicy.textScalePercent;
     g_adaptiveEnvironment = next;
     g_adaptivePolicy = nextPolicy;
+    g_motionTimeline.SetReducedMotion(g_adaptivePolicy.reducedMotion);
     if (scaleChanged && g_hwnd) ResetScaleSensitiveResources();
 }
 
@@ -5167,9 +5183,10 @@ void CALLBACK DesktopSwitchWinEvent(
 void ShowSpotlightImmediately()
 {
     if (!g_hwnd) return;
-    // LLP-017 will restore motion with a compositor-driven timeline. Keep this
-    // path immediate until then so opening Spotlight never blocks the UI thread.
-    SetSpotlightLayeredOpacity(g_adaptivePolicy.solidSurface ? 255 : SpotlightGlassAlpha);
+    if (!g_motionTimeline.IsActive(MotionNowMs()))
+    {
+        SetSpotlightLayeredOpacity(g_adaptivePolicy.solidSurface ? 255 : SpotlightGlassAlpha);
+    }
     ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     InvalidateRect(g_hwnd, nullptr, TRUE);
 }
@@ -5185,8 +5202,148 @@ void HideSpotlightImmediately()
     SetSpotlightLayeredOpacity(g_adaptivePolicy.solidSurface ? 255 : SpotlightGlassAlpha);
 }
 
+double MotionNowMs()
+{
+    static const double frequency = []() {
+        LARGE_INTEGER value = {};
+        return QueryPerformanceFrequency(&value) && value.QuadPart > 0
+            ? static_cast<double>(value.QuadPart)
+            : 1000.0;
+    }();
+    LARGE_INTEGER counter = {};
+    if (!QueryPerformanceCounter(&counter))
+    {
+        return static_cast<double>(GetTickCount64());
+    }
+    return static_cast<double>(counter.QuadPart) * 1000.0 / frequency;
+}
+
+void StartMotionTimer()
+{
+    if (g_hwnd) SetTimer(g_hwnd, MotionTimerId, 16, nullptr);
+}
+
+void StopMotionTimer()
+{
+    if (g_hwnd) KillTimer(g_hwnd, MotionTimerId);
+}
+
+void FinishHideNativeUi()
+{
+    if (!g_hwnd) return;
+    StopMotionTimer();
+    g_motionFrame = g_motionTimeline.Sample(MotionNowMs());
+    if (IsSpotlightMode())
+    {
+        g_materialRenderer.Hide();
+        HideSpotlightImmediately();
+    }
+    else
+    {
+        ShowWindow(g_hwnd, SW_HIDE);
+    }
+    TrimHiddenFootprint();
+    g_motionTimeline.Reset(false, MotionNowMs());
+    g_motionFocusInitialized = false;
+}
+
+void ApplyMotionFrame(bool forcePaint)
+{
+    if (!g_hwnd) return;
+    const double now = MotionNowMs();
+    g_motionFrame = g_motionTimeline.Sample(now);
+
+    if (IsSpotlightMode())
+    {
+        llp::material::MotionVisual visual;
+        visual.opacity = static_cast<float>(g_motionFrame.opacity);
+        visual.offsetY = static_cast<float>(
+            g_motionFrame.offsetYDip * static_cast<double>(std::max<UINT>(1, g_windowDpi)) / 96.0);
+        visual.overlayOpacity = static_cast<float>(g_motionFrame.overlayOpacity);
+        visual.contentOpacity = 1.0f;
+
+        const auto diagnostics = g_materialRenderer.SnapshotDiagnostics();
+        const bool rendererOwnsMotion = diagnostics.path == llp::material::RenderPath::HighFidelity
+            || diagnostics.state == llp::material::LifecycleState::Starting;
+        if (rendererOwnsMotion)
+        {
+            g_materialRenderer.SetMotion(visual);
+        }
+        else if (IsWindowVisible(g_hwnd))
+        {
+            const BYTE baseAlpha = g_adaptivePolicy.solidSurface ? 255 : SpotlightGlassAlpha;
+            const BYTE alpha = static_cast<BYTE>(std::clamp(
+                static_cast<int>(std::lround(static_cast<double>(baseAlpha) * g_motionFrame.opacity)),
+                0,
+                255));
+            // Do not synchronously rebuild the full layered bitmap on the
+            // opening call.  The input contract is "visible and focusable"
+            // first; the 16 ms motion tick presents the first composed frame.
+            // This keeps fallback startup bounded without dropping the fade.
+            if (forcePaint && g_motionFrame.active)
+            {
+                g_spotlightLayerDirty = true;
+                InvalidateRect(g_hwnd, nullptr, FALSE);
+            }
+            else
+            {
+                SetSpotlightLayeredOpacity(alpha);
+                g_spotlightLayerDirty = true;
+                if (forcePaint || g_motionFrame.active) PaintSpotlightLayeredWindow(true);
+            }
+        }
+    }
+
+    if (IsWindowVisible(g_hwnd)
+        && (!IsSpotlightMode() ? (forcePaint || g_motionFrame.active) : forcePaint))
+    {
+        InvalidateRect(g_hwnd, nullptr, FALSE);
+    }
+
+    if (g_motionFrame.active)
+    {
+        StartMotionTimer();
+    }
+    else if (!g_motionFrame.targetVisible && IsWindowVisible(g_hwnd))
+    {
+        FinishHideNativeUi();
+    }
+    else
+    {
+        StopMotionTimer();
+    }
+}
+
 void ShowNativeUi()
 {
+    const double now = MotionNowMs();
+    g_motionTimeline.SetReducedMotion(g_adaptivePolicy.reducedMotion);
+    if (IsSpotlightMode() && IsWindowVisible(g_hwnd))
+    {
+        // A second Alt+D reverses the in-flight close from its current frame;
+        // it never queues a stale open behind the close animation.
+        if (g_motionTimeline.IsClosing(now))
+        {
+            g_motionTimeline.SetVisible(true, now);
+            // Reopening during the close window keeps the current query so a
+            // rapid Alt+D cannot lose text, while restoring the normal search
+            // focus contract for the new activation.
+            g_spotlightState.Open();
+            RebuildFiltered();
+            g_searchInputActive = true;
+            ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
+            SetForegroundWindow(g_hwnd);
+            ActivateSearchInput();
+            ApplyMotionFrame(true);
+            return;
+        }
+        if (g_motionTimeline.TargetVisible())
+        {
+            ActivateSearchInput();
+            return;
+        }
+    }
+
     g_spotlightFallbackRestorePending = false;
     g_spotlightFallbackRestoreActivation = 0;
     if (!g_catalogRefreshPending)
@@ -5208,6 +5365,12 @@ void ShowNativeUi()
     PositionWindow();
     if (IsSpotlightMode())
     {
+        g_motionTimeline.Reset(false, now);
+        g_motionTimeline.SetVisible(true, now);
+        g_motionTimeline.SetFocus(true, now);
+        g_motionFocusInitialized = true;
+        g_motionFocusArea = llp::interaction::FocusArea::Search;
+        SetSpotlightLayeredOpacity(0);
         RECT windowRect = {};
         GetWindowRect(g_hwnd, &windowRect);
         if (!g_adaptivePolicy.solidSurface) CaptureSpotlightBackdrop(windowRect);
@@ -5221,6 +5384,7 @@ void ShowNativeUi()
     }
     else
     {
+        g_motionTimeline.Reset(true, now);
         ReleaseSpotlightBackdrop();
     }
     g_searchInputActive = true;
@@ -5236,6 +5400,7 @@ void ShowNativeUi()
     }
     SetForegroundWindow(g_hwnd);
     ActivateSearchInput();
+    ApplyMotionFrame(true);
     InvalidateRect(g_hwnd, nullptr, TRUE);
     if (g_spotlightFlowProbe.active) WriteSpotlightFlowReadyState();
     if (g_catalogBrokerProbe.active
@@ -5249,6 +5414,14 @@ void ShowNativeUi()
 
 void HideNativeUi()
 {
+    const double now = MotionNowMs();
+    g_motionTimeline.SetReducedMotion(g_adaptivePolicy.reducedMotion);
+    if (!g_hwnd || !IsWindowVisible(g_hwnd))
+    {
+        FinishHideNativeUi();
+        return;
+    }
+
     g_spotlightFallbackRestorePending = false;
     g_spotlightFallbackRestoreActivation = 0;
     g_searchInputActive = false;
@@ -5257,19 +5430,18 @@ void HideNativeUi()
     if (GetCapture() == g_hwnd) ReleaseCapture();
     if (IsSpotlightMode())
     {
-        g_materialRenderer.Hide();
-        HideSpotlightImmediately();
+        g_motionTimeline.SetVisible(false, now);
+        ApplyMotionFrame(true);
     }
     else
     {
-        ShowWindow(g_hwnd, SW_HIDE);
+        FinishHideNativeUi();
     }
-    TrimHiddenFootprint();
 }
 
 void ToggleNativeUi()
 {
-    if (IsWindowVisible(g_hwnd))
+    if (IsWindowVisible(g_hwnd) && g_motionTimeline.TargetVisible())
     {
         HideNativeUi();
     }
@@ -6838,7 +7010,12 @@ void DrawAppTileSurface(ID2D1DCRenderTarget* target, const RECT& rect, TileVisua
         COLORREF rim = RGB(82, 108, 136);
         if (state == TileVisualState::Selected) { fill = RGB(34, 82, 112); rim = RGB(112, 185, 226); }
         else if (state == TileVisualState::MultiSelected) { fill = RGB(45, 72, 116); rim = RGB(150, 174, 238); }
-        else if (state == TileVisualState::Pressed) { fill = RGB(22, 54, 82); rim = RGB(154, 210, 244); }
+        else if (state == TileVisualState::Pressed)
+        {
+            const int pressLift = static_cast<int>(std::lround(g_motionFrame.press * 14.0));
+            fill = RGB(22 + pressLift, 54 + pressLift, 82 + pressLift);
+            rim = RGB(154 + static_cast<int>(std::lround(g_motionFrame.press * 24.0)), 210, 244);
+        }
         else if (state == TileVisualState::DragSource) { fill = RGB(70, 62, 46); rim = RGB(210, 180, 116); }
         else if (state == TileVisualState::DropTarget) { fill = RGB(36, 78, 68); rim = RGB(116, 202, 174); }
         DrawRoundedRectDirect(target, rect, fill, rim, 14.0f);
@@ -6976,7 +7153,12 @@ void DrawAppTileSurface(HDC dc, const RECT& rect, TileVisualState state)
     COLORREF rim = RGB(82, 108, 136);
     if (state == TileVisualState::Selected) { fill = RGB(34, 82, 112); rim = RGB(112, 185, 226); }
     else if (state == TileVisualState::MultiSelected) { fill = RGB(45, 72, 116); rim = RGB(150, 174, 238); }
-    else if (state == TileVisualState::Pressed) { fill = RGB(22, 54, 82); rim = RGB(154, 210, 244); }
+    else if (state == TileVisualState::Pressed)
+    {
+        const int pressLift = static_cast<int>(std::lround(g_motionFrame.press * 14.0));
+        fill = RGB(22 + pressLift, 54 + pressLift, 82 + pressLift);
+        rim = RGB(154 + static_cast<int>(std::lround(g_motionFrame.press * 24.0)), 210, 244);
+    }
     else if (state == TileVisualState::DragSource) { fill = RGB(70, 62, 46); rim = RGB(210, 180, 116); }
     else if (state == TileVisualState::DropTarget) { fill = RGB(36, 78, 68); rim = RGB(116, 202, 174); }
     DrawRoundedRect(dc, rect, fill, rim, 12);
@@ -8481,6 +8663,14 @@ void ScrollSelectedIntoView()
 void ApplySpotlightInteractionState(bool scrollFocusedResult)
 {
     if (!IsSpotlightMode()) return;
+    const auto currentFocus = g_spotlightState.Focus();
+    const double now = MotionNowMs();
+    if (!g_motionFocusInitialized || currentFocus != g_motionFocusArea)
+    {
+        if (g_motionFocusInitialized) g_motionTimeline.Press(now);
+        g_motionFocusInitialized = true;
+        g_motionFocusArea = currentFocus;
+    }
     g_selectedFilteredIndex = g_spotlightState.FocusedResultIndex();
     if (g_spotlightFlowProbe.active
         && g_selectedFilteredIndex >= 0
@@ -8493,6 +8683,7 @@ void ApplySpotlightInteractionState(bool scrollFocusedResult)
     if (g_searchInputActive) UpdateImeWindowPosition(g_hwnd);
     g_searchAccessibility.NotifyFocusChanged();
     RequestSearchRepaint(g_hwnd, false);
+    ApplyMotionFrame();
 }
 
 bool EnterSpotlightResults()
@@ -10397,6 +10588,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         RequestSearchRepaint(hwnd, true);
         return 0;
     case WM_TIMER:
+        if (wParam == MotionTimerId)
+        {
+            ApplyMotionFrame();
+            return 0;
+        }
         if (wParam == OrganizationFeedbackTimerId)
         {
             const auto now = GetTickCount64();
@@ -10528,7 +10724,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                     ClearAllSelection();
                     g_pressedFilteredIndex = hit.itemIndex;
                     g_mouseDown = true;
+                    g_motionTimeline.Press(MotionNowMs());
                     SetCapture(hwnd);
+                    ApplyMotionFrame();
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
                 }

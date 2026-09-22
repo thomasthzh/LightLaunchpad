@@ -586,6 +586,7 @@ public:
         const MaterialFramePlan& plan) = 0;
     virtual FailureReason DrawOverlay(const SceneSnapshot& scene) = 0;
     virtual FailureReason DrawContent(const SceneSnapshot& scene) = 0;
+    virtual FailureReason ApplyMotion(const MotionVisual& motion) = 0;
     virtual FailureReason Commit() = 0;
 };
 
@@ -2127,6 +2128,14 @@ public:
         return result;
     }
 
+    FailureReason ApplyMotion(const MotionVisual& motion) override
+    {
+        if (!rootVisual_.Get()) return FailureReason::CompositionUnavailable;
+        const HRESULT offsetResult = rootVisual_.Get()->SetOffsetY(
+            std::clamp(motion.offsetY, -64.0f, 64.0f));
+        return RequiredResourceResult(offsetResult);
+    }
+
     FailureReason Commit() override
     {
 #if defined(LLP_MATERIAL_TESTING)
@@ -2738,6 +2747,22 @@ public:
         return false;
     }
 
+    bool ApplyMotion(DesktopDuplicationBackend& backend, MotionVisual motion)
+    {
+        if (!capturing_ || diagnostics_.state != LifecycleState::Live) return false;
+        const std::int64_t started = backend.Counter();
+        FailureReason failure = backend.ApplyMotion(motion);
+        if (failure == FailureReason::None) failure = backend.Commit();
+        if (failure != FailureReason::None)
+        {
+            EnterFallback(backend, failure);
+            return false;
+        }
+        ++diagnostics_.presentedFrames;
+        RecordPresentedFrame(backend, started);
+        return true;
+    }
+
     void Hide(CaptureBackend& backend)
     {
         diagnostics_.state = LifecycleState::Stopping;
@@ -3004,6 +3029,16 @@ public:
         workCondition_.notify_one();
     }
 
+    void SetMotion(MotionVisual motion)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pendingMotion_ = motion;
+            motionRequested_ = true;
+        }
+        workCondition_.notify_one();
+    }
+
     void Rebuild(ShowRequest request)
     {
         RestartRendererThreadIfNeeded();
@@ -3030,6 +3065,7 @@ public:
             showRequested_ = false;
             rebuildRequested_ = false;
             pendingScene_.reset();
+            motionRequested_ = false;
         }
         workCondition_.notify_one();
     }
@@ -3190,7 +3226,7 @@ private:
                 workCondition_.wait(lock, [this]() {
                     return shutdown_ || showRequested_ || hideRequested_ || rebuildRequested_
                         || freezeRequested_ || statusRequested_ || evidenceSnapshotRequested_
-                        || evidenceCandidateRequested_ || pendingScene_;
+                        || evidenceCandidateRequested_ || motionRequested_ || pendingScene_;
                 });
             }
             if (shutdown_) break;
@@ -3289,6 +3325,19 @@ private:
                 PublishDiagnostics(lifecycle, backend);
             }
 
+            if (motionRequested_)
+            {
+                const MotionVisual motion = pendingMotion_;
+                motionRequested_ = false;
+                if (lifecycle.IsCapturing())
+                {
+                    lock.unlock();
+                    (void)lifecycle.ApplyMotion(backend, motion);
+                    lock.lock();
+                    PublishDiagnostics(lifecycle, backend);
+                }
+            }
+
             if (evidenceSnapshotRequested_)
             {
                 evidenceSnapshotRequested_ = false;
@@ -3374,6 +3423,7 @@ private:
     bool evidenceSnapshotRequested_ = false;
     bool evidenceCandidateRequested_ = false;
     bool evidencePreparationActive_ = false;
+    bool motionRequested_ = false;
     bool statusRequested_ = false;
     bool developmentStoppingNotificationPending_ = false;
     bool composeLifetimeProbeEntered_ = false;
@@ -3383,6 +3433,7 @@ private:
     std::shared_ptr<const SceneSnapshot> pendingScene_;
     std::shared_ptr<const SceneSnapshot> currentScene_;
     std::shared_ptr<const SceneSnapshot> lastPresentedScene_;
+    MotionVisual pendingMotion_;
     Diagnostics diagnostics_;
 };
 
@@ -3578,6 +3629,12 @@ void MaterialRenderer::Submit(std::shared_ptr<const SceneSnapshot> scene)
 {
     if (!impl_) impl_ = std::make_unique<Impl>();
     impl_->Submit(std::move(scene));
+}
+
+void MaterialRenderer::SetMotion(MotionVisual motion)
+{
+    if (!impl_) impl_ = std::make_unique<Impl>();
+    impl_->SetMotion(motion);
 }
 
 void MaterialRenderer::Rebuild(ShowRequest request)
@@ -4465,6 +4522,16 @@ public:
         return FailureReason::None;
     }
 
+    FailureReason ApplyMotion(const MotionVisual& motion) override
+    {
+        motionOpacityMilli = static_cast<int>(std::lround(
+            std::clamp(motion.opacity, 0.0f, 1.0f) * 1000.0f));
+        motionOffsetY = static_cast<int>(std::lround(motion.offsetY));
+        motionOverlayOpacityMilli = static_cast<int>(std::lround(
+            std::clamp(motion.overlayOpacity, 0.0f, 1.0f) * 1000.0f));
+        return FailureReason::None;
+    }
+
     FailureReason Commit() override
     {
         commands.push_back(FrameCommand::Commit);
@@ -4492,6 +4559,9 @@ public:
     int overlayAtlasOffsetY = 0;
     int contentAtlasOffsetX = 0;
     int contentAtlasOffsetY = 0;
+    int motionOpacityMilli = 1000;
+    int motionOffsetY = 0;
+    int motionOverlayOpacityMilli = 1000;
     int blurPasses = 0;
     int tintPasses = 0;
     int searchOpticalPasses = 0;

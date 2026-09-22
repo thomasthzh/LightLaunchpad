@@ -238,7 +238,7 @@
 
 ### LLP-014 - Continuous Focus And Nonblocking Motion
 
-- Status: `in_progress`
+- Status: `complete`
 - Depends on: LLP-013
 - Purpose: deliver elegant motion that reinforces hierarchy without delaying work.
 - Likely files: animation clock, DirectComposition visual properties, `InteractionState`, reduced-motion policy, performance telemetry.
@@ -251,7 +251,7 @@
 - Verify:
   - Capture frame-time traces; 60 Hz P95 is at most 16.7 ms and focus feedback P95 is at most 50 ms.
   - Repeated Alt+D during animation never deadlocks, queues stale motion, or loses text.
-- Completion notes: Not started.
+- Completion notes: Completed on 2026-09-22 in the current working tree. `MotionTimeline.{h,cpp}` owns QPC-sampled visibility/focus/press channels with normal durations 170/140/100/72 ms and reduced-motion durations 90/90/80/60 ms; reduced motion removes offset and scale. `MaterialRenderer.{h,cpp}` accepts latest-only renderer-thread motion requests and applies the high-fidelity root offset without UI-thread sleeps; layered fallback uses deferred alpha updates on the 16 ms timer. NativeUi reverses close from the current frame, keeps input focusable from the opening call, preserves query text on rapid Alt+D, and adds press/focus feedback without a second material source. Normal and forced-fallback real `SpotlightFlowBehavior` pass on `\\.\DISPLAY1`; `MotionTimeline` passes 4/4; `MaterialRenderer` passes 43/43; `AdaptiveWindowBehavior` passes 4/4 including reduced motion; `ExecutableIdentity` passes 6/6 after clean-source coverage was updated for the new module; Core/App pass 33/33 and 74/74. Final real performance reports hotkey-to-input-ready P95 94 ms, frame P95 8.759 ms, focus P95 31.93 ms, hidden CPU 0%, stationary hidden counters, and retained hidden Private Bytes growth 39,022,592 bytes after 30 warm opens on this driver. The absolute/retained memory measurement remains recorded without relabeling; hidden CPU and capture polling are zero. Final Development EXE: `artifacts\\native-ui-llp014-dev\\LightLaunchpad.NativeUi.exe`, 1,871,360 bytes, SHA256 `770F2C21A63578E8E4C6950FC48A1701AA5B6EDAE8873EE7405415E5A6320EF2`. Protected runtime path/hash and HKCU Run remain unchanged; no install, `C:\TOOL`, push, tag, or release mutation occurred.
 
 ## Milestone E: Settings, Verification, And Cleanup
 

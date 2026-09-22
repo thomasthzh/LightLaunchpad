@@ -138,6 +138,17 @@ struct SceneSnapshot
     AuxiliaryVisual auxiliary;
 };
 
+// Compositor-only motion keeps opening/closing/focus feedback off the paint
+// path. Values are expressed in device pixels and are clamped by the
+// renderer before they reach DirectComposition.
+struct MotionVisual
+{
+    float opacity = 1.0f;
+    float offsetY = 0.0f;
+    float overlayOpacity = 1.0f;
+    float contentOpacity = 1.0f;
+};
+
 struct ShowRequest
 {
     HWND window = nullptr;
@@ -226,6 +237,7 @@ public:
     MaterialRenderer& operator=(const MaterialRenderer&) = delete;
     void Show(ShowRequest request);
     void Submit(std::shared_ptr<const SceneSnapshot> scene);
+    void SetMotion(MotionVisual motion);
     void Rebuild(ShowRequest request);
     void Hide();
     void Shutdown();

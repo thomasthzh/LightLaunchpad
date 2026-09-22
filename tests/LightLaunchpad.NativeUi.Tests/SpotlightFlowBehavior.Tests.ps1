@@ -1035,11 +1035,18 @@ public static class LightLaunchpadSpotlightProbeNative {
             $llpWarmOpenElapsed += [double]$llpWarmTimer.Elapsed.TotalMilliseconds
             if ($llpWarmOpen -lt 30) {
                 [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
-                Wait-LlpPerformanceCondition {
-                    [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
-                    $script:llpPerformanceReady = Get-LlpReadyState
-                    -not [bool]$script:llpPerformanceReady.windowVisible -and [string]$script:llpPerformanceReady.materialState -eq 'hidden'
-                } 5000 "Warm open $llpWarmOpen did not return to Hidden."
+                try {
+                    Wait-LlpPerformanceCondition {
+                        [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+                        $script:llpPerformanceReady = Get-LlpReadyState
+                        -not [bool]$script:llpPerformanceReady.windowVisible -and [string]$script:llpPerformanceReady.materialState -eq 'hidden'
+                    } 5000 "Warm open $llpWarmOpen did not return to Hidden."
+                }
+                catch {
+                    $llpWarmCloseLast = Get-LlpReadyState
+                    Write-Output "DIAGNOSTIC SpotlightWarmClose index=$llpWarmOpen visible=$([bool]$llpWarmCloseLast.windowVisible) focus=$([string]$llpWarmCloseLast.focus) path=$([string]$llpWarmCloseLast.materialPath) state=$([string]$llpWarmCloseLast.materialState) motionActive=$([bool]$llpWarmCloseLast.motionActive) motionTargetVisible=$([bool]$llpWarmCloseLast.motionTargetVisible) motionOpacity=$([double]$llpWarmCloseLast.motionOpacity)"
+                    throw
+                }
                 $llpWarmHiddenPrivateBytes += [uint64]([LightLaunchpadSpotlightProbeNative]::GetProcessPerformance($llpProcess.Handle)[0])
             }
         }
@@ -1108,11 +1115,18 @@ public static class LightLaunchpadSpotlightProbeNative {
         $llpVisibleCpuPercent = Get-LlpCpuPercent $llpVisiblePerformanceBefore $llpVisiblePerformanceAfter $llpVisibleElapsed
 
         [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x0312, [UIntPtr]::new([uint64]0x4C55), [IntPtr]::Zero)
-        Wait-LlpPerformanceCondition {
-            [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
-            $script:llpPerformanceReady = Get-LlpReadyState
-            -not [bool]$script:llpPerformanceReady.windowVisible -and [string]$script:llpPerformanceReady.materialState -eq 'hidden'
-        } 5000 'Performance flow did not enter Hidden for the two-second observation.'
+        try {
+            Wait-LlpPerformanceCondition {
+                [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpWindow, 0x804B, [UIntPtr]::Zero, [IntPtr]::Zero)
+                $script:llpPerformanceReady = Get-LlpReadyState
+                -not [bool]$script:llpPerformanceReady.windowVisible -and [string]$script:llpPerformanceReady.materialState -eq 'hidden'
+            } 5000 'Performance flow did not enter Hidden for the two-second observation.'
+        }
+        catch {
+            $llpPerformanceLast = Get-LlpReadyState
+            Write-Output "DIAGNOSTIC SpotlightPerformanceClose visible=$([bool]$llpPerformanceLast.windowVisible) focus=$([string]$llpPerformanceLast.focus) path=$([string]$llpPerformanceLast.materialPath) state=$([string]$llpPerformanceLast.materialState) motionActive=$([bool]$llpPerformanceLast.motionActive) motionTargetVisible=$([bool]$llpPerformanceLast.motionTargetVisible) motionOpacity=$([double]$llpPerformanceLast.motionOpacity)"
+            throw
+        }
         $llpHiddenPresentedBefore = [uint64]$llpPerformanceReady.materialPresentedFrames
         $llpHiddenAcquiredBefore = [uint64]$llpPerformanceReady.materialAcquiredFrames
         $llpHiddenPerformanceBefore = [LightLaunchpadSpotlightProbeNative]::GetProcessPerformance($llpProcess.Handle)
@@ -1637,7 +1651,9 @@ public static class LightLaunchpadSpotlightProbeNative {
     Assert-Equal '' $llpValue.Current.Value 'Second Esc did not clear the query.'
     Assert-True ([LightLaunchpadSpotlightProbeNative]::IsWindowVisible($llpWindow)) 'Clearing the query closed Spotlight too early.'
     Send-LlpKey $llpWindow 0x1B
-    Assert-True (-not [LightLaunchpadSpotlightProbeNative]::IsWindowVisible($llpWindow)) 'Third Esc did not close empty Spotlight.'
+    Wait-LlpCondition {
+        -not [LightLaunchpadSpotlightProbeNative]::IsWindowVisible($llpWindow)
+    } 3000 'Third Esc did not close empty Spotlight after the close motion completed.'
 
     Show-LlpWithConfiguredHotkey $llpWindow
     Send-LlpText $llpWindow 'Flow'
@@ -1708,7 +1724,9 @@ public static class LightLaunchpadSpotlightProbeNative {
     Send-LlpKey $llpWindow 0x09
     Send-LlpKey $llpWindow 0x09
     Send-LlpKey $llpWindow 0x0D
-    Assert-True (-not [LightLaunchpadSpotlightProbeNative]::IsWindowVisible($llpWindow)) 'Enter on the auxiliary control did not hide Spotlight.'
+    Wait-LlpCondition {
+        -not [LightLaunchpadSpotlightProbeNative]::IsWindowVisible($llpWindow)
+    } 3000 'Enter on the auxiliary control did not hide Spotlight after the close motion completed.'
     $llpSettingsWindow = [IntPtr]::Zero
     Wait-LlpCondition { $script:llpSettingsWindow = [LightLaunchpadSpotlightProbeNative]::FindOtherVisibleWindowForProcess([uint32]$llpProcess.Id, $llpWindow); $script:llpSettingsWindow -ne [IntPtr]::Zero } 5000 'Enter on the auxiliary control did not open Settings.'
     [void][LightLaunchpadSpotlightProbeNative]::SendMessage($llpSettingsWindow, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)

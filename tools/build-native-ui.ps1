@@ -170,6 +170,7 @@ try {
         src\LightLaunchpad.NativeUi\Catalog.cpp `
         src\LightLaunchpad.NativeUi\InteractionState.cpp `
         src\LightLaunchpad.NativeUi\MaterialRenderer.cpp `
+        src\LightLaunchpad.NativeUi\MotionTimeline.cpp `
         src\LightLaunchpad.NativeUi\OrganizationState.cpp `
         src\LightLaunchpad.NativeUi\Persistence.cpp `
         src\LightLaunchpad.NativeUi\SceneGeometry.cpp `
