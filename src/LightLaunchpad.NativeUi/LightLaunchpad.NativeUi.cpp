@@ -16,7 +16,10 @@
 #include "LightLaunchpad.BuildIdentity.generated.h"
 #include "LightLaunchpad.Version.h"
 #include "AdaptiveEnvironment.h"
+#include "BackdropBlur.h"
 #include "Catalog.h"
+#include "EverythingBridge.h"
+#include "HistoryPersistence.h"
 #include "InteractionState.h"
 #include "MaterialRenderer.h"
 #include "MotionTimeline.h"
@@ -26,9 +29,11 @@
 #include "SearchAccessibility.h"
 #include "SearchIndex.h"
 #include "ShellBroker.h"
+#include "SpotlightAlpha.h"
 #include "TextInput.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -38,8 +43,9 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
-#include <thread>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -109,6 +115,8 @@ constexpr UINT WmAdaptiveSnapshot = WM_APP + 75;
 constexpr UINT WmMaterialRendererStatus = WM_APP + 76;
 constexpr UINT WmMaterialProbeControl = WM_APP + 77;
 constexpr UINT WmDesktopSwitch = WM_APP + 78;
+constexpr UINT WmCloseSettingsAfterApply = WM_APP + 79;
+constexpr UINT WmEverythingResults = WM_APP + 80;
 constexpr wchar_t MaterialProbeProperty[] = L"LightLaunchpad.MaterialProbe";
 constexpr wchar_t WindowClassName[] = LLP_WINDOW_CLASS_NAME_WIDE;
 constexpr wchar_t SettingsWindowClassName[] = L"LightLaunchpadNativeSettingsWindow";
@@ -189,8 +197,31 @@ enum class SettingsControlId : int
     SpotlightSizeLabel = 3025,
     AppSpacingLabel = 3026,
     WheelSensitivityLabel = 3027,
-    DiagnosticsLabel = 3028
-    ,SpotlightSeparator = 3029
+    DiagnosticsLabel = 3028,
+    SpotlightSeparator = 3029,
+    Category = 3030,
+    Status = 3031,
+    Browse = 3032,
+    ShowRecentAndFavorites = 3033,
+    TrackLaunchHistory = 3034,
+    ReduceMotion = 3035,
+    ClearHistory = 3036,
+    CategoryAccessibilityLabel = 3037,
+    WidthAccessibilityLabel = 3038,
+    HeightAccessibilityLabel = 3039,
+    EnableEverythingSearch = 3040,
+    GlassPresetLabel = 3041,
+    GlassPreset = 3042,
+    GlassBlurLabel = 3043,
+    GlassBlur = 3044,
+    GlassTintLabel = 3045,
+    GlassTint = 3046,
+    GlassRefractionLabel = 3047,
+    GlassRefraction = 3048,
+    GlassRimLabel = 3049,
+    GlassRim = 3050,
+    MouseBiasLabel = 3051,
+    MouseBias = 3052
 };
 
 int ControlId(SettingsControlId id)
@@ -202,17 +233,27 @@ struct Settings
 {
     std::wstring launchpadFolder;
     std::wstring hotkey = L"Alt+D";
-    std::wstring displayMode = L"Launchpad";
+    std::wstring displayMode = L"Spotlight";
     std::wstring language = L"English";
-    int spotlightWidth = 980;
-    int spotlightHeight = 720;
+    int spotlightWidth = 740;
+    int spotlightHeight = 460;
     int iconSize = 56;
-    int appSpacing = 8;
+    int appSpacing = 10;
     double wheelSensitivity = 1.0;
     bool startWithWindows = false;
     bool resetSearchOnOpen = true;
     bool showRecentAndFavorites = true;
     bool trackLaunchHistory = true;
+    bool reduceMotion = false;
+    bool initialImportCompleted = false;
+    bool enableEverythingSearch = true;
+    std::wstring glassPreset = L"Crystal";
+    int glassBlurPercent = 6;
+    int glassTintPercent = 2;
+    int glassRefractionPx = 30;
+    int glassRimPercent = 95;
+    int spotlightMouseBiasPercent = 72;
+    int lastSettingsPage = 0;
 };
 
 struct Region
@@ -234,6 +275,7 @@ struct LaunchItem
     std::vector<std::wstring> aliases;
     std::wstring subtitle;
     bool iconRequestPending = false;
+    bool isExternalFile = false;
 };
 
 struct HitTile
@@ -318,6 +360,8 @@ struct SpotlightLayerBuffer
     HGDIOBJ oldFullBitmap = nullptr;
     void* baseBits = nullptr;
     void* fullBits = nullptr;
+    // Legacy name: fallback ink is cleared; the composition input underlay
+    // still has alpha 1 inside the rounded hit region (not an all-zero DIB).
     bool directPixelsTransparent = false;
 };
 
@@ -334,6 +378,13 @@ struct SpotlightBackdropCapture
 HINSTANCE g_instance = nullptr;
 HWND g_hwnd = nullptr;
 HWND g_settingsHwnd = nullptr;
+bool g_settingsUpdating = false;
+struct SettingsUpdateGuard
+{
+    bool previous = g_settingsUpdating;
+    SettingsUpdateGuard() { g_settingsUpdating = true; }
+    ~SettingsUpdateGuard() { g_settingsUpdating = previous; }
+};
 Settings g_settings;
 std::vector<Region> g_regions;
 std::vector<LaunchItem> g_items;
@@ -355,6 +406,7 @@ llp::adaptive::Policy g_adaptivePolicy;
 llp::material::MaterialRenderer g_materialRenderer;
 llp::motion::MotionTimeline g_motionTimeline;
 llp::motion::Frame g_motionFrame;
+llp::material::LightingVisual g_spotlightLighting;
 bool g_motionFocusInitialized = false;
 llp::interaction::FocusArea g_motionFocusArea = llp::interaction::FocusArea::Search;
 std::uint64_t g_materialSceneGeneration = 0;
@@ -422,6 +474,15 @@ UINT g_taskbarCreatedMessage = 0;
 UINT g_materialEvidenceFreezeMessage = 0;
 HWINEVENTHOOK g_desktopSwitchHook = nullptr;
 bool g_materialEvidenceActive = false;
+// FinishHideNativeUi() performs the first host cleanup before the renderer
+// thread has necessarily finished releasing GPU/COM owners.  A second trim is
+// requested after the renderer publishes Hidden and releases its owned graph.
+// Hidden is not a fence for the worker's later CoUninitialize or GPU retirement.
+bool g_hiddenFootprintNeedsPostRendererTrim = false;
+std::uint64_t g_hiddenHeapOptimizeCalls = 0;
+std::uint64_t g_hiddenHeapOptimizeSuccesses = 0;
+double g_hiddenHeapOptimizeLastMs = 0;
+double g_hiddenHeapOptimizeMaxMs = 0;
 bool g_trayIconAdded = false;
 bool g_hotkeyRegistered = false;
 int g_activeHotkeyId = HotkeyId;
@@ -453,6 +514,7 @@ std::wstring g_layoutQuarantinePath;
 std::wstring g_searchHistoryStatus = L"Search history has not loaded yet.";
 bool g_searchHistoryWritable = true;
 bool g_searchHistoryLoaded = false;
+llp::search::HistoryPersistence g_historyPersistence;
 llp::shell::ShellBroker g_shellBroker;
 llp::search::Index g_searchIndex;
 llp::search::History g_searchHistory;
@@ -496,6 +558,17 @@ struct ShellImportProbeState
     std::wstring apartment;
 };
 
+struct SpotlightOpenTiming
+{
+    double catalogLayoutMs = 0;
+    double backdropMs = 0;
+    double sceneSnapshotMs = 0;
+    double directPaintMs = 0;
+    double rendererDispatchMs = 0;
+    double focusMs = 0;
+    double totalMs = 0;
+};
+
 struct SpotlightFlowProbeState
 {
     bool active = false;
@@ -528,6 +601,9 @@ struct SpotlightFlowProbeState
     std::uint64_t latestHideRaceActivation = 0;
     std::uint64_t latestHideRaceGeneration = 0;
     bool composeHideLifetimeInjected = false;
+    std::uint64_t hiddenIconResults = 0;
+    SpotlightOpenTiming lastOpenTiming;
+    std::uint64_t openTimingCount = 0;
 };
 
 struct LaunchpadFlowProbeState
@@ -659,6 +735,8 @@ bool SaveLayout();
 void RequestCatalogRefresh(DWORD testDelayMilliseconds = 0);
 void QueueItemIcon(LaunchItem& item);
 void ShowSettingsWindow();
+void LayoutSettingsWindow(HWND hwnd);
+void AppendStartupLog(const wchar_t* stage, bool succeeded, const std::wstring& detail);
 void ShowWorkspaceContextMenu(POINT point);
 void RebuildFiltered();
 void DestroyDirectRenderer();
@@ -702,11 +780,12 @@ void FinishHideNativeUi();
 void StartMotionTimer();
 void StopMotionTimer();
 void RebuildVisibleMaterialRenderer();
-bool WriteSpotlightFlowReadyState();
+bool WriteSpotlightFlowReadyState(bool readOnlySnapshot = false);
 bool WriteMaterialProbeState(HWND hwnd);
 bool WriteMaterialProbeState(MaterialProbeHostState& state);
 bool CommandLineHasArgument(const wchar_t* expected);
 HMONITOR SpotlightTargetMonitor();
+bool ResolveRequestedTestMonitor(HMONITOR& monitor, MONITORINFOEXW* info);
 
 template <typename T>
 void SafeRelease(T*& value)
@@ -1184,6 +1263,16 @@ void LoadSettings()
     loaded.resetSearchOnOpen = readBool("ResetSearchOnOpen", loaded.resetSearchOnOpen);
     loaded.showRecentAndFavorites = readBool("ShowRecentAndFavorites", loaded.showRecentAndFavorites);
     loaded.trackLaunchHistory = readBool("TrackLaunchHistory", loaded.trackLaunchHistory);
+    loaded.reduceMotion = readBool("ReduceMotion", loaded.reduceMotion);
+    loaded.initialImportCompleted = readBool("InitialImportCompleted", loaded.initialImportCompleted);
+    loaded.enableEverythingSearch = readBool("EnableEverythingSearch", loaded.enableEverythingSearch);
+    loaded.glassPreset = readString("GlassPreset", loaded.glassPreset);
+    loaded.glassBlurPercent = std::clamp(readInt("GlassBlurPercent", loaded.glassBlurPercent), 0, 100);
+    loaded.glassTintPercent = std::clamp(readInt("GlassTintPercent", loaded.glassTintPercent), 0, 60);
+    loaded.glassRefractionPx = std::clamp(readInt("GlassRefractionPx", loaded.glassRefractionPx), 0, 45);
+    loaded.glassRimPercent = std::clamp(readInt("GlassRimPercent", loaded.glassRimPercent), 0, 100);
+    loaded.spotlightMouseBiasPercent = std::clamp(readInt("SpotlightMouseBiasPercent", loaded.spotlightMouseBiasPercent), 0, 100);
+    loaded.lastSettingsPage = std::clamp(readInt("LastSettingsPage", 0), 0, 4);
     g_settings = loaded;
     g_searchHistory.SetTrackingEnabled(g_settings.trackLaunchHistory);
 }
@@ -1214,7 +1303,17 @@ bool SaveSettings(const Settings& settings)
         { "WheelSensitivity", settings.wheelSensitivity },
         { "ResetSearchOnOpen", settings.resetSearchOnOpen },
         { "ShowRecentAndFavorites", settings.showRecentAndFavorites },
-        { "TrackLaunchHistory", settings.trackLaunchHistory }
+        { "TrackLaunchHistory", settings.trackLaunchHistory },
+        { "ReduceMotion", settings.reduceMotion },
+        { "InitialImportCompleted", settings.initialImportCompleted },
+        { "EnableEverythingSearch", settings.enableEverythingSearch },
+        { "GlassPreset", llp::persistence::WideToUtf8(settings.glassPreset) },
+        { "GlassBlurPercent", settings.glassBlurPercent },
+        { "GlassTintPercent", settings.glassTintPercent },
+        { "GlassRefractionPx", settings.glassRefractionPx },
+        { "GlassRimPercent", settings.glassRimPercent },
+        { "SpotlightMouseBiasPercent", settings.spotlightMouseBiasPercent },
+        { "LastSettingsPage", settings.lastSettingsPage }
     };
     std::wstring error;
     const bool saved = llp::persistence::WriteJsonAtomicWithBackup(GetSettingsPath(), document, error);
@@ -1469,7 +1568,10 @@ bool SaveLayout()
             { "Order", item.order }
         });
     };
-    for (const auto& item : g_items) appendItem(item);
+    for (const auto& item : g_items)
+    {
+        if (!item.isExternalFile) appendItem(item);
+    }
     for (const auto& item : g_missingLayoutItems)
     {
         const bool alreadyVisible = std::any_of(g_items.begin(), g_items.end(), [&](const LaunchItem& visible) {
@@ -1491,21 +1593,21 @@ bool SaveLayout()
 
 bool SaveSearchHistory()
 {
-    if (!g_searchHistoryWritable)
+    if (!g_searchHistoryWritable && !g_historyPersistence.PendingClearRequestId())
     {
         g_searchHistoryStatus = L"Search history is read-only because its file could not be loaded safely; the existing file was preserved.";
         return false;
     }
-    if (!g_shellBroker.IsRunning())
-    {
-        g_searchHistoryStatus = L"Shell broker is not running; search history was not queued.";
-        return false;
-    }
-    const auto requestId = g_shellBroker.RequestPersistJson(GetSearchHistoryPath(), g_searchHistory.SerializeUtf8());
-    g_searchHistoryStatus = requestId != 0
-        ? L"Search history save queued on Shell STA."
-        : L"Search history save queue failed.";
-    return requestId != 0;
+    return g_historyPersistence.Save(g_searchHistory, g_shellBroker, GetSearchHistoryPath(), g_searchHistoryStatus);
+}
+
+void CompleteHistoryClear(const llp::shell::Result& result)
+{
+    bool deferredWriteFailed = false;
+    g_historyPersistence.CompleteClear(result, g_searchHistory, g_shellBroker,
+        GetSearchHistoryPath(), g_searchHistoryStatus, &deferredWriteFailed);
+    if (deferredWriteFailed && !g_shellBroker.IsRunning())
+        AppendStartupLog(L"history-clear-shutdown", false, g_searchHistoryStatus);
 }
 
 uint64_t CurrentUnixMilliseconds()
@@ -1882,8 +1984,19 @@ void TrimHiddenFootprint()
     ReleaseSpotlightBackdrop();
     DestroyDirectRenderer();
     CoFreeUnusedLibrariesEx(0, 0);
-    HeapCompact(GetProcessHeap(), 0);
-    SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
+    // Win8.1+ documented process-wide LFH cache decommit. MinGW lacks the
+    // HeapOptimizeResources enum/record; the SDK ABI is two DWORDs, version1.
+    // Unlike walking DLL-owned heaps, the null-handle operation is managed
+    // safely by Windows. Failure must not prevent hiding or later reopening.
+    struct HeapOptimizeInformation { DWORD version; DWORD flags; } info = {1, 0};
+    const double started = MotionNowMs();
+    const bool optimized = HeapSetInformation(nullptr, static_cast<HEAP_INFORMATION_CLASS>(3), &info, sizeof(info)) != FALSE;
+    ++g_hiddenHeapOptimizeCalls;
+    if (optimized) ++g_hiddenHeapOptimizeSuccesses;
+    else HeapCompact(GetProcessHeap(), 0);
+    // API plus failure fallback only; this is not the duration of full teardown.
+    g_hiddenHeapOptimizeLastMs = std::max(0.0, MotionNowMs()-started);
+    g_hiddenHeapOptimizeMaxMs = std::max(g_hiddenHeapOptimizeMaxMs, g_hiddenHeapOptimizeLastMs);
 }
 
 void MoveRegionToTarget(const std::wstring& sourceRegionId, const RegionDropTarget& target)
@@ -2458,6 +2571,9 @@ void ApplyCatalogSnapshot(
                 : L"Search history is read-only; its existing file was preserved.");
     }
     g_searchHistory.SetTrackingEnabled(g_settings.trackLaunchHistory);
+    if (g_settingsHwnd)
+        EnableWindow(GetDlgItem(g_settingsHwnd, ControlId(SettingsControlId::ClearHistory)),
+            g_searchHistoryLoaded && g_searchHistoryWritable && !g_historyPersistence.PendingClearRequestId());
     g_catalogStatus = snapshot.error.empty()
         ? L"Catalog snapshot published in " + std::to_wstring(snapshot.loadMilliseconds) + L" ms."
         : L"Catalog snapshot published with diagnostics: " + snapshot.error;
@@ -2557,6 +2673,60 @@ void RebuildSearchIndex()
     g_searchIndex.Rebuild(items, g_searchHistory);
 }
 
+llp::everything::EverythingBridge g_everythingBridge;
+std::mutex g_everythingMutex;
+llp::everything::QueryResponse g_everythingPendingResponse;
+bool g_hasEverythingPendingResponse = false;
+std::uint64_t g_everythingQueryGeneration = 0;
+std::vector<llp::everything::FileResult> g_everythingActiveResults;
+std::wstring g_everythingActiveQuery;
+std::wstring g_everythingDispatchedQuery;
+bool g_everythingDetected = false;
+
+void StripExternalEverythingItems()
+{
+    auto it = std::remove_if(g_items.begin(), g_items.end(), [](LaunchItem& item) {
+        if (!item.isExternalFile) return false;
+        if (item.icon)
+        {
+            DestroyIcon(item.icon);
+            item.icon = nullptr;
+        }
+        return true;
+    });
+    g_items.erase(it, g_items.end());
+}
+
+void HandleEverythingResults()
+{
+    llp::everything::QueryResponse response;
+    {
+        std::lock_guard<std::mutex> lock(g_everythingMutex);
+        if (!g_hasEverythingPendingResponse) return;
+        response = std::move(g_everythingPendingResponse);
+        g_hasEverythingPendingResponse = false;
+    }
+    g_everythingDetected = response.everythingAvailable;
+    if (!IsSpotlightMode() || response.generation != g_everythingQueryGeneration || response.originalQuery != SearchCommittedText())
+    {
+        return;
+    }
+    g_everythingActiveQuery = response.originalQuery;
+    g_everythingActiveResults = std::move(response.items);
+    RebuildFiltered();
+    if (g_hwnd && IsWindowVisible(g_hwnd))
+    {
+        for (const int index : g_filtered)
+        {
+            if (index >= 0 && index < static_cast<int>(g_items.size()) && g_items[index].isExternalFile)
+            {
+                QueueItemIcon(g_items[index]);
+            }
+        }
+        RequestSearchRepaint(g_hwnd, true);
+    }
+}
+
 void RebuildFiltered()
 {
     std::wstring focusedStableId;
@@ -2565,25 +2735,31 @@ void RebuildFiltered()
         const int itemIndex = g_filtered[g_selectedFilteredIndex];
         if (itemIndex >= 0 && itemIndex < static_cast<int>(g_items.size())) focusedStableId = g_items[itemIndex].stableId;
     }
+    StripExternalEverythingItems();
     g_filtered.clear();
-    g_filtered.reserve(g_items.size());
+    g_filtered.reserve(g_items.size() + 12);
     g_filterScores.assign(g_items.size(), 0);
     const std::wstring query = SearchCommittedText();
+    const auto everythingParsed = IsSpotlightMode()
+        ? llp::everything::ParseSpotlightQuery(query)
+        : llp::everything::ParsedQuery{};
+
     if (query.empty() && !IsSpotlightMode())
     {
         for (int itemIndex = 0; itemIndex < static_cast<int>(g_items.size()); ++itemIndex) g_filtered.push_back(itemIndex);
     }
-    else
+    else if (!IsSpotlightMode() || everythingParsed.mode != llp::everything::QueryMode::FilesOnly)
     {
         llp::search::QueryOptions options;
         options.spotlight = IsSpotlightMode();
         options.showRecentAndFavorites = g_settings.showRecentAndFavorites;
         options.emptyLimit = 10;
-        const auto results = g_searchIndex.Query(query, options);
+        const std::wstring appQuery = IsSpotlightMode() ? everythingParsed.appQuery : query;
+        const auto results = g_searchIndex.Query(appQuery, options);
         for (const auto& result : results)
         {
             auto found = std::find_if(g_items.begin(), g_items.end(), [&](const LaunchItem& item) {
-                return item.stableId == result.stableId;
+                return !item.isExternalFile && item.stableId == result.stableId;
             });
             if (found == g_items.end()) continue;
             const int itemIndex = static_cast<int>(found - g_items.begin());
@@ -2594,6 +2770,43 @@ void RebuildFiltered()
 
     if (IsSpotlightMode())
     {
+        if (!g_settings.enableEverythingSearch || everythingParsed.mode == llp::everything::QueryMode::None)
+        {
+            g_everythingBridge.CancelPending();
+            g_everythingDispatchedQuery.clear();
+            g_everythingActiveQuery.clear();
+            g_everythingActiveResults.clear();
+        }
+        else
+        {
+            if (g_everythingDispatchedQuery != query)
+            {
+                g_everythingDispatchedQuery = query;
+                const std::uint32_t maxResults = everythingParsed.mode == llp::everything::QueryMode::FilesOnly ? 12u : 8u;
+                g_everythingBridge.RequestQuery(++g_everythingQueryGeneration, query, maxResults);
+            }
+            if (g_everythingActiveQuery == query && !g_everythingActiveResults.empty())
+            {
+                for (const auto& file : g_everythingActiveResults)
+                {
+                    const bool duplicate = std::any_of(g_items.begin(), g_items.end(), [&](const LaunchItem& existing) {
+                        return SamePath(existing.sourcePath, file.fullPath);
+                    });
+                    if (duplicate) continue;
+                    LaunchItem external;
+                    external.sourcePath = file.fullPath;
+                    external.displayName = file.name.empty() ? file.fullPath : file.name;
+                    external.subtitle = file.directory;
+                    external.stableId = L"everything:" + file.fullPath;
+                    external.isExternalFile = true;
+                    const int newIndex = static_cast<int>(g_items.size());
+                    g_items.push_back(std::move(external));
+                    g_filterScores.push_back(1);
+                    g_filtered.push_back(newIndex);
+                }
+            }
+        }
+
         std::vector<std::wstring> stableIds;
         stableIds.reserve(g_filtered.size());
         for (const int itemIndex : g_filtered)
@@ -2606,6 +2819,11 @@ void RebuildFiltered()
         g_selectedFilteredIndex = g_spotlightState.FocusedResultIndex();
         return;
     }
+
+    g_everythingBridge.CancelPending();
+    g_everythingDispatchedQuery.clear();
+    g_everythingActiveQuery.clear();
+    g_everythingActiveResults.clear();
 
     g_selectedFilteredIndex = -1;
     if (!focusedStableId.empty())
@@ -2880,12 +3098,19 @@ bool WriteMaterialProbeState(MaterialProbeHostState& state)
         { "output", llp::persistence::WideToUtf8(diagnostics.output) },
         { "dpi", diagnostics.dpi },
         { "acquiredFrames", diagnostics.acquiredFrames },
+        { "desktopSourceWidth", diagnostics.desktopSourceWidth },
+        { "desktopHashScope", "copied-native-source-rectangle" },
+        { "desktopSourceHeight", diagnostics.desktopSourceHeight },
+        { "desktopCopy", { diagnostics.desktopCopy.left, diagnostics.desktopCopy.top,
+            diagnostics.desktopCopy.right, diagnostics.desktopCopy.bottom } },
         { "presentedFrames", diagnostics.presentedFrames },
         { "droppedScenes", diagnostics.droppedScenes },
         { "deviceRebuilds", diagnostics.deviceRebuilds },
         { "lastFrameIdentity", diagnostics.lastFrameIdentity },
         { "firstFrameMs", diagnostics.firstFrameMs },
         { "frameP95Ms", diagnostics.frameP95Ms },
+        { "workerCleanupComplete", diagnostics.workerCleanupComplete },
+        { "workerCleanupActivation", diagnostics.workerCleanupActivation },
         { "evidenceFrozen", diagnostics.evidenceFrozen },
         { "evidenceBaselineCaptured", diagnostics.evidenceBaselineCaptured },
         { "evidenceBaselineDesktopHash", MaterialEvidenceHash(diagnostics.evidenceBaselineDesktopHash) },
@@ -3149,6 +3374,7 @@ void ApplyAdaptiveTestOverrides()
         g_adaptiveEnvironment.systemHighlightText = { 0, 0, 0 };
     }
     g_adaptivePolicy = llp::adaptive::ResolvePolicy(g_adaptiveEnvironment);
+    g_adaptivePolicy.reducedMotion = g_adaptivePolicy.reducedMotion || g_settings.reduceMotion;
 }
 
 std::string ReadSmallFileUtf8(const std::wstring& path)
@@ -3365,7 +3591,7 @@ std::string BuildLaunchpadFlowProbeJson()
     return document.dump(2) + "\n";
 }
 
-bool WriteSpotlightFlowReadyState()
+bool WriteSpotlightFlowReadyState(bool readOnlySnapshot)
 {
     if (!g_spotlightFlowProbe.active || g_spotlightFlowProbe.readyPath.empty()) return false;
     const auto material = g_materialRenderer.SnapshotDiagnostics();
@@ -3407,6 +3633,17 @@ bool WriteSpotlightFlowReadyState()
             { "bottom", rect.bottom }
         };
     };
+    const auto jsonColor = [](const llp::adaptive::Color& color) {
+        return Json{
+            { "red", color.red }, { "green", color.green }, { "blue", color.blue }
+        };
+    };
+    const auto jsonInk = [&jsonColor](const llp::material::InkStyle& ink) {
+        return Json{
+            { "foreground", jsonColor(ink.foreground) },
+            { "haloEnabled", ink.haloEnabled }
+        };
+    };
     const char* monitorSource = g_lastMonitorSource == llp::adaptive::MonitorSource::Foreground
         ? "foreground"
         : (g_lastMonitorSource == llp::adaptive::MonitorSource::Cursor ? "cursor" : "primary");
@@ -3415,9 +3652,14 @@ bool WriteSpotlightFlowReadyState()
     if (foregroundWindow) GetWindowThreadProcessId(foregroundWindow, &foregroundProcessId);
     MONITORINFOEXW monitorInfo = {};
     monitorInfo.cbSize = sizeof(monitorInfo);
-    const HMONITOR windowMonitor = g_testMonitorDevice.empty()
-        ? MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST)
-        : SpotlightTargetMonitor();
+    HMONITOR windowMonitor = nullptr;
+    if (g_testMonitorDevice.empty())
+        windowMonitor = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+    else if (readOnlySnapshot)
+    {
+        if (!ResolveRequestedTestMonitor(windowMonitor, &monitorInfo)) return false;
+    }
+    else windowMonitor = SpotlightTargetMonitor();
     if (windowMonitor) GetMonitorInfoW(windowMonitor, &monitorInfo);
     Json firstHit = nullptr;
     if (!g_hits.empty())
@@ -3460,7 +3702,16 @@ bool WriteSpotlightFlowReadyState()
     }
     Json fallbackItemIconTops = g_spotlightFallbackPaintEvidence.itemIconTops;
     Json fallbackItemTitleTops = g_spotlightFallbackPaintEvidence.itemTitleTops;
+    Json committedCaptionInk = Json::array();
+    for (const auto& caption : material.contentPresentation.captions)
+    {
+        committedCaptionInk.push_back(Json{
+            { "bounds", jsonRect(caption.bounds) },
+            { "ink", jsonInk(caption.ink) }
+        });
+    }
     const Json ready = {
+        { "readySnapshotProtocolVersion", 1 },
         { "itemCount", g_items.size() },
         { "filteredCount", g_filtered.size() },
         { "displayMode", llp::persistence::WideToUtf8(g_settings.displayMode) },
@@ -3469,11 +3720,32 @@ bool WriteSpotlightFlowReadyState()
         { "searchValue", llp::persistence::WideToUtf8(SearchCommittedText()) },
         { "searchComposing", g_searchInput.IsComposing() },
         { "windowVisible", g_hwnd && IsWindowVisible(g_hwnd) },
+        { "directRendererResident", g_d2dFactory || g_dwriteFactory || g_d2dDcRenderTarget },
+        { "spotlightLayerResident", g_spotlightLayerBuffer.baseBits || g_spotlightLayerBuffer.fullBits },
+        { "spotlightBackdropResident", g_spotlightBackdrop.bits != nullptr },
+        { "hiddenHeapOptimizeCalls", g_hiddenHeapOptimizeCalls },
+        { "hiddenHeapOptimizeSuccesses", g_hiddenHeapOptimizeSuccesses },
+        { "hiddenHeapOptimizeLastMs", g_hiddenHeapOptimizeLastMs },
+        { "hiddenHeapOptimizeMaxMs", g_hiddenHeapOptimizeMaxMs },
+        { "residentIconCount", std::count_if(g_items.begin(), g_items.end(), [](const LaunchItem& item) { return item.icon != nullptr; }) },
+        { "pendingIconCount", std::count_if(g_items.begin(), g_items.end(), [](const LaunchItem& item) { return item.iconRequestPending; }) },
+        { "hiddenIconResults", g_spotlightFlowProbe.hiddenIconResults },
         { "motionActive", g_motionFrame.active },
         { "motionTargetVisible", g_motionFrame.targetVisible },
         { "motionOpacity", g_motionFrame.opacity },
         { "motionOffsetYDip", g_motionFrame.offsetYDip },
+        { "motionOpticalPress", g_motionFrame.opticalPress },
         { "hotkeyInputReadyMs", g_spotlightFlowProbe.inputReadyMilliseconds },
+        { "openTimingCount", g_spotlightFlowProbe.openTimingCount },
+        { "lastOpenTiming", Json{
+            { "catalogLayoutMs", g_spotlightFlowProbe.lastOpenTiming.catalogLayoutMs },
+            { "backdropMs", g_spotlightFlowProbe.lastOpenTiming.backdropMs },
+            { "sceneSnapshotMs", g_spotlightFlowProbe.lastOpenTiming.sceneSnapshotMs },
+            { "directPaintMs", g_spotlightFlowProbe.lastOpenTiming.directPaintMs },
+            { "rendererDispatchMs", g_spotlightFlowProbe.lastOpenTiming.rendererDispatchMs },
+            { "focusMs", g_spotlightFlowProbe.lastOpenTiming.focusMs },
+            { "totalMs", g_spotlightFlowProbe.lastOpenTiming.totalMs }
+        } },
         { "foregroundWindow", static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(foregroundWindow)) },
         { "foregroundProcessId", foregroundProcessId },
         { "focusedResultPath", llp::persistence::WideToUtf8(focusedResultPath) },
@@ -3495,12 +3767,19 @@ bool WriteSpotlightFlowReadyState()
         { "materialAdapter", llp::persistence::WideToUtf8(material.adapter) },
         { "materialOutput", llp::persistence::WideToUtf8(material.output) },
         { "materialAcquiredFrames", material.acquiredFrames },
+        { "materialDesktopSourceWidth", material.desktopSourceWidth },
+        { "materialDesktopHashScope", "copied-native-source-rectangle" },
+        { "materialDesktopSourceHeight", material.desktopSourceHeight },
+        { "materialDesktopCopy", { material.desktopCopy.left, material.desktopCopy.top,
+            material.desktopCopy.right, material.desktopCopy.bottom } },
         { "materialPresentedFrames", material.presentedFrames },
         { "materialDroppedScenes", material.droppedScenes },
         { "materialDeviceRebuilds", material.deviceRebuilds },
         { "materialLastFrameIdentity", material.lastFrameIdentity },
         { "materialFirstFrameMs", material.firstFrameMs },
         { "materialFrameP95Ms", material.frameP95Ms },
+        { "materialWorkerCleanupComplete", material.workerCleanupComplete },
+        { "materialWorkerCleanupActivation", material.workerCleanupActivation },
         { "materialPath", MaterialRenderPathName(material.path) },
         { "materialFailure", MaterialFailureName(material.failure) },
         { "materialState", MaterialStateName(material.state) },
@@ -3508,6 +3787,7 @@ bool WriteSpotlightFlowReadyState()
         { "materialRequestedSceneGeneration", g_requestedMaterialSceneGeneration },
         { "materialCommittedActivation", material.committedActivation },
         { "materialPresentedSceneGeneration", material.presentedSceneGeneration },
+        { "materialPresentedDesktopFrameIdentity", material.presentedDesktopFrameIdentity },
         { "materialEvidenceBaselineCaptured", material.evidenceBaselineCaptured },
         { "materialEvidenceBaselineDesktopHash", MaterialEvidenceHash(material.evidenceBaselineDesktopHash) },
         { "materialEvidenceBaselineFrameIdentity", material.evidenceBaselineFrameIdentity },
@@ -3543,6 +3823,7 @@ bool WriteSpotlightFlowReadyState()
         { "spotlightFallbackPresentedItemIconTops", fallbackItemIconTops },
         { "spotlightFallbackPresentedItemTitleTops", fallbackItemTitleTops },
         { "materialDirectLayerTransparent", g_spotlightLayerBuffer.directPixelsTransparent },
+        { "materialDirectLayerHitMaskAlpha", g_spotlightLayerBuffer.directPixelsTransparent ? 1 : 0 },
         { "materialTransparentTransitionFailureInjected", g_spotlightDirectTransitionFailureEvidence.injected },
         { "materialTransitionFailureState", MaterialStateName(g_spotlightDirectTransitionFailureEvidence.failureState) },
         { "materialTransitionFailurePath", MaterialRenderPathName(g_spotlightDirectTransitionFailureEvidence.failurePath) },
@@ -3581,6 +3862,59 @@ bool WriteSpotlightFlowReadyState()
         } },
         { "hitCount", g_hits.size() },
         { "firstHit", firstHit },
+        { "contentPresentation", Json{
+            { "source", "committed-backend-style-not-pixel-proof" },
+            { "valid", material.contentPresentation.valid },
+            { "revision", material.contentPresentation.revision },
+            { "sceneGeneration", material.contentPresentation.sceneGeneration },
+            { "desktopFrameIdentity", material.contentPresentation.desktopFrameIdentity },
+            { "luminanceFrameIdentity", material.contentPresentation.luminanceFrameIdentity },
+            { "luminanceValid", material.contentPresentation.luminanceValid },
+            { "search", jsonInk(material.contentPresentation.search) },
+            { "focusRim", jsonInk(material.contentPresentation.focusRim) },
+            { "auxiliaryText", jsonInk(material.contentPresentation.auxiliaryText) },
+            { "auxiliaryRim", jsonInk(material.contentPresentation.auxiliaryRim) },
+            { "auxiliaryBounds", jsonRect(material.contentPresentation.auxiliaryBounds) },
+            { "auxiliaryLabel", llp::persistence::WideToUtf8(material.contentPresentation.auxiliaryLabel) },
+            { "auxiliaryFocused", material.contentPresentation.auxiliaryFocused },
+            { "captions", std::move(committedCaptionInk) }
+        } },
+        { "contentPalette", Json{
+            { "source", "submitted-scene-policy-not-pixel-proof" },
+            { "text", jsonColor(g_adaptivePolicy.text) },
+            { "focus", jsonColor(g_adaptivePolicy.focus) },
+            { "focusText", jsonColor(g_adaptivePolicy.focusText) },
+            { "focusRim", jsonColor(llp::material::ResolveFocusRimColor(g_adaptivePolicy)) }
+        } },
+        { "contentRaster", Json{
+            { "source", "submitted-scene-raster-and-style-not-pixel-proof" },
+            { "iconSizePx", IconSizePx() },
+            { "textHaloRadiusDip", llp::material::TextHaloRadiusDip },
+            { "textHaloRadiusPx", g_adaptivePolicy.solidSurface ? 0.0f :
+                llp::material::TextHaloRadiusDip * std::max<UINT>(1, g_windowDpi) / 96.0f },
+            { "focusRimWidthDip", llp::material::FocusRimWidthDip },
+            { "focusHaloWidthDip", llp::material::FocusHaloWidthDip },
+            { "focusRimWidthPx", llp::material::ResolveFocusRimWidthPx(static_cast<int>(g_windowDpi)) },
+            { "focusHaloWidthPx", llp::material::ResolveFocusHaloWidthPx(static_cast<int>(g_windowDpi)) },
+            { "focusRasterOffsetPx", llp::material::ResolveFocusRasterOffsetPx(static_cast<int>(g_windowDpi)) }
+        } },
+        { "searchPresentation", Json{
+            { "displayText", llp::persistence::WideToUtf8(g_searchInput.DisplayText()) },
+            { "caret", g_searchInput.DisplayCaret() },
+            { "selectionStart", g_searchInput.SelectionStart() },
+            { "selectionEnd", g_searchInput.SelectionEnd() },
+            { "compositionStart", g_searchInput.CompositionStart() },
+            { "compositionEnd", g_searchInput.CompositionEnd() },
+            { "horizontalOffsetPx", g_searchTextOffset },
+            { "active", g_spotlightState.Focus() == llp::interaction::FocusArea::Search },
+            { "composing", g_searchInput.IsComposing() }
+        } },
+        { "auxiliaryPresentation", Json{
+            { "source", "submitted-host-state-not-pixel-proof" },
+            { "bounds", jsonRect(metrics.auxiliary) },
+            { "text", llp::persistence::WideToUtf8(L"...") },
+            { "focused", g_spotlightState.Focus() == llp::interaction::FocusArea::Auxiliary }
+        } },
         { "windowRect", Json{
             { "left", window.left },
             { "top", window.top },
@@ -3819,6 +4153,7 @@ void RefreshAdaptiveEnvironment()
     next.systemHighlight = AdaptiveColor(GetSysColor(COLOR_HIGHLIGHT));
     next.systemHighlightText = AdaptiveColor(GetSysColor(COLOR_HIGHLIGHTTEXT));
 
+    next.animationsEnabled = next.animationsEnabled && !g_settings.reduceMotion;
     const auto nextPolicy = llp::adaptive::ResolvePolicy(next);
     const bool scaleChanged = nextPolicy.textScalePercent != g_adaptivePolicy.textScalePercent;
     g_adaptiveEnvironment = next;
@@ -3868,6 +4203,58 @@ void HandleShellBrokerResult(LPARAM lParam)
             if (result->snapshot)
             {
                 ApplyCatalogSnapshot(*result->snapshot, result->history.get(), result->historyWritable);
+                static bool s_initialImportChecked = false;
+                if (!s_initialImportChecked && !g_settings.initialImportCompleted
+                    && !g_regionUndoProbe.active && !g_spotlightFlowProbe.active
+                    && !g_launchpadFlowProbe.active && !g_catalogBrokerProbe.active)
+                {
+                    s_initialImportChecked = true;
+                    const bool hasLocalApps = std::any_of(g_items.begin(), g_items.end(), [](const LaunchItem& item) {
+                        return !item.isExternalFile;
+                    });
+                    if (!hasLocalApps && g_shellBroker.IsRunning())
+                    {
+                        const auto appData = GetAppDataPath();
+                        const auto programData = GetProgramDataPath();
+                        if (!appData.empty())
+                        {
+                            g_shellBroker.RequestImportTree(JoinPath(appData, L"Microsoft\\Windows\\Start Menu\\Programs"), g_settings.launchpadFolder);
+                        }
+                        if (!programData.empty())
+                        {
+                            g_shellBroker.RequestImportTree(JoinPath(programData, L"Microsoft\\Windows\\Start Menu\\Programs"), g_settings.launchpadFolder);
+                        }
+                        PWSTR desktopRaw = nullptr;
+                        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &desktopRaw)) && desktopRaw)
+                        {
+                            std::vector<std::wstring> desktopShortcuts;
+                            WIN32_FIND_DATAW fd = {};
+                            HANDLE find = FindFirstFileW(JoinPath(desktopRaw, L"*").c_str(), &fd);
+                            if (find != INVALID_HANDLE_VALUE)
+                            {
+                                do
+                                {
+                                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                                    const std::wstring name = fd.cFileName;
+                                    const std::wstring lower = ToLower(name);
+                                    if ((lower.size() > 4 && (lower.compare(lower.size() - 4, 4, L".lnk") == 0 || lower.compare(lower.size() - 4, 4, L".url") == 0))
+                                        && lower.find(L"lightlaunchpad") == std::wstring::npos)
+                                    {
+                                        desktopShortcuts.push_back(JoinPath(desktopRaw, name.c_str()));
+                                    }
+                                } while (FindNextFileW(find, &fd));
+                                FindClose(find);
+                            }
+                            CoTaskMemFree(desktopRaw);
+                            if (!desktopShortcuts.empty())
+                            {
+                                g_shellBroker.RequestImportPaths(desktopShortcuts, g_settings.launchpadFolder);
+                            }
+                        }
+                    }
+                    g_settings.initialImportCompleted = true;
+                    SaveSettings(g_settings);
+                }
                 if (g_regionUndoProbe.active)
                 {
                     RunRegionUndoProbe();
@@ -3886,7 +4273,11 @@ void HandleShellBrokerResult(LPARAM lParam)
         if (found != g_items.end())
         {
             found->iconRequestPending = false;
-            if (result->icon && result->iconSize == IconSizePx())
+            if (g_spotlightFlowProbe.active && !IsWindowVisible(g_hwnd) && result->icon)
+            {
+                ++g_spotlightFlowProbe.hiddenIconResults;
+            }
+            if (IsWindowVisible(g_hwnd) && result->icon && result->iconSize == IconSizePx())
             {
                 ReleaseItemIcon(*found);
                 found->icon = result->icon;
@@ -3894,7 +4285,7 @@ void HandleShellBrokerResult(LPARAM lParam)
                 result->icon = nullptr;
                 RequestSearchRepaint(g_hwnd, false);
             }
-            else if (result->iconSize != IconSizePx())
+            else if (IsWindowVisible(g_hwnd) && result->iconSize != IconSizePx())
             {
                 QueueItemIcon(*found);
             }
@@ -4047,6 +4438,26 @@ void HandleShellBrokerResult(LPARAM lParam)
         if (CompareStringOrdinal(result->persistencePath.c_str(), -1, GetSearchHistoryPath().c_str(), -1, TRUE) == CSTR_EQUAL)
         {
             g_searchHistoryStatus = result->succeeded ? L"Search history saved atomically." : result->error;
+            if (result->requestId == g_historyPersistence.PendingClearRequestId())
+            {
+                CompleteHistoryClear(*result);
+                if (result->succeeded)
+                {
+                    RebuildSearchIndex();
+                    RebuildFiltered();
+                    RequestSearchRepaint(g_hwnd, true);
+                }
+                g_settingsStatus = result->succeeded
+                    ? Text(L"Launch history cleared. Favorites were kept.", L"启动历史已清除，收藏已保留。")
+                    : Text(L"History could not be cleared. Prior history was kept.", L"无法清除历史，原历史已保留。");
+                if (g_settingsHwnd)
+                {
+                    SetWindowTextW(GetDlgItem(g_settingsHwnd, ControlId(SettingsControlId::Status)), g_settingsStatus.c_str());
+                    EnableWindow(GetDlgItem(g_settingsHwnd, ControlId(SettingsControlId::ClearHistory)), TRUE);
+                    LayoutSettingsWindow(g_settingsHwnd);
+                }
+                break;
+            }
             if (!result->succeeded)
             {
                 MessageBoxW(g_hwnd, result->error.c_str(), L"LightLaunchpad search history", MB_ICONWARNING | MB_OK);
@@ -4557,181 +4968,6 @@ void ApplySpotlightWindowRegion(int width, int height)
 }
 
 
-template <typename Work>
-void RunParallelBlurRanges(int itemCount, Work&& work)
-{
-    if (itemCount <= 0) return;
-    const unsigned int hardwareWorkers = std::max(1u, std::thread::hardware_concurrency());
-    const unsigned int workerCount = std::min({
-        4u,
-        hardwareWorkers,
-        static_cast<unsigned int>(itemCount)
-    });
-    if (workerCount <= 1)
-    {
-        work(0, itemCount);
-        return;
-    }
-
-    const auto runRange = [&](unsigned int worker) {
-        const int begin = static_cast<int>(
-            static_cast<std::uint64_t>(itemCount) * worker / workerCount);
-        const int end = static_cast<int>(
-            static_cast<std::uint64_t>(itemCount) * (worker + 1) / workerCount);
-        work(begin, end);
-    };
-
-    std::vector<std::thread> workers;
-    unsigned int launched = 0;
-    try
-    {
-        workers.reserve(workerCount - 1);
-        for (; launched + 1 < workerCount; ++launched)
-        {
-            workers.emplace_back([&, launched]() { runRange(launched); });
-        }
-    }
-    catch (...)
-    {
-        for (auto& worker : workers) worker.join();
-        for (unsigned int worker = launched; worker < workerCount; ++worker) runRange(worker);
-        return;
-    }
-
-    runRange(workerCount - 1);
-    for (auto& worker : workers) worker.join();
-}
-
-void BoxBlurHorizontalRange(
-    DWORD* src,
-    DWORD* dst,
-    int width,
-    int radius,
-    int firstRow,
-    int lastRow)
-{
-    for (int y = firstRow; y < lastRow; ++y)
-    {
-        const int rowOffset = y * width;
-        uint64_t r = 0, g = 0, b = 0, a = 0;
-        int count = 0;
-        for (int x = -radius; x <= radius; ++x)
-        {
-            const int clamped = std::clamp(x, 0, width - 1);
-            const DWORD pixel = src[rowOffset + clamped];
-            b += (pixel >> 0) & 0xFF;
-            g += (pixel >> 8) & 0xFF;
-            r += (pixel >> 16) & 0xFF;
-            a += (pixel >> 24) & 0xFF;
-            count++;
-        }
-        for (int x = 0; x < width; ++x)
-        {
-            dst[rowOffset + x] = static_cast<DWORD>((a / count) << 24 | (r / count) << 16 | (g / count) << 8 | (b / count));
-            const int left = std::max(0, x - radius);
-            const int right = std::min(width - 1, x + radius + 1);
-            if (right < width)
-            {
-                const DWORD addPixel = src[rowOffset + right];
-                b += (addPixel >> 0) & 0xFF;
-                g += (addPixel >> 8) & 0xFF;
-                r += (addPixel >> 16) & 0xFF;
-                a += (addPixel >> 24) & 0xFF;
-                count++;
-            }
-            if (x - radius - 1 >= 0)
-            {
-                const DWORD subPixel = src[rowOffset + left - 1];
-                b -= (subPixel >> 0) & 0xFF;
-                g -= (subPixel >> 8) & 0xFF;
-                r -= (subPixel >> 16) & 0xFF;
-                a -= (subPixel >> 24) & 0xFF;
-                count--;
-            }
-        }
-    }
-}
-
-void BoxBlurHorizontalPass(DWORD* src, DWORD* dst, int width, int height, int radius)
-{
-    if (radius <= 0) return;
-    RunParallelBlurRanges(height, [&](int firstRow, int lastRow) {
-        BoxBlurHorizontalRange(src, dst, width, radius, firstRow, lastRow);
-    });
-}
-
-void BoxBlurVerticalRange(
-    DWORD* src,
-    DWORD* dst,
-    int width,
-    int height,
-    int radius,
-    int firstColumn,
-    int lastColumn)
-{
-    for (int x = firstColumn; x < lastColumn; ++x)
-    {
-        uint64_t r = 0, g = 0, b = 0, a = 0;
-        int count = 0;
-        for (int y = -radius; y <= radius; ++y)
-        {
-            const int clamped = std::clamp(y, 0, height - 1);
-            const DWORD pixel = src[clamped * width + x];
-            b += (pixel >> 0) & 0xFF;
-            g += (pixel >> 8) & 0xFF;
-            r += (pixel >> 16) & 0xFF;
-            a += (pixel >> 24) & 0xFF;
-            count++;
-        }
-        for (int y = 0; y < height; ++y)
-        {
-            dst[y * width + x] = static_cast<DWORD>((a / count) << 24 | (r / count) << 16 | (g / count) << 8 | (b / count));
-            const int top = std::max(0, y - radius);
-            const int bottom = std::min(height - 1, y + radius + 1);
-            if (bottom < height)
-            {
-                const DWORD addPixel = src[bottom * width + x];
-                b += (addPixel >> 0) & 0xFF;
-                g += (addPixel >> 8) & 0xFF;
-                r += (addPixel >> 16) & 0xFF;
-                a += (addPixel >> 24) & 0xFF;
-                count++;
-            }
-            if (y - radius - 1 >= 0)
-            {
-                const DWORD subPixel = src[(top - 1) * width + x];
-                b -= (subPixel >> 0) & 0xFF;
-                g -= (subPixel >> 8) & 0xFF;
-                r -= (subPixel >> 16) & 0xFF;
-                a -= (subPixel >> 24) & 0xFF;
-                count--;
-            }
-        }
-    }
-}
-
-void BoxBlurVerticalPass(DWORD* src, DWORD* dst, int width, int height, int radius)
-{
-    if (radius <= 0) return;
-    RunParallelBlurRanges(width, [&](int firstColumn, int lastColumn) {
-        BoxBlurVerticalRange(src, dst, width, height, radius, firstColumn, lastColumn);
-    });
-}
-
-void ApplyBoxBlurToBackdrop(int width, int height, int radius)
-{
-    if (!g_spotlightBackdrop.bits || radius <= 0 || width <= 0 || height <= 0) return;
-    const size_t count = static_cast<size_t>(width) * static_cast<size_t>(height);
-    std::vector<DWORD> temp(count);
-    DWORD* pixels = reinterpret_cast<DWORD*>(g_spotlightBackdrop.bits);
-    BoxBlurHorizontalPass(pixels, temp.data(), width, height, radius);
-    BoxBlurVerticalPass(temp.data(), pixels, width, height, radius);
-    BoxBlurHorizontalPass(pixels, temp.data(), width, height, radius);
-    BoxBlurVerticalPass(temp.data(), pixels, width, height, radius);
-    BoxBlurHorizontalPass(pixels, temp.data(), width, height, radius);
-    BoxBlurVerticalPass(temp.data(), pixels, width, height, radius);
-}
-
 void ReleaseSpotlightBackdrop()
 {
     SafeRelease(g_spotlightBackdropD2dBitmap);
@@ -4860,7 +5096,8 @@ bool CaptureSpotlightBackdrop(const RECT& windowRect)
             g_spotlightSelfCaptureEvidence.settingsMarker,
             0x0000FF00u);
     }
-    ApplyBoxBlurToBackdrop(width, height, 12);
+    llp::backdrop::Blur(
+        reinterpret_cast<std::uint32_t*>(g_spotlightBackdrop.bits), width, height, 12);
     g_spotlightLayerDirty = true;
     return true;
 }
@@ -4953,11 +5190,17 @@ HMONITOR SpotlightTargetMonitor()
         ? MonitorFromPoint(cursor, MONITOR_DEFAULTTONULL)
         : nullptr;
 
-    g_lastMonitorSource = llp::adaptive::ChooseMonitorSource(
-        foregroundMonitor != nullptr,
-        cursorMonitor != nullptr);
-    if (g_lastMonitorSource == llp::adaptive::MonitorSource::Foreground) return foregroundMonitor;
-    if (g_lastMonitorSource == llp::adaptive::MonitorSource::Cursor) return cursorMonitor;
+    if (cursorMonitor != nullptr)
+    {
+        g_lastMonitorSource = llp::adaptive::MonitorSource::Cursor;
+        return cursorMonitor;
+    }
+    if (foregroundMonitor != nullptr)
+    {
+        g_lastMonitorSource = llp::adaptive::MonitorSource::Foreground;
+        return foregroundMonitor;
+    }
+    g_lastMonitorSource = llp::adaptive::MonitorSource::Primary;
     return MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
 }
 
@@ -4985,11 +5228,31 @@ void PositionWindow()
         const int width = std::clamp(ScaleDip(g_settings.spotlightWidth), std::min(ScaleDip(520), workWidth), workWidth);
         const int height = std::clamp(ScaleDip(g_settings.spotlightHeight), std::min(ScaleDip(420), workHeight), workHeight);
         ApplySpotlightWindowRegion(width, height);
+        const int centerX = work.left + (workWidth - width) / 2;
+        const int centerY = work.top + (workHeight - height) / 2;
+        int targetX = centerX;
+        int targetY = centerY;
+        POINT cursor = {};
+        if (g_settings.spotlightMouseBiasPercent > 0 && GetCursorPos(&cursor) != FALSE)
+        {
+            const double bias = std::clamp(g_settings.spotlightMouseBiasPercent, 0, 100) / 100.0;
+            const double dx = static_cast<double>(cursor.x) - (work.left + workWidth * 0.5);
+            const double dy = static_cast<double>(cursor.y) - (work.top + workHeight * 0.5);
+            targetX = centerX + static_cast<int>(std::lround(dx * bias));
+            targetY = centerY + static_cast<int>(std::lround(dy * bias));
+        }
+        const int edgeMargin = ScaleDip(24);
+        const int minX = work.left + edgeMargin;
+        const int maxX = work.right - width - edgeMargin;
+        const int minY = work.top + edgeMargin;
+        const int maxY = work.bottom - height - edgeMargin;
+        const int finalX = minX <= maxX ? std::clamp(targetX, minX, maxX) : centerX;
+        const int finalY = minY <= maxY ? std::clamp(targetY, minY, maxY) : centerY;
         SetWindowPos(
             g_hwnd,
             HWND_TOPMOST,
-            work.left + ((work.right - work.left) - width) / 2,
-            work.top + ((work.bottom - work.top) - height) / 2,
+            finalX,
+            finalY,
             width,
             height,
             SWP_NOACTIVATE);
@@ -5106,6 +5369,12 @@ llp::material::ShowRequest CurrentMaterialShowRequest(std::uint64_t requiredScen
     request.dpi = static_cast<int>(g_windowDpi);
     request.policy = g_adaptivePolicy;
     request.developmentEvidence = SpotlightOwnershipProbeEnabled();
+    llp::geometry::MetricsRequest captureMetrics;
+    captureMetrics.dpi = request.dpi;
+    captureMetrics.textScalePercent = 225;
+    captureMetrics.tileSizeDip = 72 + 72; // Largest supported icon + tile chrome.
+    captureMetrics.spotlight = true;
+    request.maximumChildSizePx = llp::geometry::BuildSceneMetrics(captureMetrics).tileSizePx;
     request.forcedFailure = MaterialForcedFailureFromCommandLine();
     request.statusMessage = WmMaterialRendererStatus;
     request.activation = ++g_materialActivation;
@@ -5235,6 +5504,7 @@ void FinishHideNativeUi()
     g_motionFrame = g_motionTimeline.Sample(MotionNowMs());
     if (IsSpotlightMode())
     {
+        g_hiddenFootprintNeedsPostRendererTrim = true;
         g_materialRenderer.Hide();
         HideSpotlightImmediately();
     }
@@ -5244,23 +5514,48 @@ void FinishHideNativeUi()
     }
     TrimHiddenFootprint();
     g_motionTimeline.Reset(false, MotionNowMs());
+    g_spotlightLighting = {};
     g_motionFocusInitialized = false;
+}
+
+llp::material::MotionVisual MaterialMotionVisual(const llp::motion::Frame& frame)
+{
+    llp::material::MotionVisual visual;
+    visual.opacity = static_cast<float>(frame.opacity);
+    visual.offsetY = static_cast<float>(
+        frame.offsetYDip * static_cast<double>(std::max<UINT>(1, g_windowDpi)) / 96.0);
+    visual.overlayOpacity = static_cast<float>(frame.overlayOpacity);
+    visual.contentOpacity = 1.0f;
+    return visual;
+}
+
+void UpdateSpotlightLighting(HWND window, POINT point, bool hasPointer, bool pressed)
+{
+    // Pointer position is event-driven. The held optical channel shares the
+    // existing finite motion ticks and never starts a hidden/settled timer.
+    if (!IsSpotlightMode() || !IsWindowVisible(window)
+        || !g_motionTimeline.TargetVisible()
+        || g_adaptivePolicy.solidSurface || g_adaptivePolicy.reducedMotion) return;
+    const double now = MotionNowMs();
+    g_spotlightLighting.pointerX = static_cast<float>(point.x);
+    g_spotlightLighting.pointerY = static_cast<float>(point.y);
+    g_spotlightLighting.hasPointer = hasPointer;
+    g_motionTimeline.SetOpticalPress(hasPointer && pressed, now);
+    g_spotlightLighting.interactionStrength = static_cast<float>(g_motionTimeline.Sample(now).opticalPress);
+    g_materialRenderer.SetLighting(g_spotlightLighting);
+    if (g_motionTimeline.IsActive(now)) StartMotionTimer();
 }
 
 void ApplyMotionFrame(bool forcePaint)
 {
     if (!g_hwnd) return;
     const double now = MotionNowMs();
+    const double previousPress = g_motionFrame.press;
     g_motionFrame = g_motionTimeline.Sample(now);
 
     if (IsSpotlightMode())
     {
-        llp::material::MotionVisual visual;
-        visual.opacity = static_cast<float>(g_motionFrame.opacity);
-        visual.offsetY = static_cast<float>(
-            g_motionFrame.offsetYDip * static_cast<double>(std::max<UINT>(1, g_windowDpi)) / 96.0);
-        visual.overlayOpacity = static_cast<float>(g_motionFrame.overlayOpacity);
-        visual.contentOpacity = 1.0f;
+        const auto visual = MaterialMotionVisual(g_motionFrame);
 
         const auto diagnostics = g_materialRenderer.SnapshotDiagnostics();
         const bool rendererOwnsMotion = diagnostics.path == llp::material::RenderPath::HighFidelity
@@ -5268,6 +5563,14 @@ void ApplyMotionFrame(bool forcePaint)
         if (rendererOwnsMotion)
         {
             g_materialRenderer.SetMotion(visual);
+            // Pointer events can publish an intermediate strength before the
+            // first motion tick. Compare the latest submitted value so closing
+            // in that interval still sends zero, even if the last frame was zero.
+            if (g_spotlightLighting.interactionStrength != static_cast<float>(g_motionFrame.opticalPress))
+            {
+                g_spotlightLighting.interactionStrength = static_cast<float>(g_motionFrame.opticalPress);
+                g_materialRenderer.SetLighting(g_spotlightLighting);
+            }
         }
         else if (IsWindowVisible(g_hwnd))
         {
@@ -5280,22 +5583,30 @@ void ApplyMotionFrame(bool forcePaint)
             // opening call.  The input contract is "visible and focusable"
             // first; the 16 ms motion tick presents the first composed frame.
             // This keeps fallback startup bounded without dropping the fade.
-            if (forcePaint && g_motionFrame.active)
+            if (forcePaint && g_motionFrame.active && g_motionFrame.targetVisible)
             {
                 g_spotlightLayerDirty = true;
                 InvalidateRect(g_hwnd, nullptr, FALSE);
             }
             else
             {
+                // Opacity is a layered-window blend property, not new pixels.
+                // SetSpotlightLayeredOpacity presents the retained bitmap and
+                // repaints it only when dirty. Press feedback changes pixels;
+                // normal scene/focus changes already mark the layer dirty.
+                if ((forcePaint && g_motionFrame.targetVisible)
+                    || previousPress != g_motionFrame.press)
+                {
+                    g_spotlightLayerDirty = true;
+                }
                 SetSpotlightLayeredOpacity(alpha);
-                g_spotlightLayerDirty = true;
-                if (forcePaint || g_motionFrame.active) PaintSpotlightLayeredWindow(true);
             }
         }
     }
 
     if (IsWindowVisible(g_hwnd)
-        && (!IsSpotlightMode() ? (forcePaint || g_motionFrame.active) : forcePaint))
+        && (!IsSpotlightMode() ? (forcePaint || g_motionFrame.active)
+            : (forcePaint && g_motionFrame.targetVisible)))
     {
         InvalidateRect(g_hwnd, nullptr, FALSE);
     }
@@ -5317,6 +5628,15 @@ void ApplyMotionFrame(bool forcePaint)
 void ShowNativeUi()
 {
     const double now = MotionNowMs();
+    const bool measureOpen = g_spotlightFlowProbe.active && IsSpotlightMode();
+    SpotlightOpenTiming timing;
+    double phaseStarted = measureOpen ? now : 0;
+    const auto recordPhase = [&](double& value) {
+        if (!measureOpen) return;
+        const double completed = MotionNowMs();
+        value = completed - phaseStarted;
+        phaseStarted = completed;
+    };
     g_motionTimeline.SetReducedMotion(g_adaptivePolicy.reducedMotion);
     if (IsSpotlightMode() && IsWindowVisible(g_hwnd))
     {
@@ -5363,9 +5683,11 @@ void ShowNativeUi()
     ResetSearchForOpen();
     RebuildFiltered();
     PositionWindow();
+    recordPhase(timing.catalogLayoutMs);
     if (IsSpotlightMode())
     {
         g_motionTimeline.Reset(false, now);
+        g_spotlightLighting = {};
         g_motionTimeline.SetVisible(true, now);
         g_motionTimeline.SetFocus(true, now);
         g_motionFocusInitialized = true;
@@ -5375,12 +5697,19 @@ void ShowNativeUi()
         GetWindowRect(g_hwnd, &windowRect);
         if (!g_adaptivePolicy.solidSurface) CaptureSpotlightBackdrop(windowRect);
         else ReleaseSpotlightBackdrop();
+        recordPhase(timing.backdropMs);
         RECT client = {};
         GetClientRect(g_hwnd, &client);
         auto scene = BuildMaterialSceneSnapshot(client);
+        recordPhase(timing.sceneSnapshotMs);
         PaintSpotlightLayeredWindow(true);
+        recordPhase(timing.directPaintMs);
         g_materialRenderer.Submit(scene);
-        g_materialRenderer.Show(CurrentMaterialShowRequest(scene->generation));
+        // Publish the first motion sample atomically with Show, before the
+        // renderer thread can create and commit an opaque default tree.
+        g_materialRenderer.Show(CurrentMaterialShowRequest(scene->generation),
+            MaterialMotionVisual(g_motionTimeline.Sample(MotionNowMs())));
+        recordPhase(timing.rendererDispatchMs);
     }
     else
     {
@@ -5402,6 +5731,13 @@ void ShowNativeUi()
     ActivateSearchInput();
     ApplyMotionFrame(true);
     InvalidateRect(g_hwnd, nullptr, TRUE);
+    if (measureOpen)
+    {
+        recordPhase(timing.focusMs);
+        timing.totalMs = MotionNowMs() - now;
+        g_spotlightFlowProbe.lastOpenTiming = timing;
+        ++g_spotlightFlowProbe.openTimingCount;
+    }
     if (g_spotlightFlowProbe.active) WriteSpotlightFlowReadyState();
     if (g_catalogBrokerProbe.active
         && g_catalogBrokerProbe.stage == 1
@@ -6036,55 +6372,6 @@ bool IsPointInsideRoundedRect(POINT point, const RECT& rect, int radius)
     const int dx = point.x - cx;
     const int dy = point.y - cy;
     return dx * dx + dy * dy <= r * r;
-}
-
-double RoundedRectCoverage(int x, int y, const RECT& rect, int radius)
-{
-    const double width = static_cast<double>(rect.right - rect.left);
-    const double height = static_cast<double>(rect.bottom - rect.top);
-    if (width <= 0.0 || height <= 0.0) return 0.0;
-
-    const double r = std::max(1.0, std::min<double>(radius, std::min(width, height) * 0.5));
-    const double centerX = (static_cast<double>(rect.left) + static_cast<double>(rect.right)) * 0.5;
-    const double centerY = (static_cast<double>(rect.top) + static_cast<double>(rect.bottom)) * 0.5;
-    const double halfW = width * 0.5;
-    const double halfH = height * 0.5;
-    const double px = static_cast<double>(x) + 0.5;
-    const double py = static_cast<double>(y) + 0.5;
-    const double qx = std::abs(px - centerX) - (halfW - r);
-    const double qy = std::abs(py - centerY) - (halfH - r);
-    const double outsideX = std::max(qx, 0.0);
-    const double outsideY = std::max(qy, 0.0);
-    const double outsideDistance = std::sqrt(outsideX * outsideX + outsideY * outsideY);
-    const double insideDistance = std::min(std::max(qx, qy), 0.0);
-    const double signedDistance = outsideDistance + insideDistance - r;
-    return std::clamp(0.5 - signedDistance, 0.0, 1.0);
-}
-
-double SmoothStep(double start, double end, double value)
-{
-    if (start == end) return value >= end ? 1.0 : 0.0;
-    const double t = std::clamp((value - start) / (end - start), 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
-}
-
-double ContentFeatherCoverage(int y, const RECT& contentClip)
-{
-    const double py = static_cast<double>(y) + 0.5;
-    const double feather = static_cast<double>(SpotlightContentFeatherSize);
-    const double top = SmoothStep(static_cast<double>(contentClip.top), static_cast<double>(contentClip.top) + feather, py);
-    const double bottom = 1.0 - SmoothStep(static_cast<double>(contentClip.bottom) - feather, static_cast<double>(contentClip.bottom), py);
-    return std::clamp(std::min(top, bottom), 0.0, 1.0);
-}
-
-double SpotlightContentCoverageForPixel(int y, const RECT& contentClip)
-{
-    if (y < contentClip.top)
-    {
-        return 1.0;
-    }
-
-    return ContentFeatherCoverage(y, contentClip);
 }
 
 bool IsPointInsideSpotlightGlass(POINT point)
@@ -8272,81 +8559,19 @@ bool EnsureSpotlightLayerBuffer(int width, int height)
     return true;
 }
 
-bool PixelDiffers(DWORD left, DWORD right)
-{
-    const int lb = static_cast<int>(left & 0xFF);
-    const int lg = static_cast<int>((left >> 8) & 0xFF);
-    const int lr = static_cast<int>((left >> 16) & 0xFF);
-    const int rb = static_cast<int>(right & 0xFF);
-    const int rg = static_cast<int>((right >> 8) & 0xFF);
-    const int rr = static_cast<int>((right >> 16) & 0xFF);
-    return std::abs(lb - rb) + std::abs(lg - rg) + std::abs(lr - rr) > 12;
-}
-
-DWORD PremultiplyPixel(DWORD pixel, BYTE alpha)
-{
-    if (alpha == 0) return 0;
-    if (alpha == 255) return (pixel & 0x00FFFFFF) | 0xFF000000;
-
-    const BYTE b = static_cast<BYTE>(((pixel & 0xFF) * alpha + 127) / 255);
-    const BYTE g = static_cast<BYTE>(((((pixel >> 8) & 0xFF) * alpha + 127) / 255));
-    const BYTE r = static_cast<BYTE>(((((pixel >> 16) & 0xFF) * alpha + 127) / 255));
-    return (static_cast<DWORD>(alpha) << 24)
-        | (static_cast<DWORD>(r) << 16)
-        | (static_cast<DWORD>(g) << 8)
-        | b;
-}
-
-DWORD BlendPixel(DWORD basePixel, DWORD contentPixel, double amount)
-{
-    amount = std::clamp(amount, 0.0, 1.0);
-    const int bb = static_cast<int>(basePixel & 0xFF);
-    const int bg = static_cast<int>((basePixel >> 8) & 0xFF);
-    const int br = static_cast<int>((basePixel >> 16) & 0xFF);
-    const int cb = static_cast<int>(contentPixel & 0xFF);
-    const int cg = static_cast<int>((contentPixel >> 8) & 0xFF);
-    const int cr = static_cast<int>((contentPixel >> 16) & 0xFF);
-    const BYTE b = static_cast<BYTE>(std::clamp(static_cast<int>(std::round(bb + (cb - bb) * amount)), 0, 255));
-    const BYTE g = static_cast<BYTE>(std::clamp(static_cast<int>(std::round(bg + (cg - bg) * amount)), 0, 255));
-    const BYTE r = static_cast<BYTE>(std::clamp(static_cast<int>(std::round(br + (cr - br) * amount)), 0, 255));
-    return (static_cast<DWORD>(r) << 16) | (static_cast<DWORD>(g) << 8) | b;
-}
-
 void ApplySpotlightPerPixelAlpha(DWORD* basePixels, DWORD* fullPixels, int width, int height)
 {
     if (!basePixels || !fullPixels || width <= 0 || height <= 0) return;
-    RECT client = { 0, 0, width, height };
-    const RECT contentClip = ContentClipRect(client);
-    const RECT auxiliaryRect = SpotlightAuxiliaryRect(client);
-    for (int y = 0; y < height; ++y)
-    {
-        for (int x = 0; x < width; ++x)
-        {
-            const size_t index = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
-            const double coverage = RoundedRectCoverage(x, y, client, ScaleDip(SpotlightCornerRadius));
-            if (coverage <= 0.0)
-            {
-                fullPixels[index] = 0;
-                continue;
-            }
-
-            const bool contentPixel = PixelDiffers(basePixels[index], fullPixels[index]);
-            const POINT point = { x, y };
-            const bool persistentControlPixel = PtInRect(&auxiliaryRect, point) != FALSE;
-            const double contentCoverage = contentPixel
-                ? (persistentControlPixel ? 1.0 : SpotlightContentCoverageForPixel(y, contentClip))
-                : 1.0;
-            if (contentPixel && contentCoverage < 1.0)
-            {
-                fullPixels[index] = BlendPixel(basePixels[index], fullPixels[index], contentCoverage);
-            }
-            const BYTE targetAlpha = contentPixel
-                ? static_cast<BYTE>(std::round(SpotlightGlassAlpha + (255 - SpotlightGlassAlpha) * contentCoverage))
-                : SpotlightGlassAlpha;
-            const BYTE alpha = static_cast<BYTE>(std::clamp(static_cast<int>(std::round(targetAlpha * coverage)), 0, 255));
-            fullPixels[index] = PremultiplyPixel(fullPixels[index], alpha);
-        }
-    }
+    const RECT client = { 0, 0, width, height };
+    const auto metrics = CurrentSceneMetrics(client);
+    llp::spotlight::AlphaParameters parameters;
+    parameters.cornerRadiusPx = ScaleDip(SpotlightCornerRadius);
+    parameters.contentClip = metrics.contentClip;
+    parameters.auxiliary = metrics.auxiliary;
+    parameters.featherSizePx = SpotlightContentFeatherSize;
+    parameters.glassAlpha = SpotlightGlassAlpha;
+    llp::spotlight::ApplyAlpha(reinterpret_cast<const std::uint32_t*>(basePixels),
+        reinterpret_cast<std::uint32_t*>(fullPixels), width, height, parameters);
 }
 
 RECT SpotlightOwnershipProbeRect(int width, int height)
@@ -8485,7 +8710,6 @@ bool PaintSpotlightLayeredWindow(bool repaint)
 bool PresentTransparentSpotlightDirectLayer()
 {
     if (!g_hwnd || !IsSpotlightMode()) return false;
-    if (g_spotlightLayerBuffer.directPixelsTransparent) return true;
 
     if (SpotlightTransparentTransitionFailureProbeEnabled()
         && !g_spotlightDirectTransitionFailureEvidence.injected)
@@ -8500,6 +8724,7 @@ bool PresentTransparentSpotlightDirectLayer()
     const int width = std::max(1, static_cast<int>(client.right - client.left));
     const int height = std::max(1, static_cast<int>(client.bottom - client.top));
     if (!EnsureSpotlightLayerBuffer(width, height)) return false;
+    if (g_spotlightLayerBuffer.directPixelsTransparent) return true;
 
     BITMAPINFO info = {};
     info.bmiHeader.biSize = sizeof(info.bmiHeader);
@@ -8524,10 +8749,13 @@ bool PresentTransparentSpotlightDirectLayer()
     }
 
     HGDIOBJ oldBitmap = SelectObject(transparentDc, transparentBitmap);
-    std::memset(
-        transparentBits,
-        0,
-        static_cast<size_t>(width) * static_cast<size_t>(height) * sizeof(DWORD));
+    // User32 hit-tests this layered bitmap, not the visible DComp surface.
+    // Alpha zero would let real mouse input pass through the entire glass.
+    // Keep only a minimal rounded input mask; retain the original fallback
+    // buffers until UpdateLayeredWindow succeeds, including on failure.
+    llp::spotlight::FillCompositionHitMask(
+        reinterpret_cast<std::uint32_t*>(transparentBits), width, height,
+        ScaleDip(SpotlightCornerRadius));
     RECT windowRect = {};
     GetWindowRect(g_hwnd, &windowRect);
     POINT dst = { windowRect.left, windowRect.top };
@@ -8547,7 +8775,8 @@ bool PresentTransparentSpotlightDirectLayer()
 
 void RequestSearchRepaint(HWND hwnd, bool erase)
 {
-    if (IsSpotlightMode() && IsWindowVisible(hwnd))
+    if (!IsWindowVisible(hwnd)) return;
+    if (IsSpotlightMode())
     {
         SubmitMaterialSceneIfVisible();
         const auto diagnostics = g_materialRenderer.SnapshotDiagnostics();
@@ -8568,6 +8797,13 @@ void RequestSearchRepaint(HWND hwnd, bool erase)
 
 void PaintWindow(HWND hwnd)
 {
+    if (!IsWindowVisible(hwnd))
+    {
+        PAINTSTRUCT ps = {};
+        BeginPaint(hwnd, &ps);
+        EndPaint(hwnd, &ps);
+        return;
+    }
     if (IsSpotlightMode())
     {
         const auto diagnostics = g_materialRenderer.SnapshotDiagnostics();
@@ -8783,6 +9019,11 @@ LRESULT CALLBACK HotkeyEditSubclassProc(HWND hwnd, UINT message, WPARAM wParam, 
     switch (message)
     {
     case WM_GETDLGCODE:
+        if (lParam)
+        {
+            const auto* key = reinterpret_cast<const MSG*>(lParam);
+            if (key->wParam == VK_TAB || key->wParam == VK_ESCAPE || key->wParam == VK_RETURN) return 0;
+        }
         return DLGC_WANTALLKEYS;
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
@@ -8875,6 +9116,52 @@ const wchar_t* SettingsText(HWND hwnd, const wchar_t* english, const wchar_t* ch
     return IsChineseLanguage(SettingsWindowLanguage(hwnd)) ? chinese : english;
 }
 
+int GlassPresetIndex(const std::wstring& preset)
+{
+    if (ContainsIgnoreCase(preset, L"Frosted")) return 1;
+    if (ContainsIgnoreCase(preset, L"Tinted")) return 2;
+    if (ContainsIgnoreCase(preset, L"Custom")) return 3;
+    return 0;
+}
+
+std::wstring GlassPresetNameFromIndex(int index)
+{
+    if (index == 1) return L"Frosted";
+    if (index == 2) return L"Tinted";
+    if (index == 3) return L"Custom";
+    return L"Crystal";
+}
+
+void ApplyGlassPresetValues(Settings& s, int presetIndex)
+{
+    s.glassPreset = GlassPresetNameFromIndex(presetIndex);
+    if (presetIndex == 0) { s.glassBlurPercent = 6; s.glassTintPercent = 2; s.glassRefractionPx = 30; s.glassRimPercent = 95; }
+    else if (presetIndex == 1) { s.glassBlurPercent = 34; s.glassTintPercent = 10; s.glassRefractionPx = 20; s.glassRimPercent = 75; }
+    else if (presetIndex == 2) { s.glassBlurPercent = 62; s.glassTintPercent = 24; s.glassRefractionPx = 14; s.glassRimPercent = 60; }
+}
+
+void ResetGlassPresetCombo(HWND hwnd, const std::wstring& language)
+{
+    HWND combo = GetDlgItem(hwnd, ControlId(SettingsControlId::GlassPreset));
+    if (!combo) return;
+    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    if (IsChineseLanguage(language))
+    {
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"清澈水滴 (Crystal)"));
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"柔焦冰晶 (Frosted)"));
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"深雾磨砂 (Tinted)"));
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"自定义 (Custom)"));
+    }
+    else
+    {
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Crystal (Ultra-clear)"));
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Frosted (Balanced)"));
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Tinted (Deep Frost)"));
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Custom"));
+    }
+    SendMessageW(combo, CB_SETCURSEL, GlassPresetIndex(g_settings.glassPreset), 0);
+}
+
 void ApplyLanguageToSettingsWindow(HWND hwnd)
 {
     const auto language = SettingsWindowLanguage(hwnd);
@@ -8890,28 +9177,72 @@ void ApplyLanguageToSettingsWindow(HWND hwnd)
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::StartWithWindows), IsChineseLanguage(language) ? L"随 Windows 启动" : L"Start with Windows");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::ResetSearchOnOpen), IsChineseLanguage(language) ? L"打开时清空搜索栏" : L"Reset search on open");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::DiagnosticsLabel), IsChineseLanguage(language) ? L"关于与诊断" : L"About & Diagnostics");
-    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Save), IsChineseLanguage(language) ? L"保存" : L"Save");
-    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Apply), IsChineseLanguage(language) ? L"应用" : L"Apply");
-    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Cancel), IsChineseLanguage(language) ? L"取消" : L"Cancel");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Save), IsChineseLanguage(language) ? L"完成" : L"Done");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Apply), IsChineseLanguage(language) ? L"保存更改" : L"Save changes");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Cancel), IsChineseLanguage(language) ? L"关闭" : L"Close");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::Browse), IsChineseLanguage(language) ? L"浏览…" : L"Browse…");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::ShowRecentAndFavorites), IsChineseLanguage(language) ? L"空搜索显示最近使用与收藏" : L"Show recent apps and favorites when search is empty");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::TrackLaunchHistory), IsChineseLanguage(language) ? L"在本机记录启动历史" : L"Keep launch history on this device");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::ReduceMotion), IsChineseLanguage(language) ? L"减少动态效果（始终尊重系统设置）" : L"Reduce motion (system preference is always respected)");
+    const bool evRunning = llp::everything::IsEverythingRunning();
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::EnableEverythingSearch),
+        IsChineseLanguage(language)
+            ? (evRunning ? L"启用 Everything 全盘文件搜索（已连接）" : L"启用 Everything 全盘文件搜索（未检测到标准版）")
+            : (evRunning ? L"Enable Everything file search (Connected)" : L"Enable Everything file search (Not detected)"));
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::GlassPresetLabel), IsChineseLanguage(language) ? L"液态玻璃模式预设" : L"Liquid Glass preset");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::GlassBlurLabel), IsChineseLanguage(language) ? L"玻璃模糊度 (0–100%)" : L"Glass blur (0–100%)");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::GlassTintLabel), IsChineseLanguage(language) ? L"玻璃雾度 / 着色 (0–60%)" : L"Glass tint / haze (0–60%)");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::GlassRefractionLabel), IsChineseLanguage(language) ? L"边缘折射强度 (0–45 px)" : L"Edge refraction (0–45 px)");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::GlassRimLabel), IsChineseLanguage(language) ? L"镜面边缘高光 (0–100%)" : L"Specular rim light (0–100%)");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::MouseBiasLabel), IsChineseLanguage(language) ? L"聚焦向鼠标偏移强度 (0–100%，0 为居中)" : L"Cursor position bias (0–100%, 0 = centered)");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::ClearHistory), IsChineseLanguage(language) ? L"清除启动历史（保留收藏）" : L"Clear launch history (keep favorites)");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::CategoryAccessibilityLabel), IsChineseLanguage(language) ? L"设置分类" : L"Settings categories");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::WidthAccessibilityLabel), IsChineseLanguage(language) ? L"Spotlight 宽度" : L"Spotlight width");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::HeightAccessibilityLabel), IsChineseLanguage(language) ? L"Spotlight 高度" : L"Spotlight height");
+    const wchar_t* english[] = { L"General", L"Search & Hotkey", L"Appearance", L"Apps & Layout", L"Advanced" };
+    const wchar_t* chinese[] = { L"常规", L"搜索与热键", L"外观", L"应用与布局", L"高级" };
+    HWND category = GetDlgItem(hwnd, ControlId(SettingsControlId::Category));
+    SendMessageW(category, LB_RESETCONTENT, 0, 0);
+    for (int page = 0; page < 5; ++page)
+        SendMessageW(category, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(IsChineseLanguage(language) ? chinese[page] : english[page]));
+    SendMessageW(category, LB_SETCURSEL, g_settings.lastSettingsPage, 0);
     ResetIconSizeCombo(hwnd, language);
     ResetDisplayModeCombo(hwnd, language);
+    ResetGlassPresetCombo(hwnd, language);
 }
 
 void PopulateSettingsWindow(HWND hwnd)
 {
+    const bool wasUpdating = g_settingsUpdating;
+    g_settingsUpdating = true;
     SetControlText(hwnd, SettingsControlId::LaunchpadFolder, g_settings.launchpadFolder);
     SetControlText(hwnd, SettingsControlId::Hotkey, g_settings.hotkey);
     SetControlText(hwnd, SettingsControlId::SpotlightWidth, std::to_wstring(g_settings.spotlightWidth));
     SetControlText(hwnd, SettingsControlId::SpotlightHeight, std::to_wstring(g_settings.spotlightHeight));
     SetControlText(hwnd, SettingsControlId::AppSpacing, std::to_wstring(g_settings.appSpacing));
     SetControlText(hwnd, SettingsControlId::WheelSensitivity, FormatDouble(g_settings.wheelSensitivity));
-    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::DisplayMode), CB_SETCURSEL, IsSpotlightMode() ? 1 : 0, 0);
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::Language), CB_SETCURSEL, IsChineseLanguage(g_settings.language) ? 1 : 0, 0);
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::StartWithWindows), BM_SETCHECK, g_settings.startWithWindows ? BST_CHECKED : BST_UNCHECKED, 0);
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ResetSearchOnOpen), BM_SETCHECK, g_settings.resetSearchOnOpen ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ShowRecentAndFavorites), BM_SETCHECK, g_settings.showRecentAndFavorites ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::TrackLaunchHistory), BM_SETCHECK, g_settings.trackLaunchHistory ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ReduceMotion), BM_SETCHECK, g_settings.reduceMotion ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::EnableEverythingSearch), BM_SETCHECK, g_settings.enableEverythingSearch ? BST_CHECKED : BST_UNCHECKED, 0);
+    SetControlText(hwnd, SettingsControlId::GlassBlur, std::to_wstring(g_settings.glassBlurPercent));
+    SetControlText(hwnd, SettingsControlId::GlassTint, std::to_wstring(g_settings.glassTintPercent));
+    SetControlText(hwnd, SettingsControlId::GlassRefraction, std::to_wstring(g_settings.glassRefractionPx));
+    SetControlText(hwnd, SettingsControlId::GlassRim, std::to_wstring(g_settings.glassRimPercent));
+    SetControlText(hwnd, SettingsControlId::MouseBias, std::to_wstring(g_settings.spotlightMouseBiasPercent));
+    EnableWindow(GetDlgItem(hwnd, ControlId(SettingsControlId::ClearHistory)),
+        g_searchHistoryLoaded && g_searchHistoryWritable && !g_historyPersistence.PendingClearRequestId());
     SetControlText(hwnd, SettingsControlId::DiagnosticsSummary, BuildDiagnosticsSummary());
     ApplyLanguageToSettingsWindow(hwnd);
+    // The combo must contain its localized choices before restoring a value.
+    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::DisplayMode), CB_SETCURSEL, IsSpotlightMode() ? 1 : 0, 0);
     SetIconSizeSelection(hwnd);
+    SetControlText(hwnd, SettingsControlId::Status, g_settingsStatus.empty()
+        ? SettingsText(hwnd, L"Changes are saved automatically after validation.", L"更改通过验证后自动保存。") : g_settingsStatus);
+    g_settingsUpdating = wasUpdating;
 }
 
 Settings ReadSettingsWindowCandidate(HWND hwnd)
@@ -8923,6 +9254,15 @@ Settings ReadSettingsWindowCandidate(HWND hwnd)
     {
         const auto profile = GetUserProfilePath();
         candidate.launchpadFolder = profile.empty() ? L"Launchpad" : JoinPath(profile, L"Launchpad");
+    }
+    // The catalog's directory-creation API requires a fully qualified path.
+    // Resolve the same value that will be persisted, preserving its casing.
+    const DWORD pathLength = GetFullPathNameW(candidate.launchpadFolder.c_str(), 0, nullptr, nullptr);
+    if (pathLength)
+    {
+        std::vector<wchar_t> fullPath(static_cast<size_t>(pathLength) + 1, L'\0');
+        const DWORD copied = GetFullPathNameW(candidate.launchpadFolder.c_str(), static_cast<DWORD>(fullPath.size()), fullPath.data(), nullptr);
+        if (copied && copied < fullPath.size()) candidate.launchpadFolder.assign(fullPath.data(), copied);
     }
     if (candidate.hotkey.empty()) candidate.hotkey = L"Alt+D";
 
@@ -8938,11 +9278,23 @@ Settings ReadSettingsWindowCandidate(HWND hwnd)
     candidate.wheelSensitivity = NormalizeWheelSensitivity(std::wcstod(GetControlText(hwnd, ControlId(SettingsControlId::WheelSensitivity)).c_str(), nullptr));
     candidate.startWithWindows = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::StartWithWindows), BM_GETCHECK, 0, 0) == BST_CHECKED;
     candidate.resetSearchOnOpen = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ResetSearchOnOpen), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.showRecentAndFavorites = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ShowRecentAndFavorites), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.trackLaunchHistory = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::TrackLaunchHistory), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.reduceMotion = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ReduceMotion), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.enableEverythingSearch = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::EnableEverythingSearch), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const int presetIndex = static_cast<int>(SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::GlassPreset), CB_GETCURSEL, 0, 0));
+    candidate.glassPreset = GlassPresetNameFromIndex(presetIndex >= 0 ? presetIndex : 0);
+    candidate.glassBlurPercent = std::clamp(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::GlassBlur)).c_str()), 0, 100);
+    candidate.glassTintPercent = std::clamp(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::GlassTint)).c_str()), 0, 60);
+    candidate.glassRefractionPx = std::clamp(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::GlassRefraction)).c_str()), 0, 45);
+    candidate.glassRimPercent = std::clamp(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::GlassRim)).c_str()), 0, 100);
+    candidate.spotlightMouseBiasPercent = std::clamp(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::MouseBias)).c_str()), 0, 100);
     return candidate;
 }
 
 void LayoutSettingsWindow(HWND hwnd)
 {
+    SettingsUpdateGuard updatingGuard;
     RECT client = {};
     GetClientRect(hwnd, &client);
     llp::geometry::SettingsMetricsRequest request;
@@ -8961,48 +9313,109 @@ void LayoutSettingsWindow(HWND hwnd)
     };
     const int labelHeight = std::max(metrics.controlHeightPx, textDip(20) + dip(4));
     const int comboHeight = std::max(dip(140), metrics.controlHeightPx * 5);
+    const int inset = metrics.sideInsetPx;
+    const int navigationWidth = std::min(textDip(170), std::max(dip(100), static_cast<int>(client.right) / 3));
+    const int contentLeft = inset + navigationWidth + dip(24);
+    const int contentWidth = std::max(dip(120), static_cast<int>(client.right) - contentLeft - inset);
+    move(SettingsControlId::Category, inset, dip(24), navigationWidth, std::max(dip(180), textDip(150)));
+    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::Category), LB_SETITEMHEIGHT, 0, std::max(dip(32), textDip(28)));
+
+    std::array<bool, 64> pageControls = {};
+    const auto place = [&](SettingsControlId id, int x, int y, int width, int height) {
+        pageControls[ControlId(id) - 3001] = true;
+        move(id, x, y, width, height);
+        ShowWindow(GetDlgItem(hwnd, ControlId(id)), SW_SHOWNA);
+    };
+    const auto wrappedHeight = [&](SettingsControlId id, int width, int minimum, int horizontalPadding) {
+        const auto text = GetControlText(hwnd, ControlId(id));
+        RECT measured = { 0, 0, std::max(1, width - horizontalPadding), 0 };
+        if (HDC dc = GetDC(hwnd))
+        {
+            const auto previousFont = SelectObject(dc, UiFont());
+            DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &measured, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+            SelectObject(dc, previousFont);
+            ReleaseDC(hwnd, dc);
+        }
+        return std::max(minimum, static_cast<int>(measured.bottom) + dip(8));
+    };
     int y = dip(24);
-
-    move(SettingsControlId::FolderLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
-    move(SettingsControlId::LaunchpadFolder, metrics.inputLeftPx, y, metrics.inputWidthPx, metrics.controlHeightPx);
-    y += metrics.rowHeightPx;
-    move(SettingsControlId::HotkeyLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
-    move(SettingsControlId::Hotkey, metrics.inputLeftPx, y, metrics.inputWidthPx, metrics.controlHeightPx);
-    y += metrics.rowHeightPx;
-    move(SettingsControlId::IconSizeLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
-    move(SettingsControlId::IconSize, metrics.inputLeftPx, y, metrics.inputWidthPx, comboHeight);
-    y += metrics.rowHeightPx;
-    move(SettingsControlId::DisplayModeLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
-    move(SettingsControlId::DisplayMode, metrics.inputLeftPx, y, metrics.inputWidthPx, comboHeight);
-    y += metrics.rowHeightPx;
-    move(SettingsControlId::LanguageLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
-    move(SettingsControlId::Language, metrics.inputLeftPx, y, metrics.inputWidthPx, comboHeight);
-    y += metrics.rowHeightPx;
-
-    move(SettingsControlId::SpotlightSizeLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
-    const int numericGap = dip(8);
-    const int separatorWidth = dip(24);
-    const int numericWidth = std::max(dip(52), (metrics.inputWidthPx - separatorWidth - numericGap * 2) / 2);
-    move(SettingsControlId::SpotlightWidth, metrics.inputLeftPx, y, numericWidth, metrics.controlHeightPx);
-    move(SettingsControlId::SpotlightSeparator, metrics.inputLeftPx + numericWidth + numericGap, y, separatorWidth, labelHeight);
-    move(SettingsControlId::SpotlightHeight, metrics.inputLeftPx + numericWidth + numericGap * 2 + separatorWidth, y, numericWidth, metrics.controlHeightPx);
-    y += metrics.rowHeightPx;
-    move(SettingsControlId::AppSpacingLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
-    move(SettingsControlId::AppSpacing, metrics.inputLeftPx, y, std::min(dip(96), metrics.inputWidthPx), metrics.controlHeightPx);
-    y += metrics.rowHeightPx;
-    move(SettingsControlId::WheelSensitivityLabel, metrics.sideInsetPx, y, metrics.labelWidthPx, labelHeight);
-    move(SettingsControlId::WheelSensitivity, metrics.inputLeftPx, y, std::min(dip(96), metrics.inputWidthPx), metrics.controlHeightPx);
-    y += metrics.rowHeightPx;
-
-    move(SettingsControlId::StartWithWindows, metrics.sideInsetPx, y, metrics.fullWidthControlPx, metrics.checkboxHeightPx);
-    y += metrics.checkboxHeightPx + dip(8);
-    move(SettingsControlId::ResetSearchOnOpen, metrics.sideInsetPx, y, metrics.fullWidthControlPx, metrics.checkboxHeightPx);
-    y += metrics.checkboxHeightPx + dip(10);
-    move(SettingsControlId::DiagnosticsLabel, metrics.sideInsetPx, y, metrics.fullWidthControlPx, labelHeight);
-    y += labelHeight;
-    const int diagnosticsHeight = std::max(dip(168), textDip(120));
-    move(SettingsControlId::DiagnosticsSummary, metrics.sideInsetPx, y, metrics.fullWidthControlPx, diagnosticsHeight);
-    y += diagnosticsHeight + dip(16);
+    const auto row = [&](SettingsControlId label, SettingsControlId input, bool combo = false) {
+        place(label, contentLeft, y, contentWidth, labelHeight);
+        y += labelHeight + dip(4);
+        place(input, contentLeft, y, contentWidth, combo ? comboHeight : metrics.controlHeightPx);
+        y += metrics.controlHeightPx + dip(18);
+    };
+    const auto toggle = [&](SettingsControlId id) {
+        const int height = wrappedHeight(id, contentWidth, std::max(metrics.checkboxHeightPx, textDip(42)), dip(32));
+        place(id, contentLeft, y, contentWidth, height);
+        y += height + dip(10);
+    };
+    switch (g_settings.lastSettingsPage)
+    {
+    case 0:
+        row(SettingsControlId::DisplayModeLabel, SettingsControlId::DisplayMode, true);
+        row(SettingsControlId::LanguageLabel, SettingsControlId::Language, true);
+        toggle(SettingsControlId::StartWithWindows);
+        break;
+    case 1:
+        row(SettingsControlId::HotkeyLabel, SettingsControlId::Hotkey);
+        toggle(SettingsControlId::ResetSearchOnOpen);
+        toggle(SettingsControlId::ShowRecentAndFavorites);
+        toggle(SettingsControlId::TrackLaunchHistory);
+        toggle(SettingsControlId::EnableEverythingSearch);
+        {
+            const int height = wrappedHeight(SettingsControlId::ClearHistory, contentWidth, metrics.buttonHeightPx, dip(24));
+            place(SettingsControlId::ClearHistory, contentLeft, y, contentWidth, height);
+            y += height + dip(18);
+        }
+        break;
+    case 2:
+    {
+        place(SettingsControlId::SpotlightSizeLabel, contentLeft, y, contentWidth, labelHeight);
+        y += labelHeight + dip(4);
+        const int gap = dip(8), separator = dip(24);
+        const int numericWidth = (contentWidth - separator - gap * 2) / 2;
+        place(SettingsControlId::SpotlightWidth, contentLeft, y, numericWidth, metrics.controlHeightPx);
+        place(SettingsControlId::SpotlightSeparator, contentLeft + numericWidth + gap, y, separator, labelHeight);
+        place(SettingsControlId::SpotlightHeight, contentLeft + numericWidth + gap * 2 + separator, y, numericWidth, metrics.controlHeightPx);
+        y += metrics.controlHeightPx + dip(18);
+        row(SettingsControlId::GlassPresetLabel, SettingsControlId::GlassPreset, true);
+        row(SettingsControlId::GlassBlurLabel, SettingsControlId::GlassBlur);
+        row(SettingsControlId::GlassTintLabel, SettingsControlId::GlassTint);
+        row(SettingsControlId::GlassRefractionLabel, SettingsControlId::GlassRefraction);
+        row(SettingsControlId::GlassRimLabel, SettingsControlId::GlassRim);
+        row(SettingsControlId::MouseBiasLabel, SettingsControlId::MouseBias);
+        toggle(SettingsControlId::ReduceMotion);
+        break;
+    }
+    case 3:
+        row(SettingsControlId::FolderLabel, SettingsControlId::LaunchpadFolder);
+        place(SettingsControlId::Browse, contentLeft, y, contentWidth, metrics.buttonHeightPx);
+        y += metrics.buttonHeightPx + dip(18);
+        row(SettingsControlId::IconSizeLabel, SettingsControlId::IconSize, true);
+        row(SettingsControlId::AppSpacingLabel, SettingsControlId::AppSpacing);
+        row(SettingsControlId::WheelSensitivityLabel, SettingsControlId::WheelSensitivity);
+        break;
+    case 4:
+        place(SettingsControlId::DiagnosticsLabel, contentLeft, y, contentWidth, labelHeight);
+        y += labelHeight + dip(4);
+        place(SettingsControlId::DiagnosticsSummary, contentLeft, y, contentWidth, std::max(dip(230), textDip(180)));
+        y += std::max(dip(230), textDip(180)) + dip(18);
+        break;
+    }
+    // Do not hide/re-show the active page during a blur save: hiding the next
+    // Tab target while Windows is transferring focus discards that focus.
+    for (int id = 3001; id <= 3052; ++id)
+    {
+        if (pageControls[id - 3001] || id == ControlId(SettingsControlId::Save) || id == ControlId(SettingsControlId::Apply)
+            || id == ControlId(SettingsControlId::Cancel) || id == ControlId(SettingsControlId::Category)
+            || id == ControlId(SettingsControlId::Status)) continue;
+        if (HWND control = GetDlgItem(hwnd, id)) ShowWindow(control, SW_HIDE);
+    }
+    y = std::max(y, dip(222));
+    const int statusHeight = wrappedHeight(SettingsControlId::Status, metrics.fullWidthControlPx, textDip(64), 0);
+    move(SettingsControlId::Status, inset, y, metrics.fullWidthControlPx, statusHeight);
+    y += statusHeight + dip(12);
     const int buttonGap = dip(10);
     const int buttonWidth = std::max(dip(72), (metrics.fullWidthControlPx - buttonGap * 2) / 3);
     move(SettingsControlId::Save, metrics.sideInsetPx, y, buttonWidth, metrics.buttonHeightPx);
@@ -9013,7 +9426,13 @@ void LayoutSettingsWindow(HWND hwnd)
 
     const int page = std::max(1L, client.bottom - client.top);
     const int maximumOffset = std::max(0, g_settingsContentHeight - page);
+    const int previousOffset = g_settingsScrollOffset;
     g_settingsScrollOffset = std::clamp(g_settingsScrollOffset, 0, maximumOffset);
+    if (previousOffset != g_settingsScrollOffset)
+    {
+        LayoutSettingsWindow(hwnd);
+        return;
+    }
     SCROLLINFO info = {};
     info.cbSize = sizeof(info);
     info.fMask = SIF_PAGE | SIF_POS | SIF_RANGE;
@@ -9232,15 +9651,115 @@ void ReleaseReservedHotkey(int reservedId)
     if (reservedId != 0 && g_hwnd) UnregisterHotKey(g_hwnd, reservedId);
 }
 
+bool ValidateSettingsNumbers(HWND hwnd)
+{
+    struct Field { SettingsControlId id; double minimum; double maximum; bool integer; };
+    const Field fields[] = {
+        { SettingsControlId::SpotlightWidth, 520, 1600, true },
+        { SettingsControlId::SpotlightHeight, 420, 1000, true },
+        { SettingsControlId::GlassBlur, 0, 100, true },
+        { SettingsControlId::GlassTint, 0, 60, true },
+        { SettingsControlId::GlassRefraction, 0, 45, true },
+        { SettingsControlId::GlassRim, 0, 100, true },
+        { SettingsControlId::MouseBias, 0, 100, true },
+        { SettingsControlId::AppSpacing, 0, 28, true },
+        { SettingsControlId::WheelSensitivity, 0.5, 3.0, false }
+    };
+    for (const auto& field : fields)
+    {
+        const auto text = Trim(GetControlText(hwnd, ControlId(field.id)));
+        wchar_t* end = nullptr;
+        const double value = std::wcstod(text.c_str(), &end);
+        if (text.empty() || end == text.c_str() || *end != L'\0'
+            || !std::isfinite(value) || value < field.minimum || value > field.maximum
+            || (field.integer && (std::floor(value) != value || text.find_first_not_of(L"0123456789") != std::wstring::npos)))
+        {
+            g_settingsStatus = SettingsText(hwnd,
+                L"Settings were not saved. Enter a number between ",
+                L"设置尚未保存。请输入此范围内的数字：")
+                + FormatDouble(field.minimum) + L" – " + FormatDouble(field.maximum);
+            g_settings.lastSettingsPage = (field.id == SettingsControlId::AppSpacing || field.id == SettingsControlId::WheelSensitivity) ? 3 : 2;
+            SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::Category), LB_SETCURSEL, g_settings.lastSettingsPage, 0);
+            g_settingsScrollOffset = 0;
+            SetControlText(hwnd, SettingsControlId::DiagnosticsSummary, g_settingsStatus);
+            SetControlText(hwnd, SettingsControlId::Status, g_settingsStatus);
+            LayoutSettingsWindow(hwnd);
+            SetFocus(GetDlgItem(hwnd, ControlId(field.id)));
+            SendDlgItemMessageW(hwnd, ControlId(field.id), EM_SETSEL, 0, -1);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ValidateSettingsFolder(HWND hwnd, const std::wstring& path)
+{
+    const size_t prefix = path.rfind(L"\\\\?\\", 0) == 0 ? 4 : 0;
+    bool valid = path.find_first_of(L"<>\"|?*", prefix) == std::wstring::npos
+        && std::none_of(path.begin() + prefix, path.end(), [](wchar_t ch) { return ch < 32; });
+    const auto colon = path.find(L':', prefix);
+    valid = valid && (colon == std::wstring::npos
+        || (colon == prefix + 1 && std::iswalpha(path[prefix]) && path.find(L':', colon + 1) == std::wstring::npos));
+    for (size_t start = prefix; valid && start < path.size();)
+    {
+        const auto separator = path.find_first_of(L"\\/", start);
+        const auto component = path.substr(start, separator == std::wstring::npos ? std::wstring::npos : separator - start);
+        auto stem = component.substr(0, component.find(L'.'));
+        while (!stem.empty() && stem.back() == L' ') stem.pop_back();
+        std::transform(stem.begin(), stem.end(), stem.begin(), [](wchar_t ch) { return static_cast<wchar_t>(std::towupper(ch)); });
+        const bool devicePort = stem.size() == 4 && (stem.compare(0, 3, L"COM") == 0 || stem.compare(0, 3, L"LPT") == 0)
+            && std::wstring_view(L"123456789\u00b9\u00b2\u00b3").find(stem[3]) != std::wstring_view::npos;
+        valid = stem != L"CON" && stem != L"PRN" && stem != L"AUX" && stem != L"NUL" && !devicePort;
+        if (separator == std::wstring::npos) break;
+        start = separator + 1;
+    }
+    std::wstring probe = valid ? llp::persistence::NormalizeFolderIdentity(path) : L"";
+    valid = false;
+    while (!probe.empty())
+    {
+        const DWORD attributes = GetFileAttributesW(probe.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES)
+        {
+            valid = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            break;
+        }
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) break;
+        // Preserve valid new-folder input without creating it before saving.
+        // Its nearest existing ancestor must be a directory, not a file.
+        const auto separator = probe.find_last_of(L"\\/");
+        if (separator == std::wstring::npos) break;
+        const size_t parentLength = separator && probe[separator - 1] == L':' ? separator + 1 : separator;
+        if (parentLength >= probe.size()) break;
+        probe.resize(parentLength);
+    }
+    if (valid) return true;
+    g_settingsStatus = SettingsText(hwnd, L"Settings were not saved. Enter a valid folder path, not a file.", L"设置尚未保存。请输入有效的文件夹路径，而非文件。");
+    g_settings.lastSettingsPage = 3;
+    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::Category), LB_SETCURSEL, 3, 0);
+    g_settingsScrollOffset = 0;
+    SetControlText(hwnd, SettingsControlId::Status, g_settingsStatus);
+    SetControlText(hwnd, SettingsControlId::DiagnosticsSummary, g_settingsStatus);
+    LayoutSettingsWindow(hwnd);
+    SetFocus(GetDlgItem(hwnd, ControlId(SettingsControlId::LaunchpadFolder)));
+    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::LaunchpadFolder), EM_SETSEL, 0, -1);
+    return false;
+}
+
 bool ApplySettingsFromWindow(HWND hwnd)
 {
+    if (g_settingsUpdating) return false;
+    SettingsUpdateGuard updatingGuard;
+    if (!ValidateSettingsNumbers(hwnd)) return false;
     const Settings previous = g_settings;
     const Settings candidate = ReadSettingsWindowCandidate(hwnd);
+    if (!ValidateSettingsFolder(hwnd, candidate.launchpadFolder)) return false;
     const bool previousSpotlight = ContainsIgnoreCase(previous.displayMode, L"Spotlight");
     const bool candidateSpotlight = ContainsIgnoreCase(candidate.displayMode, L"Spotlight");
     const bool visibleModeTransition = previousSpotlight != candidateSpotlight
         && g_hwnd
         && IsWindowVisible(g_hwnd);
+    const bool closeSettingsAfterApply = visibleModeTransition && candidateSpotlight;
     int reservedHotkeyId = 0;
     std::wstring hotkeyFailure;
     if (!ReserveCandidateHotkey(candidate, reservedHotkeyId, hotkeyFailure))
@@ -9248,6 +9767,7 @@ bool ApplySettingsFromWindow(HWND hwnd)
         g_settingsStatus = hotkeyFailure;
         AppendStartupLog(L"settings-apply", false, g_settingsStatus);
         PopulateSettingsWindow(hwnd);
+        LayoutSettingsWindow(hwnd);
         return false;
     }
 
@@ -9261,6 +9781,7 @@ bool ApplySettingsFromWindow(HWND hwnd)
             g_settingsStatus = L"Startup registration failed; prior settings and hotkey were kept.";
             AppendStartupLog(L"settings-apply", false, g_settingsStatus);
             PopulateSettingsWindow(hwnd);
+            LayoutSettingsWindow(hwnd);
             return false;
         }
     }
@@ -9274,6 +9795,7 @@ bool ApplySettingsFromWindow(HWND hwnd)
             : L"Settings write failed and startup rollback also failed; prior in-memory values and hotkey were kept.";
         AppendStartupLog(L"settings-apply", false, g_settingsStatus);
         PopulateSettingsWindow(hwnd);
+        LayoutSettingsWindow(hwnd);
         return false;
     }
 
@@ -9288,9 +9810,13 @@ bool ApplySettingsFromWindow(HWND hwnd)
     {
         g_materialIconRasters.clear();
     }
-    g_settingsStatus = L"Settings saved. Active hotkey: " + g_settings.hotkey + L".";
+    g_settingsPersistenceError.clear();
+    g_settingsStatus = SettingsText(hwnd, L"Settings saved. Active hotkey: ", L"设置已保存。当前热键：") + g_settings.hotkey + L".";
     AppendStartupLog(L"settings-apply", true, g_settingsStatus);
-    ReloadData();
+    if (!SamePath(previous.launchpadFolder, candidate.launchpadFolder)) ReloadData();
+    g_searchHistory.SetTrackingEnabled(g_settings.trackLaunchHistory);
+    RebuildSearchIndex();
+    if (previous.reduceMotion != candidate.reduceMotion) RefreshAdaptiveEnvironment();
     RebuildFiltered();
     if (visibleModeTransition && !candidateSpotlight)
     {
@@ -9355,15 +9881,46 @@ bool ApplySettingsFromWindow(HWND hwnd)
         ShowSpotlightImmediately();
         SetForegroundWindow(g_hwnd);
         ActivateSearchInput();
-        DestroyWindow(hwnd);
+        // The originating combo may still be processing CBN_SELCHANGE. Keep
+        // its controls alive until the notification has unwound below.
     }
     else
     {
+        const bool geometryChanged = candidate.spotlightWidth != previous.spotlightWidth || candidate.spotlightHeight != previous.spotlightHeight;
+        if (candidateSpotlight && geometryChanged) ReleaseSpotlightBackdrop();
         PositionWindow();
+        if (candidateSpotlight && g_hwnd && IsWindowVisible(g_hwnd)
+            && (geometryChanged || candidate.reduceMotion != previous.reduceMotion))
+            RebuildVisibleMaterialRenderer();
     }
-    if (IsWindow(hwnd)) PopulateSettingsWindow(hwnd);
+    if (!closeSettingsAfterApply && IsWindow(hwnd))
+    {
+        PopulateSettingsWindow(hwnd);
+        LayoutSettingsWindow(hwnd);
+    }
     RequestSearchRepaint(g_hwnd, true);
+    if (closeSettingsAfterApply && !PostMessageW(hwnd, WmCloseSettingsAfterApply, 0, 0))
+        AppendStartupLog(L"settings-close-post", false, std::to_wstring(GetLastError()));
     return true;
+}
+
+LRESULT CALLBACK SettingsReadOnlyTextSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR subclassId, DWORD_PTR)
+{
+    if (message == WM_GETDLGCODE && lParam)
+    {
+        const auto* key = reinterpret_cast<const MSG*>(lParam);
+        if (key->wParam == VK_TAB || key->wParam == VK_ESCAPE || key->wParam == VK_RETURN) return 0;
+    }
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(hwnd, SettingsReadOnlyTextSubclassProc, subclassId);
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+void CloseSettingsWindow(HWND hwnd)
+{
+    const bool wasUpdating = g_settingsUpdating;
+    g_settingsUpdating = true;
+    DestroyWindow(hwnd);
+    g_settingsUpdating = wasUpdating;
 }
 
 LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -9372,6 +9929,21 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     {
     case WM_CREATE:
     {
+        // Native controls derive UIA names from preceding labels, even hidden
+        // ones. Keep the category and the two dimensions unambiguous.
+        CreateWindowW(L"STATIC", L"", WS_CHILD, 0, 0, 1, 1, hwnd,
+            reinterpret_cast<HMENU>(ControlId(SettingsControlId::CategoryAccessibilityLabel)), g_instance, nullptr);
+        ApplyControlFont(CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+            0, 0, 180, 180, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Category)), g_instance, nullptr));
+        ApplyControlFont(CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 400, 64,
+            hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Status)), g_instance, nullptr));
+        ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 100, 30,
+            hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Browse)), g_instance, nullptr));
+        for (const auto id : { SettingsControlId::ShowRecentAndFavorites, SettingsControlId::TrackLaunchHistory, SettingsControlId::ReduceMotion, SettingsControlId::EnableEverythingSearch })
+            ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX | BS_MULTILINE,
+                0, 0, 400, 44, hwnd, reinterpret_cast<HMENU>(ControlId(id)), g_instance, nullptr));
+        ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_MULTILINE, 0, 0, 400, 30,
+            hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::ClearHistory)), g_instance, nullptr));
         const int labelX = 24;
         const int inputX = 184;
         const int inputW = 332;
@@ -9393,8 +9965,12 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         ResetLanguageCombo(hwnd);
         y += 38;
         CreateSettingsLabel(hwnd, SettingsControlId::SpotlightSizeLabel, labelX, y);
+        CreateWindowW(L"STATIC", L"", WS_CHILD, 0, 0, 1, 1, hwnd,
+            reinterpret_cast<HMENU>(ControlId(SettingsControlId::WidthAccessibilityLabel)), g_instance, nullptr);
         CreateSettingsEdit(hwnd, SettingsControlId::SpotlightWidth, inputX, y, 96);
         ApplyControlFont(CreateWindowW(L"STATIC", L"x", WS_CHILD | WS_VISIBLE | SS_CENTER, inputX + 106, y + 5, 24, 24, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::SpotlightSeparator)), g_instance, nullptr));
+        CreateWindowW(L"STATIC", L"", WS_CHILD, 0, 0, 1, 1, hwnd,
+            reinterpret_cast<HMENU>(ControlId(SettingsControlId::HeightAccessibilityLabel)), g_instance, nullptr);
         CreateSettingsEdit(hwnd, SettingsControlId::SpotlightHeight, inputX + 140, y, 96);
         y += 38;
         CreateSettingsLabel(hwnd, SettingsControlId::AppSpacingLabel, labelX, y);
@@ -9402,6 +9978,18 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         y += 38;
         CreateSettingsLabel(hwnd, SettingsControlId::WheelSensitivityLabel, labelX, y);
         CreateSettingsEdit(hwnd, SettingsControlId::WheelSensitivity, inputX, y, 96);
+        CreateSettingsLabel(hwnd, SettingsControlId::GlassPresetLabel, labelX, y);
+        CreateSettingsCombo(hwnd, SettingsControlId::GlassPreset, inputX, y, inputW);
+        CreateSettingsLabel(hwnd, SettingsControlId::GlassBlurLabel, labelX, y);
+        CreateSettingsEdit(hwnd, SettingsControlId::GlassBlur, inputX, y, 96);
+        CreateSettingsLabel(hwnd, SettingsControlId::GlassTintLabel, labelX, y);
+        CreateSettingsEdit(hwnd, SettingsControlId::GlassTint, inputX, y, 96);
+        CreateSettingsLabel(hwnd, SettingsControlId::GlassRefractionLabel, labelX, y);
+        CreateSettingsEdit(hwnd, SettingsControlId::GlassRefraction, inputX, y, 96);
+        CreateSettingsLabel(hwnd, SettingsControlId::GlassRimLabel, labelX, y);
+        CreateSettingsEdit(hwnd, SettingsControlId::GlassRim, inputX, y, 96);
+        CreateSettingsLabel(hwnd, SettingsControlId::MouseBiasLabel, labelX, y);
+        CreateSettingsEdit(hwnd, SettingsControlId::MouseBias, inputX, y, 96);
         y += 38;
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, inputX, y, inputW, 24, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::StartWithWindows)), g_instance, nullptr));
         y += 32;
@@ -9413,7 +10001,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
             WS_EX_CLIENTEDGE,
             L"EDIT",
             L"",
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
             labelX,
             y,
             492,
@@ -9422,11 +10010,16 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
             reinterpret_cast<HMENU>(ControlId(SettingsControlId::DiagnosticsSummary)),
             g_instance,
             nullptr));
+        SetWindowSubclass(GetDlgItem(hwnd, ControlId(SettingsControlId::DiagnosticsSummary)), SettingsReadOnlyTextSubclassProc, 1, 0);
         y += 184;
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, inputX + 48, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Save)), g_instance, nullptr));
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, inputX + 146, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Apply)), g_instance, nullptr));
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, inputX + 244, y, 88, 30, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Cancel)), g_instance, nullptr));
         PopulateSettingsWindow(hwnd);
+        SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::SpotlightWidth), EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"520–1600"));
+        SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::SpotlightHeight), EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"420–1000"));
+        SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::AppSpacing), EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"0–28"));
+        SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::WheelSensitivity), EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"0.5–3.0"));
         LayoutSettingsWindow(hwnd);
         return 0;
     }
@@ -9497,14 +10090,128 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         InvalidateRect(hwnd, nullptr, TRUE);
         return 0;
     case WM_COMMAND:
-        if (LOWORD(wParam) == ControlId(SettingsControlId::Language) && HIWORD(wParam) == CBN_SELCHANGE)
+    {
+        if (g_settingsUpdating) return 0;
+        const auto id = static_cast<SettingsControlId>(LOWORD(wParam));
+        const int notification = HIWORD(wParam);
+        if (id == SettingsControlId::Category && notification == LBN_SELCHANGE)
         {
-            ApplyLanguageToSettingsWindow(hwnd);
+            const int page = static_cast<int>(SendDlgItemMessageW(hwnd, ControlId(id), LB_GETCURSEL, 0, 0));
+            if (page < 0 || page > 4) return 0;
+            g_settingsUpdating = true;
+            const bool valid = ValidateSettingsNumbers(hwnd)
+                && ValidateSettingsFolder(hwnd, ReadSettingsWindowCandidate(hwnd).launchpadFolder);
+            g_settingsUpdating = false;
+            if (!valid) return 0;
+            Settings candidate = g_settings;
+            candidate.lastSettingsPage = page;
+            if (SaveSettings(candidate))
+            {
+                g_settings.lastSettingsPage = page;
+                g_settingsScrollOffset = 0;
+                LayoutSettingsWindow(hwnd);
+            }
+            else
+            {
+                SendDlgItemMessageW(hwnd, ControlId(id), LB_SETCURSEL, g_settings.lastSettingsPage, 0);
+                g_settingsStatus = SettingsText(hwnd, L"Could not save this page. Prior settings were kept.", L"无法保存页面，原设置已保留。");
+                SetControlText(hwnd, SettingsControlId::Status, g_settingsStatus);
+                LayoutSettingsWindow(hwnd);
+            }
             return 0;
         }
-        if (LOWORD(wParam) == ControlId(SettingsControlId::Save))
+        if (id == SettingsControlId::Browse && notification == BN_CLICKED)
         {
-            if (ApplySettingsFromWindow(hwnd) && IsWindow(hwnd)) DestroyWindow(hwnd);
+            IFileOpenDialog* dialog = nullptr;
+            if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))))
+            {
+                DWORD options = 0;
+                dialog->GetOptions(&options);
+                dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+                dialog->SetTitle(SettingsText(hwnd, L"Choose your Launchpad folder", L"选择启动台文件夹"));
+                if (SUCCEEDED(dialog->Show(hwnd)))
+                {
+                    IShellItem* folder = nullptr;
+                    if (SUCCEEDED(dialog->GetResult(&folder)))
+                    {
+                        PWSTR path = nullptr;
+                        if (SUCCEEDED(folder->GetDisplayName(SIGDN_FILESYSPATH, &path)))
+                        {
+                            SetControlText(hwnd, SettingsControlId::LaunchpadFolder, path);
+                            CoTaskMemFree(path);
+                            ApplySettingsFromWindow(hwnd);
+                        }
+                        folder->Release();
+                    }
+                }
+                dialog->Release();
+            }
+            return 0;
+        }
+        if (id == SettingsControlId::ClearHistory && notification == BN_CLICKED)
+        {
+            if (g_historyPersistence.PendingClearRequestId()) return 0;
+            if (MessageBoxW(hwnd, SettingsText(hwnd, L"Clear local launch counts and recent apps? Favorites will be kept.", L"清除本机启动次数与最近使用记录？收藏将保留。"),
+                SettingsText(hwnd, L"Clear launch history", L"清除启动历史"), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return 0;
+            const bool clearQueued = g_searchHistoryWritable && g_searchHistoryLoaded
+                && g_historyPersistence.BeginClear(g_searchHistory, g_shellBroker, GetSearchHistoryPath());
+            g_settingsStatus = clearQueued
+                ? SettingsText(hwnd, L"Clearing launch history…", L"正在清除启动历史…")
+                : SettingsText(hwnd, L"History is not writable. Nothing was cleared.", L"历史不可写入，未清除任何记录。");
+            EnableWindow(GetDlgItem(hwnd, ControlId(id)), !clearQueued);
+            SetControlText(hwnd, SettingsControlId::Status, g_settingsStatus);
+            LayoutSettingsWindow(hwnd);
+            return 0;
+        }
+        if (id == SettingsControlId::GlassPreset && notification == CBN_SELCHANGE)
+        {
+            const int presetIndex = static_cast<int>(SendDlgItemMessageW(hwnd, ControlId(id), CB_GETCURSEL, 0, 0));
+            if (presetIndex >= 0 && presetIndex <= 2)
+            {
+                Settings temp = g_settings;
+                ApplyGlassPresetValues(temp, presetIndex);
+                const bool wasUpd = g_settingsUpdating;
+                g_settingsUpdating = true;
+                SetControlText(hwnd, SettingsControlId::GlassBlur, std::to_wstring(temp.glassBlurPercent));
+                SetControlText(hwnd, SettingsControlId::GlassTint, std::to_wstring(temp.glassTintPercent));
+                SetControlText(hwnd, SettingsControlId::GlassRefraction, std::to_wstring(temp.glassRefractionPx));
+                SetControlText(hwnd, SettingsControlId::GlassRim, std::to_wstring(temp.glassRimPercent));
+                g_settingsUpdating = wasUpd;
+            }
+            ApplySettingsFromWindow(hwnd);
+            return 0;
+        }
+        const bool opticalEditCommitted = notification == EN_KILLFOCUS
+            && (id == SettingsControlId::GlassBlur || id == SettingsControlId::GlassTint
+                || id == SettingsControlId::GlassRefraction || id == SettingsControlId::GlassRim);
+        if (opticalEditCommitted)
+        {
+            const bool wasUpd = g_settingsUpdating;
+            g_settingsUpdating = true;
+            SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::GlassPreset), CB_SETCURSEL, 3, 0);
+            g_settingsUpdating = wasUpd;
+            ApplySettingsFromWindow(hwnd);
+            return 0;
+        }
+        const bool comboChanged = notification == CBN_SELCHANGE
+            && (id == SettingsControlId::DisplayMode || id == SettingsControlId::Language || id == SettingsControlId::IconSize);
+        const bool toggleChanged = notification == BN_CLICKED
+            && (id == SettingsControlId::StartWithWindows || id == SettingsControlId::ResetSearchOnOpen
+                || id == SettingsControlId::ShowRecentAndFavorites || id == SettingsControlId::TrackLaunchHistory
+                || id == SettingsControlId::ReduceMotion || id == SettingsControlId::EnableEverythingSearch);
+        const bool editCommitted = notification == EN_KILLFOCUS
+            && (id == SettingsControlId::LaunchpadFolder || id == SettingsControlId::Hotkey
+                || id == SettingsControlId::SpotlightWidth || id == SettingsControlId::SpotlightHeight
+                || id == SettingsControlId::MouseBias
+                || id == SettingsControlId::AppSpacing || id == SettingsControlId::WheelSensitivity);
+        if (comboChanged || toggleChanged || editCommitted)
+        {
+            ApplySettingsFromWindow(hwnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == ControlId(SettingsControlId::Save) || LOWORD(wParam) == IDOK)
+        {
+            if (ApplySettingsFromWindow(hwnd) && IsWindow(hwnd)) CloseSettingsWindow(hwnd);
             return 0;
         }
         if (LOWORD(wParam) == ControlId(SettingsControlId::Apply))
@@ -9512,14 +10219,20 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
             ApplySettingsFromWindow(hwnd);
             return 0;
         }
-        if (LOWORD(wParam) == ControlId(SettingsControlId::Cancel))
+        if (LOWORD(wParam) == ControlId(SettingsControlId::Cancel) || LOWORD(wParam) == IDCANCEL)
         {
-            DestroyWindow(hwnd);
+            CloseSettingsWindow(hwnd);
             return 0;
         }
         break;
+    }
+    case WmCloseSettingsAfterApply:
+        CloseSettingsWindow(hwnd);
+        return 0;
     case WM_CLOSE:
-        DestroyWindow(hwnd);
+        if (!g_settingsUpdating && !ApplySettingsFromWindow(hwnd)) return 0;
+        if (!IsWindow(hwnd)) return 0;
+        CloseSettingsWindow(hwnd);
         return 0;
     case WM_DESTROY:
         if (g_settingsHwnd == hwnd) g_settingsHwnd = nullptr;
@@ -9530,6 +10243,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
 
 void ShowSettingsWindow()
 {
+    if (!g_searchHistoryLoaded && !g_catalogRefreshPending) RequestCatalogRefresh();
     if (g_settingsHwnd)
     {
         ShowWindow(g_settingsHwnd, IsIconic(g_settingsHwnd) ? SW_RESTORE : SW_SHOW);
@@ -9560,10 +10274,10 @@ void ShowSettingsWindow()
     if (settingsMonitor && GetMonitorInfoW(settingsMonitor, &settingsMonitorInfo)) settingsWork = settingsMonitorInfo.rcWork;
     else SystemParametersInfoW(SPI_GETWORKAREA, 0, &settingsWork, 0);
     const int settingsWidth = std::min(
-        llp::geometry::ScaleDip(560, static_cast<int>(g_settingsDpi)),
+        llp::geometry::ScaleDip(760, static_cast<int>(g_settingsDpi)),
         static_cast<int>(settingsWork.right - settingsWork.left));
     const int settingsHeight = std::min(
-        llp::geometry::ScaleDip(730, static_cast<int>(g_settingsDpi)),
+        llp::geometry::ScaleDip(680, static_cast<int>(g_settingsDpi)),
         static_cast<int>(settingsWork.bottom - settingsWork.top));
     const int settingsX = g_testMonitorDevice.empty()
         ? CW_USEDEFAULT
@@ -9588,6 +10302,7 @@ void ShowSettingsWindow()
     {
         ShowWindow(g_settingsHwnd, SW_SHOW);
         SetForegroundWindow(g_settingsHwnd);
+        SetFocus(GetDlgItem(g_settingsHwnd, ControlId(SettingsControlId::Category)));
     }
 }
 
@@ -9837,7 +10552,7 @@ void ShowTrayMenu()
     AppendMenuW(menu, MF_STRING, TrayOpenCommand, Text(L"Open launchpad", L"打开启动台"));
     AppendMenuW(menu, MF_STRING, TrayOpenFolderCommand, Text(L"Open folder", L"打开文件夹"));
     AppendMenuW(menu, MF_STRING, TrayRefreshCommand, Text(L"Refresh", L"刷新"));
-    AppendMenuW(menu, MF_STRING, TraySettingsCommand, Text(L"Settings", L"设置"));
+    AppendMenuW(menu, MF_STRING, TraySettingsCommand, Text(L"Settings\tCtrl+,", L"设置\tCtrl+,"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, TrayExitCommand, Text(L"Exit", L"退出"));
     POINT point = {};
@@ -9957,6 +10672,7 @@ void ShowWorkspaceContextMenu(POINT point)
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, WorkspaceToggleEditCommand, g_launchpadState.IsEditing() ? Text(L"Done editing", L"完成编辑") : Text(L"Edit apps and regions", L"编辑应用与区域"));
+    AppendMenuW(menu, MF_STRING, TraySettingsCommand, Text(L"Settings\tCtrl+,", L"设置\tCtrl+,"));
     if (g_launchpadState.IsEditing())
     {
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -10158,7 +10874,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     if (message == WmMaterialRendererStatus)
     {
         WriteMaterialProbeState(hwnd);
-        const auto statusDiagnostics = g_materialRenderer.SnapshotDiagnostics();
+        const auto* materialProbe = reinterpret_cast<const MaterialProbeHostState*>(
+            GetPropW(hwnd, MaterialProbeProperty));
+        const auto* statusRenderer = materialProbe && materialProbe->renderer
+            ? materialProbe->renderer
+            : &g_materialRenderer;
+        const auto statusDiagnostics = statusRenderer->SnapshotDiagnostics();
+        if (g_hiddenFootprintNeedsPostRendererTrim
+            && llp::material::CanFinalizeHiddenWorkerCleanup(statusDiagnostics,
+                g_requestedMaterialActivation, IsWindowVisible(hwnd) != FALSE,
+                g_motionTimeline.TargetVisible()))
+        {
+            // The initial trim runs at the animation boundary and intentionally
+            // remains non-blocking. This completion also follows backend owner
+            // destruction and CoUninitialize; it is not a GPU-retirement fence.
+            TrimHiddenFootprint();
+            g_hiddenFootprintNeedsPostRendererTrim = false;
+        }
         if (SpotlightComposeHideLifetimeProbeEnabled()
             && statusDiagnostics.composeLifetimeProbeEntered
             && !g_spotlightFlowProbe.composeHideLifetimeInjected)
@@ -10508,9 +11240,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WmShellBrokerResult:
         HandleShellBrokerResult(lParam);
         return 0;
+    case WmEverythingResults:
+        HandleEverythingResults();
+        return 0;
     case WmAdaptiveSnapshot:
+        if (wParam == 7)
+        {
+            return SpotlightDevelopmentFlowProbeEnabled()
+                && WriteSpotlightFlowReadyState(true) ? 1 : 0;
+        }
         if (g_spotlightFlowProbe.active)
         {
+            if (wParam == 6 && SpotlightDevelopmentFlowProbeEnabled() && IsWindowVisible(hwnd))
+            {
+                // Reuse the broker's existing test delay to keep real Shell icon
+                // requests pending across hide; no synthetic result or UI sleep.
+                ReleaseAllResidentIcons();
+                RequestCatalogRefresh(1000);
+                for (const int index : g_filtered) QueueItemIcon(g_items[index]);
+            }
             if (SpotlightOwnershipProbeEnabled() && IsSpotlightMode() && IsWindowVisible(hwnd))
             {
                 if (wParam == 2)
@@ -10633,6 +11381,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_LBUTTONDOWN:
     {
         POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        UpdateSpotlightLighting(hwnd, point, true, true);
         if (g_launchpadFlowProbe.active)
         {
             g_launchpadFlowProbe.lastPointerX = point.x;
@@ -10653,6 +11402,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (PtInRect(&undoRect, point))
             {
                 RequestOrganizationUndo();
+                return 0;
+            }
+        }
+        if (IsSpotlightMode())
+        {
+            const RECT auxiliaryRect = SpotlightAuxiliaryRect(client);
+            if (PtInRect(&auxiliaryRect, point))
+            {
+                g_spotlightState.FocusAuxiliary();
+                ApplySpotlightInteractionState(false);
+                HideNativeUi();
+                ShowSettingsWindow();
                 return 0;
             }
         }
@@ -10683,18 +11444,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (PtInRect(&editRect, point))
             {
                 SetLaunchpadEditing(!g_launchpadState.IsEditing());
-                return 0;
-            }
-        }
-        if (IsSpotlightMode())
-        {
-            const RECT auxiliaryRect = SpotlightAuxiliaryRect(client);
-            if (PtInRect(&auxiliaryRect, point))
-            {
-                g_spotlightState.FocusAuxiliary();
-                ApplySpotlightInteractionState(false);
-                HideNativeUi();
-                ShowSettingsWindow();
                 return 0;
             }
         }
@@ -10792,6 +11541,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_MOUSEMOVE:
     {
         POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        UpdateSpotlightLighting(hwnd, point, true, (wParam & MK_LBUTTON) != 0);
         int hovered = -1;
         for (const auto& hit : g_hits)
         {
@@ -10810,6 +11560,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         TrackMouseEvent(&tracking);
         if (g_searchPointerSelecting)
         {
+            if ((wParam & MK_LBUTTON) == 0)
+            {
+                g_searchPointerSelecting = false;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                return 0;
+            }
             g_searchInput.SetCaret(SearchTextPositionFromClientX(hwnd, point.x), true);
             SearchCaretChanged(hwnd);
             return 0;
@@ -10844,6 +11600,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     case WM_MOUSELEAVE:
+        UpdateSpotlightLighting(hwnd, {}, false, false);
         if (g_hoveredFilteredIndex != -1)
         {
             g_hoveredFilteredIndex = -1;
@@ -10851,6 +11608,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     case WM_LBUTTONUP:
+        UpdateSpotlightLighting(hwnd,
+            { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) }, true, false);
         if (g_searchPointerSelecting)
         {
             g_searchPointerSelecting = false;
@@ -10925,6 +11684,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         ShowWorkspaceContextMenu(point);
         return 0;
     }
+    case WM_CONTEXTMENU:
+        if (!IsSpotlightMode() && GET_X_LPARAM(lParam) == -1 && GET_Y_LPARAM(lParam) == -1)
+        {
+            POINT point = { llp::geometry::ScaleDip(32, static_cast<int>(g_windowDpi)), ContentClipTop() };
+            ShowWorkspaceContextMenu(point);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, message, wParam, lParam);
     case WM_LBUTTONDBLCLK:
     {
         if (!IsSpotlightMode() && g_launchpadState.IsEditing()) return 0;
@@ -10943,6 +11710,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         const bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (control && wParam == VK_OEM_COMMA)
+        {
+            ShowSettingsWindow();
+            return 0;
+        }
         if (g_searchInput.IsComposing())
         {
             if (wParam == VK_ESCAPE)
@@ -11211,6 +11983,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     case WM_CAPTURECHANGED:
+        if (reinterpret_cast<HWND>(lParam) != hwnd)
+            UpdateSpotlightLighting(hwnd, {}, false, false);
         if (reinterpret_cast<HWND>(lParam) != hwnd) g_searchPointerSelecting = false;
         if (reinterpret_cast<HWND>(lParam) != hwnd && g_selectionBoxActive)
         {
@@ -11236,6 +12010,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (g_launchpadFlowProbe.active) WriteFileUtf8(g_launchpadFlowProbe.outputPath, BuildLaunchpadFlowProbeJson());
         g_materialRenderer.Hide();
         g_materialRenderer.Shutdown();
+        g_everythingBridge.Shutdown();
         g_searchAccessibility.Shutdown();
         g_shellBroker.Stop();
         MSG pendingBrokerResult = {};
@@ -11244,6 +12019,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             auto* pending = reinterpret_cast<llp::shell::Result*>(pendingBrokerResult.lParam);
             if (pending)
             {
+                if (pending->kind == llp::shell::ResultKind::Persistence && pending->requestId == g_historyPersistence.PendingClearRequestId())
+                    CompleteHistoryClear(*pending);
                 if (pending->icon) DestroyIcon(pending->icon);
                 delete pending;
             }
@@ -11524,6 +12301,15 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
 
     const bool shellBrokerStarted = g_shellBroker.Start(g_hwnd, WmShellBrokerResult);
     AppendStartupLog(L"shell-broker", shellBrokerStarted, shellBrokerStarted ? L"dedicated STA queued" : L"thread creation failed");
+    g_everythingDetected = llp::everything::IsEverythingRunning();
+    g_everythingBridge.SetCallback([hwnd = g_hwnd](llp::everything::QueryResponse response) {
+        {
+            std::lock_guard<std::mutex> lock(g_everythingMutex);
+            g_everythingPendingResponse = std::move(response);
+            g_hasEverythingPendingResponse = true;
+        }
+        if (hwnd) PostMessageW(hwnd, WmEverythingResults, 0, 0);
+    });
 
     if (!g_diagnosticsUiMode && !g_catalogBrokerProbe.active && !g_shellImportProbe.active && !textInputProbeActive && !g_spotlightFlowProbe.active && !g_launchpadFlowProbe.active && !g_organizationProbe.active && !g_regionUndoProbe.active && !materialProbeActive)
     {
@@ -11655,6 +12441,24 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     MSG msg = {};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0)
     {
+        const HWND previousFocus = GetFocus();
+        if (g_settingsHwnd && IsDialogMessageW(g_settingsHwnd, &msg))
+        {
+            const HWND focus = GetFocus();
+            const bool keyboardInput = msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN;
+            if (g_settingsHwnd && (focus != previousFocus || keyboardInput) && IsChild(g_settingsHwnd, focus))
+            {
+                RECT bounds = {}, client = {};
+                GetWindowRect(focus, &bounds);
+                MapWindowPoints(nullptr, g_settingsHwnd, reinterpret_cast<POINT*>(&bounds), 2);
+                GetClientRect(g_settingsHwnd, &client);
+                const int margin = llp::geometry::ScaleDip(8, static_cast<int>(g_settingsDpi));
+                const int delta = bounds.top < margin ? bounds.top - margin
+                    : (bounds.bottom > client.bottom - margin ? bounds.bottom - client.bottom + margin : 0);
+                if (delta) ScrollSettingsWindow(g_settingsHwnd, g_settingsScrollOffset + delta);
+            }
+            continue;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

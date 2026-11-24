@@ -46,59 +46,89 @@ SceneMetrics BuildSceneMetrics(const MetricsRequest& request)
     const int twoLineLabelDip = (38 * metrics.textScalePercent + 99) / 100;
     const int accessibleTileDip = inferredIconDip + 24 + twoLineLabelDip + 8;
     metrics.tileSizePx = std::max(1, dip(std::max(baseTileDip, accessibleTileDip)));
-    metrics.gapPx = std::max(0, dip(std::max(0, request.gapDip)));
-    metrics.contentLeftPx = dip(request.spotlight ? 68 : 44);
+    metrics.gapPx = std::max(request.spotlight ? dip(10) : 0, dip(std::max(0, request.gapDip)));
+    metrics.contentLeftPx = dip(request.spotlight ? 46 : 44);
     metrics.regionHeaderHeightPx = std::max(dip(38), textDip(30));
-    metrics.cornerRadiusPx = dip(34);
-    metrics.searchFontPx = textDip(26);
-    metrics.tileFontPx = textDip(15);
+    metrics.cornerRadiusPx = dip(request.spotlight ? 26 : 34);
+    metrics.searchFontPx = textDip(request.spotlight ? 21 : 26);
+    metrics.tileFontPx = textDip(request.spotlight ? 13 : 15);
     metrics.headerFontPx = textDip(18);
     metrics.iconFontPx = textDip(17);
 
-    const int searchTop = dip(34);
-    const int searchHeight = std::max(dip(50), textDip(32) + dip(18));
-    const int searchSideInset = dip(request.spotlight ? 68 : 48);
-    const int searchRightInset = dip(request.spotlight ? 68 : 148);
-    metrics.search = {
-        searchSideInset,
-        searchTop,
-        std::max(searchSideInset, clientWidth - searchRightInset),
-        std::min(clientHeight, searchTop + searchHeight)
-    };
-    const int searchTextInset = dip(22);
-    metrics.searchText = {
-        std::min(metrics.search.right, metrics.search.left + searchTextInset),
-        metrics.search.top,
-        std::max(metrics.search.left, metrics.search.right - searchTextInset),
-        metrics.search.bottom
-    };
+    if (request.spotlight)
+    {
+        const int outerPad = dip(28);
+        const int searchTop = outerPad;
+        const int searchHeight = std::max(dip(58), textDip(28) + dip(26));
+        metrics.search = {
+            outerPad,
+            searchTop,
+            std::max(outerPad, clientWidth - outerPad),
+            std::min(clientHeight, searchTop + searchHeight)
+        };
+        metrics.auxiliary = { 0, 0, 0, 0 };
+        const int searchLeftText = std::min(metrics.search.right, metrics.search.left + dip(52));
+        const int searchRightText = std::max(searchLeftText, metrics.search.right - dip(20));
+        metrics.searchText = {
+            searchLeftText,
+            metrics.search.top,
+            searchRightText,
+            metrics.search.bottom
+        };
+        const int contentTop = std::min(clientHeight, metrics.search.bottom + dip(2));
+        metrics.contentClip = {
+            outerPad + dip(10),
+            contentTop,
+            std::max(outerPad + dip(10), clientWidth - outerPad - dip(10)),
+            std::max(contentTop, clientHeight - outerPad - dip(8))
+        };
+        metrics.initialContentTopPx = contentTop + dip(14);
+    }
+    else
+    {
+        const int searchTop = dip(34);
+        const int searchHeight = std::max(dip(50), textDip(32) + dip(18));
+        const int searchSideInset = dip(48);
+        const int searchRightInset = dip(148);
+        metrics.search = {
+            searchSideInset,
+            searchTop,
+            std::max(searchSideInset, clientWidth - searchRightInset),
+            std::min(clientHeight, searchTop + searchHeight)
+        };
+        const int searchTextInset = dip(22);
+        metrics.searchText = {
+            std::min(metrics.search.right, metrics.search.left + searchTextInset),
+            metrics.search.top,
+            std::max(metrics.search.left, metrics.search.right - searchTextInset),
+            metrics.search.bottom
+        };
 
-    const int contentTop = std::min(clientHeight, metrics.search.bottom + dip(16));
-    const int contentSideInset = request.spotlight ? dip(68) : 0;
-    const int contentBottomInset = request.spotlight ? dip(72) : 0;
-    metrics.contentClip = {
-        contentSideInset,
-        contentTop,
-        std::max(contentSideInset, clientWidth - contentSideInset),
-        std::max(contentTop, clientHeight - contentBottomInset)
-    };
-    metrics.initialContentTopPx = contentTop + dip(14);
+        const int contentTop = std::min(clientHeight, metrics.search.bottom + dip(16));
+        metrics.contentClip = {
+            0,
+            contentTop,
+            clientWidth,
+            clientHeight
+        };
+        metrics.initialContentTopPx = contentTop + dip(14);
 
-    const int auxiliaryWidth = std::max(dip(48), textDip(32));
-    const int auxiliaryHeight = std::max(dip(40), textDip(32));
-    metrics.auxiliary = {
-        std::max(0, clientWidth - dip(28) - auxiliaryWidth),
-        std::max(0, clientHeight - dip(20) - auxiliaryHeight),
-        std::max(0, clientWidth - dip(28)),
-        std::max(0, clientHeight - dip(20))
-    };
+        const int auxiliaryWidth = std::max(dip(48), textDip(32));
+        const int auxiliaryHeight = std::max(dip(40), textDip(32));
+        metrics.auxiliary = {
+            std::max(0, clientWidth - dip(28) - auxiliaryWidth),
+            std::max(0, clientHeight - dip(20) - auxiliaryHeight),
+            std::max(0, clientWidth - dip(28)),
+            std::max(0, clientHeight - dip(20))
+        };
+    }
 
     const int editWidth = std::max(dip(84), textDip(68));
     metrics.editControl = {
         std::max(0, clientWidth - dip(48) - editWidth),
-        searchTop,
+        metrics.search.top,
         std::max(0, clientWidth - dip(48)),
-        std::min(clientHeight, searchTop + std::max(searchHeight, dip(44)))
+        std::min(clientHeight, metrics.search.top + std::max(metrics.search.bottom - metrics.search.top, dip(44)))
     };
 
     const int feedbackWidth = std::min(dip(560), std::max(dip(280), clientWidth - dip(80)));
