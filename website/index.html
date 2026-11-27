@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#070a12">
+  <title>LightLaunchpad · Windows 原生液态玻璃启动台</title>
+  <meta name="description" content="LightLaunchpad 是一款 3.6 MB 单文件 Windows 原生 C++ 液态玻璃启动台：Alt+D 零延迟唤醒、72% 多屏指针随行、Everything 本地文件融合与纯本地键鼠热力图。">
+  <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
+  <link rel="stylesheet" href="style.css">
+  <script defer src="hero-film.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <a class="brand" href="#hero">
+        <img src="assets/logo.svg" alt="LightLaunchpad 徽标" width="28" height="28">
+        <span>LightLaunchpad</span>
+        <span class="ver-pill">V1.13</span>
+      </a>
+      <nav class="nav" aria-label="主导航">
+        <a href="#hero">英雄影片</a>
+        <a href="#glass-lab">液态玻璃</a>
+        <a href="#spatial">多屏与检索</a>
+        <a href="#studio">设置与统计</a>
+        <a href="#download">下载</a>
+      </nav>
+      <a class="btn btn-primary btn-sm" href="#download">下载 Windows 版</a>
+    </div>
+  </header>
+
+  <main>
+    <!-- Chapter 1: Cinema Hero Film Stage -->
+    <section id="hero" class="hero-section">
+      <div class="container">
+        <div class="hero-header">
+          <div class="hero-copy">
+            <p class="eyebrow">WINDOWS NATIVE C++ · MACOS 26 LIQUID GLASS</p>
+            <h1>轻若无物，<span class="accent-text">一触即达。</span></h1>
+            <p class="lead">单文件 3.6 MB 原生启动台。按下 <kbd>Alt</kbd> + <kbd>D</kbd>，在鼠标所在屏幕唤出真实折射的液态玻璃聚焦窗——零 Electron，零运行时，静默常驻低于 60 MiB。</p>
+          </div>
+          <div class="hero-actions">
+            <a class="btn btn-primary btn-lg" href="https://github.com/thomasthzh/LightLaunchpad/releases/latest" target="_blank" rel="noopener">
+              下载最新稳定版 (x64)
+            </a>
+            <a class="btn btn-ghost btn-lg" href="https://github.com/thomasthzh/LightLaunchpad" target="_blank" rel="noopener">
+              GitHub 源码
+            </a>
+          </div>
+        </div>
+
+        <div class="cinema-frame">
+          <canvas id="hero-film-canvas" aria-label="LightLaunchpad 英雄镜头宣传影片"></canvas>
+          <div class="film-progress" aria-hidden="true">
+            <div id="film-progress-fill" class="film-progress-fill"></div>
+          </div>
+          <div class="film-hud">
+            <div class="film-chapters" role="tablist" aria-label="影片章节">
+              <button type="button" class="film-chapter is-active">01 · Alt+D</button>
+              <button type="button" class="film-chapter">02 · 液态玻璃</button>
+              <button type="button" class="film-chapter">03 · 光标下方</button>
+              <button type="button" class="film-chapter">04 · 剪贴板与热词</button>
+              <button type="button" class="film-chapter">05 · 热力图与时长</button>
+              <button type="button" class="film-chapter">06 · 终极定格</button>
+            </div>
+            <div class="film-controls">
+              <span id="film-timecode" class="timecode">0.0s / 16.5s</span>
+              <button id="film-play" type="button" class="hud-btn">暂停</button>
+              <button id="film-mute" type="button" class="hud-btn">开启音效</button>
+              <button id="film-replay" type="button" class="hud-btn">重播</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Chapter 2: Interactive Liquid Glass Optical Lab -->
+    <section id="glass-lab" class="section">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow">REAL-TIME OPTICAL ENGINE · DIRECTX 11</p>
+          <h2>不是廉价模糊，是可调校的液态玻璃</h2>
+          <p class="section-desc">内置 Crystal、Frosted、Tinted 三套光学预设，并开放模糊浓度、表面着色与双角高光实时微调。拖动下方滑块，直接感受玻璃光学变化。</p>
+        </div>
+
+        <div class="lab-grid">
+          <div class="lab-stage" id="lab-stage">
+            <div class="lab-wallpaper" aria-hidden="true">
+              <div class="orb orb-a"></div>
+              <div class="orb orb-b"></div>
+              <div class="grid-lines"></div>
+            </div>
+            <div class="glass-preview" id="glass-preview">
+              <div class="gp-search">
+                <span class="gp-icon">⌕</span>
+                <span class="gp-query">LightLaunchpad</span>
+                <span class="gp-badge">Crystal</span>
+              </div>
+              <div class="gp-list">
+                <div class="gp-row is-focus">
+                  <span class="gp-app-dot" style="background:#38BDF8">飞</span>
+                  <div>
+                    <div class="gp-name">飞书 Feishu</div>
+                    <div class="gp-sub">应用 · 回车即刻启动</div>
+                  </div>
+                </div>
+                <div class="gp-row">
+                  <span class="gp-app-dot" style="background:#3B82F6">VS</span>
+                  <div>
+                    <div class="gp-name">Visual Studio Code</div>
+                    <div class="gp-sub">应用 · 开发工具</div>
+                  </div>
+                </div>
+                <div class="gp-row">
+                  <span class="gp-app-dot" style="background:#10B981">Ev</span>
+                  <div>
+                    <div class="gp-name">季度设计评审.pdf</div>
+                    <div class="gp-sub">Everything 本地文件 · &lt; 3ms</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="lab-panel">
+            <div class="panel-group">
+              <label class="panel-label">材质预设</label>
+              <div class="seg-group" id="lab-presets">
+                <button type="button" class="seg-btn is-active" data-preset="crystal">Crystal</button>
+                <button type="button" class="seg-btn" data-preset="frosted">Frosted</button>
+                <button type="button" class="seg-btn" data-preset="tinted">Tinted</button>
+              </div>
+            </div>
+
+            <div class="panel-group">
+              <div class="slider-head">
+                <label for="sl-blur">背景模糊强度</label>
+                <output id="out-blur">6%</output>
+              </div>
+              <input id="sl-blur" type="range" min="0" max="100" value="6">
+            </div>
+
+            <div class="panel-group">
+              <div class="slider-head">
+                <label for="sl-tint">玻璃表面着色</label>
+                <output id="out-tint">2%</output>
+              </div>
+              <input id="sl-tint" type="range" min="0" max="40" value="2">
+            </div>
+
+            <div class="panel-group">
+              <div class="slider-head">
+                <label for="sl-rim">双角高光边框</label>
+                <output id="out-rim">95%</output>
+              </div>
+              <input id="sl-rim" type="range" min="0" max="150" value="95">
+            </div>
+
+            <p class="panel-note">实际桌面端由 DirectX 11 着色器渲染 30px 弧面弯月折射带与指针倾斜高光，60Hz 实测帧耗时 P95 ≤ 16.7ms。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Chapter 3: Spatial Placement & Everything Hybrid Search -->
+    <section id="spatial" class="section section-alt">
+      <div class="container split-two">
+        <article class="feature-card">
+          <p class="eyebrow">CURSOR-FIRST PLACEMENT</p>
+          <h3>鼠标在哪块屏，聚焦就在哪块屏</h3>
+          <p class="card-desc">以屏幕中央为基准向鼠标偏移 <strong>72%</strong>，同时自动锁定 24 DIP 安全边界，绝不贴边截断。在下方双屏区域移动并点击鼠标即可实测落位算法：</p>
+          <div class="dual-sandbox" id="dual-sandbox" title="在任意屏幕内移动或点击以测试 72% 随行落位">
+            <div class="vmon" data-mon="0"><span>Display 1</span></div>
+            <div class="vmon" data-mon="1"><span>Display 2</span></div>
+            <div class="vspot" id="vspot">Spotlight</div>
+            <div class="vcursor" id="vcursor"></div>
+          </div>
+        </article>
+
+        <article class="feature-card">
+          <p class="eyebrow">ZERO-DEPENDENCY IPC</p>
+          <h3>应用优先，Everything 文件零延迟融合</h3>
+          <p class="card-desc">通过原生 Win32 <code>WM_COPYDATA</code> 直连标准版 Everything 1.4 / 1.5，无需任何额外 DLL 或后台服务。未装 Everything 时自动静默降级为纯应用搜索。</p>
+          <div class="search-demo">
+            <div class="sd-bar">
+              <span class="sd-pill">混合模式</span>
+              <code>直接输入关键词</code>
+              <span class="sd-arrow">→</span>
+              <span>应用排在最前，下方附带本机文件</span>
+            </div>
+            <div class="sd-bar">
+              <span class="sd-pill sd-pill-accent">纯文件前缀</span>
+              <code>f 报告</code> 或 <code>/报告</code>
+              <span class="sd-arrow">→</span>
+              <span>秒速直搜全盘文档、代码与素材</span>
+            </div>
+            <div class="sd-bar">
+              <span class="sd-pill">开箱即用</span>
+              <code>首次启动自动导入</code>
+              <span class="sd-arrow">→</span>
+              <span>自动汇聚开始菜单与桌面常用应用</span>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- Chapter 4: Real Settings Studio & Local Input Stats -->
+    <section id="studio" class="section">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow">DIRECT2D SETTINGS STUDIO · PRIVACY-FIRST</p>
+          <h2>全自绘设置中心，与纯本地键鼠热力图</h2>
+          <p class="section-desc">告别传统 Win32 灰框弹窗。整个设置中心由 Direct2D + DirectWrite 硬件绘制，并内建基于 Raw Input 的本地键鼠统计——只做聚合计数，绝不记录输入文本或按键顺序。</p>
+        </div>
+
+        <div class="studio-tabs" role="tablist">
+          <button type="button" class="studio-tab is-active" data-shot="assets/clipboard-overlay.png" data-caption="Alt+V 液态玻璃剪贴板历史：实时折射桌面背景，智能识别色块/链接/WIC 压缩截图，支持 Shift+Enter 去格式纯文本粘贴与置顶。">Alt+V 液态剪贴板</button>
+          <button type="button" class="studio-tab" data-shot="assets/settings-stats.png" data-caption="键鼠统计仪表盘：支持今日 / 近 7 天 / 近 30 天切换、2D ANSI 键盘热力图与应用前台专注时长排行，100% 本地隐私存储。">键鼠热力图与时长</button>
+          <button type="button" class="studio-tab" data-shot="assets/settings-hotwords.png" data-caption="零冲突自定义热词与即时计算器：输入 >recycle / sleep / 128*36 秒执行或复制，不干扰正常软件搜索。">热词指令与计算器</button>
+          <button type="button" class="studio-tab" data-shot="assets/settings-glass.png" data-caption="外观与液态玻璃页：分段式预设切换与高精度滑块，拖动即刻预览聚焦窗光学变化，无需点击应用按钮。">液态玻璃工作台</button>
+        </div>
+
+        <figure class="studio-showcase">
+          <img id="studio-img" src="assets/clipboard-overlay.png" alt="LightLaunchpad V1.13 实机截图" loading="lazy">
+          <figcaption id="studio-caption">Alt+V 液态玻璃剪贴板历史：实时折射桌面背景，智能识别色块/链接/WIC 压缩截图，支持 Shift+Enter 去格式纯文本粘贴与置顶。</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <!-- Chapter 5: Engineering Spec Strip & Direct Download -->
+    <section id="download" class="section download-section">
+      <div class="container">
+        <div class="metrics-strip">
+          <div class="metric"><strong>3.86 MB</strong><span>单文件原生 EXE</span></div>
+          <div class="metric"><strong>&lt; 60 MiB</strong><span>隐藏常驻内存</span></div>
+          <div class="metric"><strong>60 Hz</strong><span>DX11 / D2D 渲染</span></div>
+          <div class="metric"><strong>0 依赖</strong><span>免 .NET / WebView</span></div>
+          <div class="metric"><strong>100% 本地</strong><span>零云端遥测</span></div>
+        </div>
+
+        <div class="download-box">
+          <div class="download-copy">
+            <p class="eyebrow">READY IN 5 SECONDS</p>
+            <h2>下载 LightLaunchpad</h2>
+            <p class="card-desc">支持 Windows 10 / 11 (x64)。解压即用，首次运行自动导入开始菜单与桌面快捷方式，不污染系统注册表，删除快捷项不会卸载原软件。</p>
+            <ol class="quick-steps">
+              <li>下载并运行 <code>LightLaunchpad.NativeUi.exe</code></li>
+              <li>在任意界面按下 <kbd>Alt</kbd> + <kbd>D</kbd> 唤出液态玻璃聚焦窗</li>
+              <li>按 <kbd>Ctrl</kbd> + <kbd>,</kbd> 或右键托盘图标打开设置与键鼠热力图</li>
+            </ol>
+          </div>
+          <div class="download-cta">
+            <a class="btn btn-primary btn-xl" href="https://github.com/thomasthzh/LightLaunchpad/releases/latest" target="_blank" rel="noopener">
+              下载 Windows x64 便携版
+            </a>
+            <a class="btn btn-ghost" href="https://github.com/thomasthzh/LightLaunchpad/releases" target="_blank" rel="noopener">
+              查看历史版本与校验信息
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="assets/logo.svg" alt="" width="20" height="20">
+        <span>LightLaunchpad</span>
+      </div>
+      <div class="footer-meta">
+        <span>lightlaunchpad.thomasthzh.top</span>
+        <span>·</span>
+        <a href="https://github.com/thomasthzh/LightLaunchpad" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

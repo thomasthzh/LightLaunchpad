@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="name desc">
+  <title id="name">LightLaunchpad — Titanium Glass Launchpad Grid &amp; Launch Arrow</title>
+  <desc id="desc">A pure crystal-white faceted launch arrow rising cleanly from a restrained frosted Launchpad tile grid inside a smoked titanium Liquid Glass squircle.</desc>
+  <defs>
+    <path id="tile" d="M512 98 C686 98 769 98 829 133 C857 149 875 167 891 195
+      C926 255 926 338 926 512 C926 686 926 769 891 829 C875 857 857 875 829 891
+      C769 926 686 926 512 926 C338 926 255 926 195 891 C167 875 149 857 133 829
+      C98 769 98 686 98 512 C98 338 98 255 133 195 C149 167 167 149 195 133
+      C255 98 338 98 512 98Z"/>
+    <clipPath id="bounds"><use xlink:href="#tile"/></clipPath>
+
+    <!-- Exact 1-B calm Apple smoked titanium-slate glass -->
+    <linearGradient id="body" x1="0.14" y1="0.02" x2="0.86" y2="0.98" gradientUnits="objectBoundingBox">
+      <stop stop-color="#353f4e"/>
+      <stop offset=".38" stop-color="#242c38"/>
+      <stop offset=".76" stop-color="#191f29"/>
+      <stop offset="1" stop-color="#151b24"/>
+    </linearGradient>
+    <radialGradient id="topLight" cx=".20" cy=".08" r=".72">
+      <stop stop-color="#dbe9fa" stop-opacity=".30"/>
+      <stop offset=".42" stop-color="#9fb8d8" stop-opacity=".12"/>
+      <stop offset="1" stop-color="#3a4c66" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="bottomBounce" cx=".86" cy=".84" r=".58">
+      <stop stop-color="#8fb0d8" stop-opacity=".22"/>
+      <stop offset=".55" stop-color="#607b9c" stop-opacity=".08"/>
+      <stop offset="1" stop-color="#1a222d" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="swell" x1="0" y1="0" x2=".95" y2=".85">
+      <stop stop-color="#ffffff" stop-opacity=".01"/>
+      <stop offset=".55" stop-color="#dbe8f8" stop-opacity=".06"/>
+      <stop offset="1" stop-color="#e8f2ff" stop-opacity=".16"/>
+    </linearGradient>
+    <linearGradient id="rim" x1=".08" y1="0" x2=".92" y2="1">
+      <stop stop-color="#f2f7ff" stop-opacity=".92"/>
+      <stop offset=".26" stop-color="#a6bdd8" stop-opacity=".55"/>
+      <stop offset=".54" stop-color="#53657d" stop-opacity=".35"/>
+      <stop offset=".80" stop-color="#9cb5d2" stop-opacity=".52"/>
+      <stop offset="1" stop-color="#eef5ff" stop-opacity=".86"/>
+    </linearGradient>
+
+    <!-- Frosted glass mini-tile fill for the 3x3 Launchpad deck -->
+    <linearGradient id="miniTile" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#e8f2ff" stop-opacity=".24"/>
+      <stop offset="1" stop-color="#9db4d2" stop-opacity=".10"/>
+    </linearGradient>
+    <linearGradient id="miniStroke" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#ffffff" stop-opacity=".42"/>
+      <stop offset="1" stop-color="#8ca4c2" stop-opacity=".14"/>
+    </linearGradient>
+
+    <filter id="diffuse" x="-.5" y="-.5" width="2" height="2" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="19"/>
+    </filter>
+    <filter id="soft" x="-.3" y="-.3" width="1.6" height="1.6" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="5"/>
+    </filter>
+    <filter id="arrowDrop" x="-.3" y="-.3" width="1.6" height="1.6" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="20"/>
+    </filter>
+
+    <!-- Slightly refined launch arrow positioned cleanly over the Launchpad grid -->
+    <path id="arrow" d="M742 268 C757 262 768 273 762 288 L620 684
+      C615 698 602 699 596 686 L538 558 Q535 551 529 556 L385 664
+      C377 670 370 662 375 654 L477 510 Q482 504 474 501 L342 455
+      C327 449 327 437 342 430Z"/>
+    <clipPath id="facets"><use xlink:href="#arrow"/></clipPath>
+
+    <linearGradient id="upperWing" x1=".24" y1=".18" x2=".65" y2=".86">
+      <stop stop-color="#ffffff"/>
+      <stop offset=".60" stop-color="#f1f6fc"/>
+      <stop offset="1" stop-color="#d4e0ee"/>
+    </linearGradient>
+    <linearGradient id="lowerWing" x1=".66" y1=".08" x2=".48" y2=".96">
+      <stop stop-color="#eef4fb"/>
+      <stop offset=".52" stop-color="#cddbef"/>
+      <stop offset="1" stop-color="#b4c6de"/>
+    </linearGradient>
+    <linearGradient id="leftSpine" x1=".98" y1="0" x2=".10" y2=".98">
+      <stop stop-color="#e5eef8"/>
+      <stop offset=".45" stop-color="#b5c7dd"/>
+      <stop offset="1" stop-color="#92a8c4"/>
+    </linearGradient>
+    <linearGradient id="rightSpine" x1=".97" y1=".02" x2=".15" y2=".95">
+      <stop stop-color="#cad9ea"/>
+      <stop offset=".52" stop-color="#93a9c4"/>
+      <stop offset="1" stop-color="#768da8"/>
+    </linearGradient>
+    <linearGradient id="edge" x1=".18" y1=".09" x2=".85" y2=".93">
+      <stop stop-color="#ffffff"/>
+      <stop offset=".55" stop-color="#e6effa" stop-opacity=".82"/>
+      <stop offset="1" stop-color="#bfd0e6" stop-opacity=".44"/>
+    </linearGradient>
+  </defs>
+
+  <g clip-path="url(#bounds)">
+    <use xlink:href="#tile" fill="url(#body)"/>
+    <use xlink:href="#tile" fill="url(#topLight)"/>
+    <use xlink:href="#tile" fill="url(#bottomBounce)"/>
+
+    <!-- Restrained 3x3 frosted glass Launchpad app-tile deck -->
+    <g>
+      <!-- Row 1 -->
+      <rect x="242" y="242" width="152" height="152" rx="38" fill="url(#miniTile)" stroke="url(#miniStroke)" stroke-width="2.5"/>
+      <rect x="436" y="242" width="152" height="152" rx="38" fill="url(#miniTile)" stroke="url(#miniStroke)" stroke-width="2.5"/>
+      <rect x="630" y="242" width="152" height="152" rx="38" fill="url(#miniTile)" stroke="url(#miniStroke)" stroke-width="2.5" opacity=".75"/>
+      <!-- Row 2 -->
+      <rect x="242" y="436" width="152" height="152" rx="38" fill="url(#miniTile)" stroke="url(#miniStroke)" stroke-width="2.5"/>
+      <rect x="436" y="436" width="152" height="152" rx="38" fill="url(#miniTile)" stroke="url(#miniStroke)" stroke-width="2.5"/>
+      <rect x="630" y="436" width="152" height="152" rx="38" fill="url(#miniTile)" stroke="url(#miniStroke)" stroke-width="2.5"/>
+      <!-- Row 3 -->
+      <rect x="242" y="630" width="152" height="152" rx="38" fill="url(#miniTile)" stroke="url(#miniStroke)" stroke-width="2.5"/>
+      <rect x="436" y="630" width="152" height="152" rx="38" fill="url(#miniTile)" stroke="url(#miniStroke)" stroke-width="2.5"/>
+      <rect x="630" y="630" width="152" height="152" rx="38" fill="url(#miniTile)" stroke="url(#miniStroke)" stroke-width="2.5"/>
+    </g>
+
+    <!-- Delicate liquid glass diagonal reflection -->
+    <path d="M57 898 C301 829 503 805 688 652 C820 542 866 403 966 335 L981 962 H57Z" fill="url(#swell)"/>
+    <path d="M33 908 C301 829 503 805 688 652 C820 542 866 403 966 335"
+      fill="none" stroke="#dbe8f8" stroke-opacity=".22" stroke-width="14" filter="url(#diffuse)"/>
+    <path d="M33 908 C301 829 503 805 688 652 C820 542 866 403 966 335"
+      fill="none" stroke="#eef5ff" stroke-opacity=".28" stroke-width="2.5" filter="url(#soft)"/>
+
+    <use xlink:href="#tile" fill="none" stroke="url(#rim)" stroke-width="20" opacity=".20"/>
+    <use xlink:href="#tile" fill="none" stroke="url(#rim)" stroke-width="7"/>
+  </g>
+
+  <!-- Crisp crystal-white faceted launch arrow floating over the Launchpad grid -->
+  <use xlink:href="#arrow" transform="translate(0 20)" fill="#060b12" opacity=".68" filter="url(#arrowDrop)"/>
+  <g clip-path="url(#facets)">
+    <use xlink:href="#arrow" fill="url(#upperWing)"/>
+    <path d="M765 266 L780 292 L646 736 L526 710 L533 553Z" fill="url(#lowerWing)"/>
+    <path d="M765 266 L372 668 L345 678 L478 504Z" fill="url(#leftSpine)"/>
+    <path d="M765 266 L533 553 L372 668Z" fill="url(#rightSpine)"/>
+    <path d="M372 668 L765 266" fill="none" stroke="#ffffff" stroke-opacity=".80" stroke-width="2.5"/>
+    <use xlink:href="#arrow" fill="none" stroke="url(#edge)" stroke-width="4.5"/>
+  </g>
+</svg>

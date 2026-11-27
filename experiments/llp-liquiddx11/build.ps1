@@ -98,6 +98,7 @@ function Compile-Unit {
 }
 Compile-Unit $hostPath 'NativeHost'
 foreach ($name in @('AdaptiveEnvironment','Catalog','EverythingBridge','HistoryPersistence',
+    'ClipboardHistory','ClipboardOverlay','Hotwords','InputStats','InputStatsPanel','SettingsStudio',
     'InteractionState','MotionTimeline','OrganizationState','Persistence','SceneGeometry',
     'SearchAccessibility','SearchIndex','ShellBroker','SpotlightAlpha','TextInput')) {
     Compile-Unit (Join-Path $nativeRoot ($name + '.cpp')) $name

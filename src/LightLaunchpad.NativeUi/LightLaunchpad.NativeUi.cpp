@@ -20,6 +20,12 @@
 #include "Catalog.h"
 #include "EverythingBridge.h"
 #include "HistoryPersistence.h"
+#include "InputStats.h"
+#include "InputStatsPanel.h"
+#include "ClipboardHistory.h"
+#include "ClipboardOverlay.h"
+#include "Hotwords.h"
+#include "SettingsStudio.h"
 #include "InteractionState.h"
 #include "MaterialRenderer.h"
 #include "MotionTimeline.h"
@@ -91,6 +97,11 @@ constexpr int TrayOpenCommand = 1001;
 constexpr int TrayRefreshCommand = 1002;
 constexpr int TrayExitCommand = 1003;
 constexpr int TraySettingsCommand = 1004;
+constexpr int TrayInputStatsCommand = 1007;
+constexpr int TrayClipboardCommand = 1008;
+constexpr int ClipboardHotkeyId = 2002;
+constexpr UINT_PTR InputStatsSaveTimerId = 109;
+constexpr UINT_PTR SettingsStatsRefreshTimerId = 110;
 constexpr int TrayOpenFolderCommand = 1005;
 constexpr int ItemLaunchCommand = 2001;
 constexpr int ItemOpenLocationCommand = 2002;
@@ -221,7 +232,10 @@ enum class SettingsControlId : int
     GlassRimLabel = 3049,
     GlassRim = 3050,
     MouseBiasLabel = 3051,
-    MouseBias = 3052
+    MouseBias = 3052,
+    EnableInputStats = 3053,
+    ClearInputStats = 3054,
+    InputStatsCanvas = 3055
 };
 
 int ControlId(SettingsControlId id)
@@ -247,6 +261,9 @@ struct Settings
     bool reduceMotion = false;
     bool initialImportCompleted = false;
     bool enableEverythingSearch = true;
+    bool enableInputStats = true;
+    bool enableHotwordsNoPrefix = true;
+    bool enableInlineCalculator = true;
     std::wstring glassPreset = L"Crystal";
     int glassBlurPercent = 6;
     int glassTintPercent = 2;
@@ -473,6 +490,7 @@ SpotlightBackdropCapture g_spotlightBackdrop;
 UINT g_taskbarCreatedMessage = 0;
 UINT g_materialEvidenceFreezeMessage = 0;
 HWINEVENTHOOK g_desktopSwitchHook = nullptr;
+HWINEVENTHOOK g_foregroundFocusHook = nullptr;
 bool g_materialEvidenceActive = false;
 // FinishHideNativeUi() performs the first host cleanup before the renderer
 // thread has necessarily finished releasing GPU/COM owners.  A second trim is
@@ -1120,6 +1138,39 @@ std::wstring GetLayoutPath()
     return dataPath.empty() ? L"" : llp::persistence::ScopedLayoutPath(dataPath, g_settings.launchpadFolder);
 }
 
+std::wstring GetInputStatsPath()
+{
+    return JoinPath(GetLightLaunchpadDataPath(), L"input-stats.json");
+}
+
+std::wstring GetHotwordsPath()
+{
+    return JoinPath(GetLightLaunchpadDataPath(), L"hotwords.json");
+}
+
+llp::clipboard::ClipboardStore g_clipboardStore(200);
+
+std::wstring GetClipboardHistoryPath()
+{
+    return JoinPath(GetLightLaunchpadDataPath(), L"clipboard-history.json");
+}
+
+std::wstring GetClipboardCachePath()
+{
+    return JoinPath(GetLightLaunchpadDataPath(), L"clipboard-cache");
+}
+
+llp::clipboard_ui::OverlayCallbacks BuildClipboardOverlayCallbacks()
+{
+    llp::clipboard_ui::OverlayCallbacks cb;
+    cb.getStore = []() { return &g_clipboardStore; };
+    cb.onStoreMutated = []() { g_clipboardStore.SaveToFile(GetClipboardHistoryPath()); };
+    cb.isDarkMode = []() { return g_adaptivePolicy.darkMode; };
+    cb.isChinese = []() { return IsChineseLanguage(g_settings.language); };
+    cb.getMouseBiasPercent = []() { return g_settings.spotlightMouseBiasPercent; };
+    return cb;
+}
+
 std::wstring GetSettingsPath()
 {
     const auto dataPath = GetLightLaunchpadDataPath();
@@ -1266,13 +1317,16 @@ void LoadSettings()
     loaded.reduceMotion = readBool("ReduceMotion", loaded.reduceMotion);
     loaded.initialImportCompleted = readBool("InitialImportCompleted", loaded.initialImportCompleted);
     loaded.enableEverythingSearch = readBool("EnableEverythingSearch", loaded.enableEverythingSearch);
+    loaded.enableInputStats = readBool("EnableInputStats", loaded.enableInputStats);
+        loaded.enableHotwordsNoPrefix = readBool("EnableHotwordsNoPrefix", loaded.enableHotwordsNoPrefix);
+        loaded.enableInlineCalculator = readBool("EnableInlineCalculator", loaded.enableInlineCalculator);
     loaded.glassPreset = readString("GlassPreset", loaded.glassPreset);
     loaded.glassBlurPercent = std::clamp(readInt("GlassBlurPercent", loaded.glassBlurPercent), 0, 100);
     loaded.glassTintPercent = std::clamp(readInt("GlassTintPercent", loaded.glassTintPercent), 0, 60);
     loaded.glassRefractionPx = std::clamp(readInt("GlassRefractionPx", loaded.glassRefractionPx), 0, 45);
     loaded.glassRimPercent = std::clamp(readInt("GlassRimPercent", loaded.glassRimPercent), 0, 100);
     loaded.spotlightMouseBiasPercent = std::clamp(readInt("SpotlightMouseBiasPercent", loaded.spotlightMouseBiasPercent), 0, 100);
-    loaded.lastSettingsPage = std::clamp(readInt("LastSettingsPage", 0), 0, 4);
+    loaded.lastSettingsPage = std::clamp(readInt("LastSettingsPage", 0), 0, 5);
     g_settings = loaded;
     g_searchHistory.SetTrackingEnabled(g_settings.trackLaunchHistory);
 }
@@ -1307,6 +1361,9 @@ bool SaveSettings(const Settings& settings)
         { "ReduceMotion", settings.reduceMotion },
         { "InitialImportCompleted", settings.initialImportCompleted },
         { "EnableEverythingSearch", settings.enableEverythingSearch },
+        { "EnableInputStats", settings.enableInputStats },
+        { "EnableHotwordsNoPrefix", settings.enableHotwordsNoPrefix },
+        { "EnableInlineCalculator", settings.enableInlineCalculator },
         { "GlassPreset", llp::persistence::WideToUtf8(settings.glassPreset) },
         { "GlassBlurPercent", settings.glassBlurPercent },
         { "GlassTintPercent", settings.glassTintPercent },
@@ -2673,6 +2730,12 @@ void RebuildSearchIndex()
     g_searchIndex.Rebuild(items, g_searchHistory);
 }
 
+llp::stats::InputStatsStore g_inputStats;
+llp::hotwords::HotwordStore g_hotwords;
+std::vector<llp::hotwords::MatchResult> g_activeHotwordMatches;
+HBRUSH g_settingsBgBrush = nullptr;
+HBRUSH g_settingsCardBrush = nullptr;
+bool g_settingsThemeDark = false;
 llp::everything::EverythingBridge g_everythingBridge;
 std::mutex g_everythingMutex;
 llp::everything::QueryResponse g_everythingPendingResponse;
@@ -2740,15 +2803,38 @@ void RebuildFiltered()
     g_filtered.reserve(g_items.size() + 12);
     g_filterScores.assign(g_items.size(), 0);
     const std::wstring query = SearchCommittedText();
-    const auto everythingParsed = IsSpotlightMode()
+    g_activeHotwordMatches.clear();
+    const bool explicitHotwordPrefix = IsSpotlightMode() && !query.empty() && (query[0] == L'>' || query[0] == L':' || query[0] == L'：');
+    if (IsSpotlightMode() && !query.empty())
+    {
+        g_activeHotwordMatches = g_hotwords.MatchQuery(query, g_settings.enableHotwordsNoPrefix);
+    }
+    const auto calcResult = (IsSpotlightMode() && g_settings.enableInlineCalculator && !explicitHotwordPrefix)
+        ? llp::hotwords::EvaluateInlineCalculator(query)
+        : llp::hotwords::CalcResult{};
+
+    const auto everythingParsed = (IsSpotlightMode() && !explicitHotwordPrefix && !calcResult.valid)
         ? llp::everything::ParseSpotlightQuery(query)
         : llp::everything::ParsedQuery{};
+
+    if (calcResult.valid)
+    {
+        LaunchItem calcItem;
+        calcItem.displayName = L"= " + calcResult.displayValue;
+        calcItem.subtitle = calcResult.expression + Text(L"  ·  Press Enter to copy result", L"  ·  按 Enter 复制结果到剪贴板");
+        calcItem.stableId = L"calc:" + calcResult.copyValue;
+        calcItem.isExternalFile = true;
+        const int newIndex = static_cast<int>(g_items.size());
+        g_items.push_back(std::move(calcItem));
+        g_filterScores.push_back(99999);
+        g_filtered.push_back(newIndex);
+    }
 
     if (query.empty() && !IsSpotlightMode())
     {
         for (int itemIndex = 0; itemIndex < static_cast<int>(g_items.size()); ++itemIndex) g_filtered.push_back(itemIndex);
     }
-    else if (!IsSpotlightMode() || everythingParsed.mode != llp::everything::QueryMode::FilesOnly)
+    else if (!explicitHotwordPrefix && (!IsSpotlightMode() || everythingParsed.mode != llp::everything::QueryMode::FilesOnly))
     {
         llp::search::QueryOptions options;
         options.spotlight = IsSpotlightMode();
@@ -2804,6 +2890,23 @@ void RebuildFiltered()
                     g_filterScores.push_back(1);
                     g_filtered.push_back(newIndex);
                 }
+            }
+        }
+
+        if (!g_activeHotwordMatches.empty())
+        {
+            for (size_t hi = 0; hi < g_activeHotwordMatches.size(); ++hi)
+            {
+                const auto& m = g_activeHotwordMatches[hi];
+                LaunchItem hw;
+                hw.displayName = m.entry.title + (m.argument.empty() ? L"" : (L" · " + m.argument));
+                hw.subtitle = (IsChineseLanguage(g_settings.language) ? L"[热词指令]  >" : L"[Hotword]  >") + m.entry.trigger;
+                hw.stableId = L"hotword:" + std::to_wstring(hi);
+                hw.isExternalFile = true;
+                const int newIndex = static_cast<int>(g_items.size());
+                g_items.push_back(std::move(hw));
+                g_filterScores.push_back(m.score);
+                g_filtered.push_back(newIndex);
             }
         }
 
@@ -5232,20 +5335,21 @@ void PositionWindow()
         const int centerY = work.top + (workHeight - height) / 2;
         int targetX = centerX;
         int targetY = centerY;
+        const int edgeMargin = ScaleDip(24);
+        const int belowGap = ScaleDip(18);
+        const int minX = work.left + edgeMargin;
+        const int maxX = work.right - width - edgeMargin;
+        const int minY = work.top + edgeMargin;
+        const int maxY = work.bottom - height - edgeMargin;
         POINT cursor = {};
         if (g_settings.spotlightMouseBiasPercent > 0 && GetCursorPos(&cursor) != FALSE)
         {
             const double bias = std::clamp(g_settings.spotlightMouseBiasPercent, 0, 100) / 100.0;
             const double dx = static_cast<double>(cursor.x) - (work.left + workWidth * 0.5);
-            const double dy = static_cast<double>(cursor.y) - (work.top + workHeight * 0.5);
             targetX = centerX + static_cast<int>(std::lround(dx * bias));
-            targetY = centerY + static_cast<int>(std::lround(dy * bias));
+            // Place search bar directly below cursor whenever possible, clamped safely inside work area.
+            targetY = cursor.y + belowGap;
         }
-        const int edgeMargin = ScaleDip(24);
-        const int minX = work.left + edgeMargin;
-        const int maxX = work.right - width - edgeMargin;
-        const int minY = work.top + edgeMargin;
-        const int maxY = work.bottom - height - edgeMargin;
         const int finalX = minX <= maxX ? std::clamp(targetX, minX, maxX) : centerX;
         const int finalY = minY <= maxY ? std::clamp(targetY, minY, maxY) : centerY;
         SetWindowPos(
@@ -5791,6 +5895,37 @@ void LaunchItemAtFilteredIndex(int filteredIndex)
 {
     if (filteredIndex < 0 || filteredIndex >= static_cast<int>(g_filtered.size())) return;
     auto& item = g_items[g_filtered[filteredIndex]];
+    if (item.stableId.rfind(L"calc:", 0) == 0)
+    {
+        llp::hotwords::CopyTextToClipboard(g_hwnd, item.stableId.substr(5));
+        HideNativeUi();
+        return;
+    }
+    if (item.stableId.rfind(L"hotword:", 0) == 0)
+    {
+        const size_t idx = static_cast<size_t>(std::wcstoul(item.stableId.c_str() + 8, nullptr, 10));
+        if (idx < g_activeHotwordMatches.size())
+        {
+            const auto matchCopy = g_activeHotwordMatches[idx];
+            HideNativeUi();
+            std::wstring statusOut;
+            bool openSettings = false;
+            bool openStats = false;
+            llp::hotwords::ExecuteHotword(matchCopy, g_hwnd, statusOut, openSettings, openStats);
+            g_settingsStatus = statusOut;
+            if (openStats)
+            {
+                g_settings.lastSettingsPage = 5;
+                ShowSettingsWindow();
+            }
+            else if (openSettings)
+            {
+                g_settings.lastSettingsPage = 0;
+                ShowSettingsWindow();
+            }
+        }
+        return;
+    }
     if (g_shellBroker.RequestLaunch(item.sourcePath) != 0)
     {
         if (g_spotlightFlowProbe.active) g_spotlightFlowProbe.requestedPaths.push_back(item.sourcePath);
@@ -9195,15 +9330,17 @@ void ApplyLanguageToSettingsWindow(HWND hwnd)
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::GlassRefractionLabel), IsChineseLanguage(language) ? L"边缘折射强度 (0–45 px)" : L"Edge refraction (0–45 px)");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::GlassRimLabel), IsChineseLanguage(language) ? L"镜面边缘高光 (0–100%)" : L"Specular rim light (0–100%)");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::MouseBiasLabel), IsChineseLanguage(language) ? L"聚焦向鼠标偏移强度 (0–100%，0 为居中)" : L"Cursor position bias (0–100%, 0 = centered)");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::EnableInputStats), IsChineseLanguage(language) ? L"启用本地键鼠统计（纯本地聚合计数，绝不记录输入文本）" : L"Enable local input stats (aggregate counts only, zero text logged)");
+    SetDlgItemTextW(hwnd, ControlId(SettingsControlId::ClearInputStats), IsChineseLanguage(language) ? L"清空键鼠统计数据" : L"Clear input stats");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::ClearHistory), IsChineseLanguage(language) ? L"清除启动历史（保留收藏）" : L"Clear launch history (keep favorites)");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::CategoryAccessibilityLabel), IsChineseLanguage(language) ? L"设置分类" : L"Settings categories");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::WidthAccessibilityLabel), IsChineseLanguage(language) ? L"Spotlight 宽度" : L"Spotlight width");
     SetDlgItemTextW(hwnd, ControlId(SettingsControlId::HeightAccessibilityLabel), IsChineseLanguage(language) ? L"Spotlight 高度" : L"Spotlight height");
-    const wchar_t* english[] = { L"General", L"Search & Hotkey", L"Appearance", L"Apps & Layout", L"Advanced" };
-    const wchar_t* chinese[] = { L"常规", L"搜索与热键", L"外观", L"应用与布局", L"高级" };
+    const wchar_t* english[] = { L"General", L"Search & Hotkey", L"Appearance", L"Apps & Layout", L"Input Stats", L"Advanced" };
+    const wchar_t* chinese[] = { L"常规", L"搜索与热键", L"外观", L"应用与布局", L"键鼠统计", L"高级" };
     HWND category = GetDlgItem(hwnd, ControlId(SettingsControlId::Category));
     SendMessageW(category, LB_RESETCONTENT, 0, 0);
-    for (int page = 0; page < 5; ++page)
+    for (int page = 0; page < 6; ++page)
         SendMessageW(category, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(IsChineseLanguage(language) ? chinese[page] : english[page]));
     SendMessageW(category, LB_SETCURSEL, g_settings.lastSettingsPage, 0);
     ResetIconSizeCombo(hwnd, language);
@@ -9228,6 +9365,9 @@ void PopulateSettingsWindow(HWND hwnd)
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::TrackLaunchHistory), BM_SETCHECK, g_settings.trackLaunchHistory ? BST_CHECKED : BST_UNCHECKED, 0);
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ReduceMotion), BM_SETCHECK, g_settings.reduceMotion ? BST_CHECKED : BST_UNCHECKED, 0);
     SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::EnableEverythingSearch), BM_SETCHECK, g_settings.enableEverythingSearch ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::EnableInputStats), BM_SETCHECK, g_settings.enableInputStats ? BST_CHECKED : BST_UNCHECKED, 0);
+    llp::stats::UpdateInputStatsPanel(GetDlgItem(hwnd, ControlId(SettingsControlId::InputStatsCanvas)),
+        g_inputStats.GetSnapshot(), g_adaptivePolicy.darkMode, IsChineseLanguage(g_settings.language), static_cast<int>(g_settingsDpi));
     SetControlText(hwnd, SettingsControlId::GlassBlur, std::to_wstring(g_settings.glassBlurPercent));
     SetControlText(hwnd, SettingsControlId::GlassTint, std::to_wstring(g_settings.glassTintPercent));
     SetControlText(hwnd, SettingsControlId::GlassRefraction, std::to_wstring(g_settings.glassRefractionPx));
@@ -9282,6 +9422,7 @@ Settings ReadSettingsWindowCandidate(HWND hwnd)
     candidate.trackLaunchHistory = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::TrackLaunchHistory), BM_GETCHECK, 0, 0) == BST_CHECKED;
     candidate.reduceMotion = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::ReduceMotion), BM_GETCHECK, 0, 0) == BST_CHECKED;
     candidate.enableEverythingSearch = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::EnableEverythingSearch), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.enableInputStats = SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::EnableInputStats), BM_GETCHECK, 0, 0) == BST_CHECKED;
     const int presetIndex = static_cast<int>(SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::GlassPreset), CB_GETCURSEL, 0, 0));
     candidate.glassPreset = GlassPresetNameFromIndex(presetIndex >= 0 ? presetIndex : 0);
     candidate.glassBlurPercent = std::clamp(_wtoi(GetControlText(hwnd, ControlId(SettingsControlId::GlassBlur)).c_str()), 0, 100);
@@ -9317,8 +9458,9 @@ void LayoutSettingsWindow(HWND hwnd)
     const int navigationWidth = std::min(textDip(170), std::max(dip(100), static_cast<int>(client.right) / 3));
     const int contentLeft = inset + navigationWidth + dip(24);
     const int contentWidth = std::max(dip(120), static_cast<int>(client.right) - contentLeft - inset);
-    move(SettingsControlId::Category, inset, dip(24), navigationWidth, std::max(dip(180), textDip(150)));
-    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::Category), LB_SETITEMHEIGHT, 0, std::max(dip(32), textDip(28)));
+    const int navItemH = std::max(dip(38), textDip(34));
+    move(SettingsControlId::Category, inset, dip(20), navigationWidth, navItemH * 6 + dip(16));
+    SendDlgItemMessageW(hwnd, ControlId(SettingsControlId::Category), LB_SETITEMHEIGHT, 0, navItemH);
 
     std::array<bool, 64> pageControls = {};
     const auto place = [&](SettingsControlId id, int x, int y, int width, int height) {
@@ -9397,15 +9539,27 @@ void LayoutSettingsWindow(HWND hwnd)
         row(SettingsControlId::WheelSensitivityLabel, SettingsControlId::WheelSensitivity);
         break;
     case 4:
+    {
+        toggle(SettingsControlId::EnableInputStats);
+        const int canvasH = std::max(dip(370), static_cast<int>(client.bottom - client.top) - y - dip(170));
+        place(SettingsControlId::InputStatsCanvas, contentLeft, y, contentWidth, canvasH);
+        llp::stats::UpdateInputStatsPanel(GetDlgItem(hwnd, ControlId(SettingsControlId::InputStatsCanvas)),
+            g_inputStats.GetSnapshot(), g_adaptivePolicy.darkMode, IsChineseLanguage(SettingsWindowLanguage(hwnd)), static_cast<int>(g_settingsDpi));
+        y += canvasH + dip(12);
+        place(SettingsControlId::ClearInputStats, contentLeft, y, std::min(contentWidth, dip(220)), metrics.buttonHeightPx);
+        y += metrics.buttonHeightPx + dip(14);
+        break;
+    }
+    case 5:
         place(SettingsControlId::DiagnosticsLabel, contentLeft, y, contentWidth, labelHeight);
         y += labelHeight + dip(4);
-        place(SettingsControlId::DiagnosticsSummary, contentLeft, y, contentWidth, std::max(dip(230), textDip(180)));
-        y += std::max(dip(230), textDip(180)) + dip(18);
+        place(SettingsControlId::DiagnosticsSummary, contentLeft, y, contentWidth, std::max(dip(260), textDip(200)));
+        y += std::max(dip(260), textDip(200)) + dip(18);
         break;
     }
     // Do not hide/re-show the active page during a blur save: hiding the next
     // Tab target while Windows is transferring focus discards that focus.
-    for (int id = 3001; id <= 3052; ++id)
+    for (int id = 3001; id <= 3055; ++id)
     {
         if (pageControls[id - 3001] || id == ControlId(SettingsControlId::Save) || id == ControlId(SettingsControlId::Apply)
             || id == ControlId(SettingsControlId::Cancel) || id == ControlId(SettingsControlId::Category)
@@ -9816,6 +9970,11 @@ bool ApplySettingsFromWindow(HWND hwnd)
     if (!SamePath(previous.launchpadFolder, candidate.launchpadFolder)) ReloadData();
     g_searchHistory.SetTrackingEnabled(g_settings.trackLaunchHistory);
     RebuildSearchIndex();
+    if (previous.enableInputStats != candidate.enableInputStats)
+    {
+        g_inputStats.SetEnabled(candidate.enableInputStats);
+        g_inputStats.SyncRawInputRegistration(g_hwnd);
+    }
     if (previous.reduceMotion != candidate.reduceMotion) RefreshAdaptiveEnvironment();
     RebuildFiltered();
     if (visibleModeTransition && !candidateSpotlight)
@@ -9933,13 +10092,28 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         // ones. Keep the category and the two dimensions unambiguous.
         CreateWindowW(L"STATIC", L"", WS_CHILD, 0, 0, 1, 1, hwnd,
             reinterpret_cast<HMENU>(ControlId(SettingsControlId::CategoryAccessibilityLabel)), g_instance, nullptr);
-        ApplyControlFont(CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-            0, 0, 180, 180, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Category)), g_instance, nullptr));
+        {
+            const BOOL dark = g_adaptivePolicy.darkMode ? TRUE : FALSE;
+            DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE
+            const DWORD cornerPref = 2; // DWMWCP_ROUND
+            DwmSetWindowAttribute(hwnd, 33, &cornerPref, sizeof(cornerPref));
+            g_settingsThemeDark = g_adaptivePolicy.darkMode;
+            if (g_settingsBgBrush) DeleteObject(g_settingsBgBrush);
+            if (g_settingsCardBrush) DeleteObject(g_settingsCardBrush);
+            g_settingsBgBrush = CreateSolidBrush(g_settingsThemeDark ? RGB(26, 31, 41) : RGB(243, 246, 250));
+            g_settingsCardBrush = CreateSolidBrush(g_settingsThemeDark ? RGB(36, 43, 56) : RGB(255, 255, 255));
+        }
+        ApplyControlFont(CreateWindowExW(0, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+            0, 0, 180, 220, hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Category)), g_instance, nullptr));
+        llp::stats::CreateInputStatsPanel(hwnd, g_instance, ControlId(SettingsControlId::InputStatsCanvas), 0, 0, 500, 360);
+        ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 200, 32,
+            hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::ClearInputStats)), g_instance, nullptr));
+        SetTimer(hwnd, SettingsStatsRefreshTimerId, 1000, nullptr);
         ApplyControlFont(CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 400, 64,
             hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Status)), g_instance, nullptr));
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 100, 30,
             hwnd, reinterpret_cast<HMENU>(ControlId(SettingsControlId::Browse)), g_instance, nullptr));
-        for (const auto id : { SettingsControlId::ShowRecentAndFavorites, SettingsControlId::TrackLaunchHistory, SettingsControlId::ReduceMotion, SettingsControlId::EnableEverythingSearch })
+        for (const auto id : { SettingsControlId::ShowRecentAndFavorites, SettingsControlId::TrackLaunchHistory, SettingsControlId::ReduceMotion, SettingsControlId::EnableEverythingSearch, SettingsControlId::EnableInputStats })
             ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX | BS_MULTILINE,
                 0, 0, 400, 44, hwnd, reinterpret_cast<HMENU>(ControlId(id)), g_instance, nullptr));
         ApplyControlFont(CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_MULTILINE, 0, 0, 400, 30,
@@ -10043,6 +10217,78 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         LayoutSettingsWindow(hwnd);
         return 0;
     }
+    case WM_ERASEBKGND:
+    {
+        RECT r = {}; GetClientRect(hwnd, &r);
+        if (g_settingsBgBrush) FillRect(reinterpret_cast<HDC>(wParam), &r, g_settingsBgBrush);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORLISTBOX:
+    {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(hdc, g_settingsThemeDark ? RGB(238, 243, 250) : RGB(24, 30, 42));
+        SetBkColor(hdc, g_settingsThemeDark ? RGB(26, 31, 41) : RGB(243, 246, 250));
+        return reinterpret_cast<LRESULT>(g_settingsBgBrush ? g_settingsBgBrush : GetStockObject(NULL_BRUSH));
+    }
+    case WM_CTLCOLOREDIT:
+    {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(hdc, g_settingsThemeDark ? RGB(242, 246, 252) : RGB(20, 24, 32));
+        SetBkColor(hdc, g_settingsThemeDark ? RGB(36, 43, 56) : RGB(255, 255, 255));
+        return reinterpret_cast<LRESULT>(g_settingsCardBrush ? g_settingsCardBrush : GetStockObject(WHITE_BRUSH));
+    }
+    case WM_DRAWITEM:
+    {
+        const auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (dis && dis->CtlID == static_cast<UINT>(ControlId(SettingsControlId::Category)) && dis->itemID != static_cast<UINT>(-1))
+        {
+            HDC hdc = dis->hDC;
+            RECT rc = dis->rcItem;
+            if (g_settingsBgBrush) FillRect(hdc, &rc, g_settingsBgBrush);
+            const bool selected = (dis->itemState & ODS_SELECTED) != 0;
+            const int s = std::max(1, llp::geometry::ScaleDip(1, static_cast<int>(g_settingsDpi)));
+            if (selected)
+            {
+                RECT pill = { rc.left + 2 * s, rc.top + 3 * s, rc.right - 4 * s, rc.bottom - 3 * s };
+                HBRUSH pillBrush = CreateSolidBrush(g_settingsThemeDark ? RGB(44, 56, 76) : RGB(224, 236, 252));
+                HPEN pillPen = CreatePen(PS_SOLID, 1, g_settingsThemeDark ? RGB(66, 92, 128) : RGB(180, 210, 248));
+                HGDIOBJ oldB = SelectObject(hdc, pillBrush);
+                HGDIOBJ oldP = SelectObject(hdc, pillPen);
+                RoundRect(hdc, pill.left, pill.top, pill.right, pill.bottom, 10 * s, 10 * s);
+                SelectObject(hdc, oldB); SelectObject(hdc, oldP);
+                DeleteObject(pillBrush); DeleteObject(pillPen);
+                RECT accentBar = { pill.left + 3 * s, pill.top + 7 * s, pill.left + 6 * s, pill.bottom - 7 * s };
+                HBRUSH accBrush = CreateSolidBrush(g_settingsThemeDark ? RGB(56, 189, 248) : RGB(0, 122, 255));
+                FillRect(hdc, &accentBar, accBrush);
+                DeleteObject(accBrush);
+            }
+            wchar_t label[128] = {};
+            const LRESULT len = SendMessageW(dis->hwndItem, LB_GETTEXT, dis->itemID, reinterpret_cast<LPARAM>(label));
+            if (len > 0)
+            {
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, selected
+                    ? (g_settingsThemeDark ? RGB(255, 255, 255) : RGB(0, 92, 210))
+                    : (g_settingsThemeDark ? RGB(196, 206, 222) : RGB(60, 70, 86)));
+                HGDIOBJ oldF = SelectObject(hdc, UiFont());
+                RECT tr = { rc.left + 16 * s, rc.top, rc.right - 8 * s, rc.bottom };
+                DrawTextW(hdc, label, static_cast<int>(len), &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                SelectObject(hdc, oldF);
+            }
+            return TRUE;
+        }
+        break;
+    }
+    case WM_TIMER:
+        if (wParam == SettingsStatsRefreshTimerId && g_settings.lastSettingsPage == 4)
+        {
+            llp::stats::UpdateInputStatsPanel(GetDlgItem(hwnd, ControlId(SettingsControlId::InputStatsCanvas)),
+                g_inputStats.GetSnapshot(), g_adaptivePolicy.darkMode, IsChineseLanguage(SettingsWindowLanguage(hwnd)), static_cast<int>(g_settingsDpi));
+            return 0;
+        }
+        break;
     case WM_SIZE:
         LayoutSettingsWindow(hwnd);
         return 0;
@@ -10097,7 +10343,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         if (id == SettingsControlId::Category && notification == LBN_SELCHANGE)
         {
             const int page = static_cast<int>(SendDlgItemMessageW(hwnd, ControlId(id), LB_GETCURSEL, 0, 0));
-            if (page < 0 || page > 4) return 0;
+            if (page < 0 || page > 5) return 0;
             g_settingsUpdating = true;
             const bool valid = ValidateSettingsNumbers(hwnd)
                 && ValidateSettingsFolder(hwnd, ReadSettingsWindowCandidate(hwnd).launchpadFolder);
@@ -10145,6 +10391,20 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
                     }
                 }
                 dialog->Release();
+            }
+            return 0;
+        }
+        if (id == SettingsControlId::ClearInputStats && notification == BN_CLICKED)
+        {
+            if (MessageBoxW(hwnd, SettingsText(hwnd, L"Clear all local keyboard and mouse statistics?", L"清空全部本地键鼠统计数据？"),
+                SettingsText(hwnd, L"Clear input stats", L"清空键鼠统计"), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES)
+            {
+                g_inputStats.ClearAll();
+                g_inputStats.SaveToFile(GetInputStatsPath(), true);
+                llp::stats::UpdateInputStatsPanel(GetDlgItem(hwnd, ControlId(SettingsControlId::InputStatsCanvas)),
+                    g_inputStats.GetSnapshot(), g_adaptivePolicy.darkMode, IsChineseLanguage(SettingsWindowLanguage(hwnd)), static_cast<int>(g_settingsDpi));
+                g_settingsStatus = SettingsText(hwnd, L"Input statistics cleared.", L"键鼠统计数据已清空。");
+                SetControlText(hwnd, SettingsControlId::Status, g_settingsStatus);
             }
             return 0;
         }
@@ -10198,7 +10458,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         const bool toggleChanged = notification == BN_CLICKED
             && (id == SettingsControlId::StartWithWindows || id == SettingsControlId::ResetSearchOnOpen
                 || id == SettingsControlId::ShowRecentAndFavorites || id == SettingsControlId::TrackLaunchHistory
-                || id == SettingsControlId::ReduceMotion || id == SettingsControlId::EnableEverythingSearch);
+                || id == SettingsControlId::ReduceMotion || id == SettingsControlId::EnableEverythingSearch
+                || id == SettingsControlId::EnableInputStats);
         const bool editCommitted = notification == EN_KILLFOCUS
             && (id == SettingsControlId::LaunchpadFolder || id == SettingsControlId::Hotkey
                 || id == SettingsControlId::SpotlightWidth || id == SettingsControlId::SpotlightHeight
@@ -10241,69 +10502,268 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
+llp::settings_ui::SettingsViewModel BuildSettingsViewModel()
+{
+    llp::settings_ui::SettingsViewModel vm;
+    vm.launchpadFolder = g_settings.launchpadFolder;
+    vm.hotkey = g_settings.hotkey;
+    vm.displayMode = g_settings.displayMode;
+    vm.language = g_settings.language;
+    vm.spotlightWidth = g_settings.spotlightWidth;
+    vm.spotlightHeight = g_settings.spotlightHeight;
+    vm.iconSize = g_settings.iconSize;
+    vm.appSpacing = g_settings.appSpacing;
+    vm.wheelSensitivity = g_settings.wheelSensitivity;
+    vm.startWithWindows = g_settings.startWithWindows;
+    vm.resetSearchOnOpen = g_settings.resetSearchOnOpen;
+    vm.showRecentAndFavorites = g_settings.showRecentAndFavorites;
+    vm.trackLaunchHistory = g_settings.trackLaunchHistory;
+    vm.reduceMotion = g_settings.reduceMotion;
+    vm.enableEverythingSearch = g_settings.enableEverythingSearch;
+    vm.enableInputStats = g_settings.enableInputStats;
+    vm.enableHotwordsNoPrefix = g_settings.enableHotwordsNoPrefix;
+    vm.enableInlineCalculator = g_settings.enableInlineCalculator;
+    vm.hotwords = g_hotwords.Entries();
+    vm.glassPreset = g_settings.glassPreset;
+    vm.glassBlurPercent = g_settings.glassBlurPercent;
+    vm.glassTintPercent = g_settings.glassTintPercent;
+    vm.glassRefractionPx = g_settings.glassRefractionPx;
+    vm.glassRimPercent = g_settings.glassRimPercent;
+    vm.spotlightMouseBiasPercent = g_settings.spotlightMouseBiasPercent;
+    vm.lastSettingsPage = g_settings.lastSettingsPage;
+    vm.darkMode = g_adaptivePolicy.darkMode;
+    vm.everythingAvailable = llp::everything::IsEverythingRunning();
+    vm.catalogItemCount = static_cast<int>(g_items.size());
+    vm.dataDirectory = GetLightLaunchpadDataPath();
+    vm.statusMessage = g_settingsStatus;
+    vm.versionLabel = L"V1.13";
+    return vm;
+}
+
+bool ApplySettingsFromViewModel(const llp::settings_ui::SettingsViewModel& vm, std::wstring& statusOut)
+{
+    const Settings previous = g_settings;
+    Settings candidate = g_settings;
+    candidate.launchpadFolder = vm.launchpadFolder;
+    candidate.hotkey = vm.hotkey;
+    candidate.displayMode = vm.displayMode;
+    candidate.language = vm.language;
+    candidate.spotlightWidth = std::clamp(vm.spotlightWidth, 540, 1100);
+    candidate.spotlightHeight = std::clamp(vm.spotlightHeight, 340, 760);
+    candidate.iconSize = std::clamp(vm.iconSize, 40, 84);
+    candidate.appSpacing = std::clamp(vm.appSpacing, 6, 24);
+    candidate.wheelSensitivity = std::clamp(vm.wheelSensitivity, 0.5, 2.5);
+    candidate.startWithWindows = vm.startWithWindows;
+    candidate.resetSearchOnOpen = vm.resetSearchOnOpen;
+    candidate.showRecentAndFavorites = vm.showRecentAndFavorites;
+    candidate.trackLaunchHistory = vm.trackLaunchHistory;
+    candidate.reduceMotion = vm.reduceMotion;
+    candidate.enableEverythingSearch = vm.enableEverythingSearch;
+    candidate.enableInputStats = vm.enableInputStats;
+    candidate.enableHotwordsNoPrefix = vm.enableHotwordsNoPrefix;
+    candidate.enableInlineCalculator = vm.enableInlineCalculator;
+    candidate.glassPreset = vm.glassPreset;
+    candidate.glassBlurPercent = std::clamp(vm.glassBlurPercent, 0, 100);
+    candidate.glassTintPercent = std::clamp(vm.glassTintPercent, 0, 40);
+    candidate.glassRefractionPx = std::clamp(vm.glassRefractionPx, 0, 60);
+    candidate.glassRimPercent = std::clamp(vm.glassRimPercent, 0, 150);
+    candidate.spotlightMouseBiasPercent = std::clamp(vm.spotlightMouseBiasPercent, 0, 100);
+
+    int reservedHotkeyId = 0;
+    std::wstring hotkeyFailure;
+    if (!ReserveCandidateHotkey(candidate, reservedHotkeyId, hotkeyFailure))
+    {
+        statusOut = hotkeyFailure;
+        g_settingsStatus = hotkeyFailure;
+        return false;
+    }
+
+    const bool startupChanged = candidate.startWithWindows != previous.startWithWindows;
+    StartupRegistrationSnapshot startupSnapshot;
+    if (startupChanged)
+    {
+        if (!CaptureStartupRegistration(startupSnapshot) || !SetStartWithWindows(candidate.startWithWindows))
+        {
+            ReleaseReservedHotkey(reservedHotkeyId);
+            statusOut = IsChineseLanguage(candidate.language) ? L"开机自启写入失败" : L"Startup registration failed";
+            g_settingsStatus = statusOut;
+            return false;
+        }
+    }
+
+    if (!SaveSettings(candidate))
+    {
+        if (startupChanged) RestoreStartupRegistration(startupSnapshot);
+        ReleaseReservedHotkey(reservedHotkeyId);
+        statusOut = IsChineseLanguage(candidate.language) ? L"保存配置文件失败" : L"Failed to save settings";
+        g_settingsStatus = statusOut;
+        return false;
+    }
+
+    if (reservedHotkeyId != 0)
+    {
+        UnregisterHotKey(g_hwnd, g_activeHotkeyId);
+        g_activeHotkeyId = reservedHotkeyId;
+        g_hotkeyRegistered = true;
+    }
+
+    g_settings = candidate;
+    if (candidate.iconSize != previous.iconSize) g_materialIconRasters.clear();
+    if (!SamePath(previous.launchpadFolder, candidate.launchpadFolder)) ReloadData();
+    g_searchHistory.SetTrackingEnabled(g_settings.trackLaunchHistory);
+    RebuildSearchIndex();
+    if (previous.enableInputStats != candidate.enableInputStats)
+    {
+        g_inputStats.SetEnabled(candidate.enableInputStats);
+        g_inputStats.SyncRawInputRegistration(g_hwnd);
+    }
+    if (candidate.reduceMotion != previous.reduceMotion) RefreshAdaptiveEnvironment();
+    RebuildFiltered();
+    const bool geometryChanged = candidate.spotlightWidth != previous.spotlightWidth || candidate.spotlightHeight != previous.spotlightHeight;
+    if (geometryChanged) ReleaseSpotlightBackdrop();
+    PositionWindow();
+    if (ContainsIgnoreCase(candidate.displayMode, L"Spotlight") && g_hwnd && IsWindowVisible(g_hwnd)
+        && (geometryChanged || candidate.reduceMotion != previous.reduceMotion))
+    {
+        RebuildVisibleMaterialRenderer();
+    }
+    RequestSearchRepaint(g_hwnd, true);
+
+    statusOut = IsChineseLanguage(g_settings.language)
+        ? (L"已保存 · " + g_settings.hotkey)
+        : (L"Saved · " + g_settings.hotkey);
+    g_settingsStatus = statusOut;
+    return true;
+}
+
+llp::settings_ui::SettingsCallbacks BuildSettingsStudioCallbacks()
+{
+    llp::settings_ui::SettingsCallbacks cb;
+    cb.readState = []() { return BuildSettingsViewModel(); };
+    cb.applySettings = [](const llp::settings_ui::SettingsViewModel& vm, std::wstring& statusOut) {
+        return ApplySettingsFromViewModel(vm, statusOut);
+    };
+    cb.previewGlass = [](const llp::settings_ui::SettingsViewModel& vm) {
+        g_settings.glassPreset = vm.glassPreset;
+        g_settings.glassBlurPercent = std::clamp(vm.glassBlurPercent, 0, 100);
+        g_settings.glassTintPercent = std::clamp(vm.glassTintPercent, 0, 40);
+        g_settings.glassRefractionPx = std::clamp(vm.glassRefractionPx, 0, 60);
+        g_settings.glassRimPercent = std::clamp(vm.glassRimPercent, 0, 150);
+        g_settings.spotlightMouseBiasPercent = std::clamp(vm.spotlightMouseBiasPercent, 0, 100);
+        if (g_hwnd && IsWindowVisible(g_hwnd)) RequestSearchRepaint(g_hwnd, true);
+    };
+    cb.browseFolder = [](HWND owner, std::wstring& selectedFolder) -> bool {
+        IFileOpenDialog* dialog = nullptr;
+        bool ok = false;
+        if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))))
+        {
+            DWORD options = 0;
+            dialog->GetOptions(&options);
+            dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+            dialog->SetTitle(Text(L"Choose your Launchpad folder", L"选择启动台文件夹"));
+            if (SUCCEEDED(dialog->Show(owner)))
+            {
+                IShellItem* folder = nullptr;
+                if (SUCCEEDED(dialog->GetResult(&folder)))
+                {
+                    PWSTR path = nullptr;
+                    if (SUCCEEDED(folder->GetDisplayName(SIGDN_FILESYSPATH, &path)))
+                    {
+                        selectedFolder = path;
+                        CoTaskMemFree(path);
+                        ok = true;
+                    }
+                    folder->Release();
+                }
+            }
+            dialog->Release();
+        }
+        return ok;
+    };
+    cb.openLaunchpadFolder = []() { OpenLaunchpadFolder(); };
+    cb.rescanCatalog = []() { ReloadData(); };
+    cb.importSystemShortcuts = []() -> int {
+        ImportStartMenuApps();
+        return 0;
+    };
+    cb.clearLaunchHistory = []() {
+        if (g_searchHistoryWritable && g_searchHistoryLoaded && !g_historyPersistence.PendingClearRequestId())
+        {
+            g_historyPersistence.BeginClear(g_searchHistory, g_shellBroker, GetSearchHistoryPath());
+        }
+    };
+    cb.clearInputStats = []() {
+        g_inputStats.ClearAll();
+        g_inputStats.SaveToFile(GetInputStatsPath(), true);
+    };
+    cb.openDataDirectory = []() {
+        g_shellBroker.RequestOpenFolder(GetLightLaunchpadDataPath());
+    };
+    cb.exportDiagnostics = [](std::wstring& outPath) -> bool {
+        const std::wstring dir = GetLightLaunchpadDataPath();
+        outPath = JoinPath(dir, L"diagnostics-summary.txt");
+        const std::wstring summary = BuildDiagnosticsSummary();
+        const std::string utf8 = llp::persistence::WideToUtf8(summary);
+        HANDLE h = CreateFileW(outPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        DWORD written = 0;
+        const BOOL ok = WriteFile(h, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+        CloseHandle(h);
+        if (ok) g_shellBroker.RequestOpenFolder(dir);
+        return ok != FALSE;
+    };
+    cb.resetDefaults = []() {
+        Settings def;
+        def.launchpadFolder = g_settings.launchpadFolder;
+        def.initialImportCompleted = g_settings.initialImportCompleted;
+        def.language = g_settings.language;
+        std::wstring status;
+        g_settings = def;
+        SaveSettings(g_settings);
+        g_inputStats.SetEnabled(g_settings.enableInputStats);
+        g_inputStats.SyncRawInputRegistration(g_hwnd);
+        RefreshAdaptiveEnvironment();
+        RebuildFiltered();
+        PositionWindow();
+        RequestSearchRepaint(g_hwnd, true);
+    };
+    cb.readInputStats = []() { g_inputStats.FlushActiveAppFocus(); return g_inputStats.GetSnapshot(); };
+    cb.toggleHotword = [](size_t index, bool enabled) {
+        g_hotwords.SetEntryEnabled(index, enabled);
+        g_hotwords.SaveToFile(GetHotwordsPath());
+        RebuildFiltered();
+    };
+    cb.openHotwordsFile = []() {
+        const auto p = GetHotwordsPath();
+        if (GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES) g_hotwords.SaveToFile(p);
+        ShellExecuteW(nullptr, L"open", p.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    };
+    cb.reloadHotwords = []() {
+        g_hotwords.LoadFromFile(GetHotwordsPath());
+        RebuildFiltered();
+    };
+    cb.resetHotwords = []() {
+        g_hotwords.ResetToDefaults();
+        g_hotwords.SaveToFile(GetHotwordsPath());
+        RebuildFiltered();
+    };
+    cb.onPageChanged = [](int page) {
+        g_settings.lastSettingsPage = std::clamp(page, 0, 6);
+        SaveSettings(g_settings);
+    };
+    cb.onClosed = []() {
+        g_settingsHwnd = nullptr;
+    };
+    return cb;
+}
+
 void ShowSettingsWindow()
 {
     if (!g_searchHistoryLoaded && !g_catalogRefreshPending) RequestCatalogRefresh();
-    if (g_settingsHwnd)
-    {
-        ShowWindow(g_settingsHwnd, IsIconic(g_settingsHwnd) ? SW_RESTORE : SW_SHOW);
-        SetForegroundWindow(g_settingsHwnd);
-        return;
-    }
-
-    static bool registered = false;
-    if (!registered)
-    {
-        WNDCLASSEXW wc = {};
-        wc.cbSize = sizeof(wc);
-        wc.hInstance = g_instance;
-        wc.lpfnWndProc = SettingsWndProc;
-        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-        wc.lpszClassName = SettingsWindowClassName;
-        RegisterClassExW(&wc);
-        registered = true;
-    }
-
-    g_settingsDpi = g_windowDpi;
-    g_settingsScrollOffset = 0;
-    RECT settingsWork = {};
-    MONITORINFO settingsMonitorInfo = {};
-    settingsMonitorInfo.cbSize = sizeof(settingsMonitorInfo);
-    const HMONITOR settingsMonitor = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
-    if (settingsMonitor && GetMonitorInfoW(settingsMonitor, &settingsMonitorInfo)) settingsWork = settingsMonitorInfo.rcWork;
-    else SystemParametersInfoW(SPI_GETWORKAREA, 0, &settingsWork, 0);
-    const int settingsWidth = std::min(
-        llp::geometry::ScaleDip(760, static_cast<int>(g_settingsDpi)),
-        static_cast<int>(settingsWork.right - settingsWork.left));
-    const int settingsHeight = std::min(
-        llp::geometry::ScaleDip(680, static_cast<int>(g_settingsDpi)),
-        static_cast<int>(settingsWork.bottom - settingsWork.top));
-    const int settingsX = g_testMonitorDevice.empty()
-        ? CW_USEDEFAULT
-        : settingsWork.left + ((settingsWork.right - settingsWork.left) - settingsWidth) / 2;
-    const int settingsY = g_testMonitorDevice.empty()
-        ? CW_USEDEFAULT
-        : settingsWork.top + ((settingsWork.bottom - settingsWork.top) - settingsHeight) / 2;
-    g_settingsHwnd = CreateWindowExW(
-        WS_EX_DLGMODALFRAME | (g_diagnosticsUiMode ? 0 : WS_EX_TOOLWINDOW),
-        SettingsWindowClassName,
-        Text(L"LightLaunchpad Settings", L"LightLaunchpad 设置"),
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VSCROLL | WS_CLIPCHILDREN,
-        settingsX,
-        settingsY,
-        settingsWidth,
-        settingsHeight,
+    g_settingsHwnd = llp::settings_ui::ShowSettingsStudio(
         g_diagnosticsUiMode ? nullptr : g_hwnd,
-        nullptr,
-        g_instance,
-        nullptr);
-    if (g_settingsHwnd)
-    {
-        ShowWindow(g_settingsHwnd, SW_SHOW);
-        SetForegroundWindow(g_settingsHwnd);
-        SetFocus(GetDlgItem(g_settingsHwnd, ControlId(SettingsControlId::Category)));
-    }
+        BuildSettingsStudioCallbacks(),
+        g_settings.lastSettingsPage);
 }
 
 struct TextInputState
@@ -10552,6 +11012,8 @@ void ShowTrayMenu()
     AppendMenuW(menu, MF_STRING, TrayOpenCommand, Text(L"Open launchpad", L"打开启动台"));
     AppendMenuW(menu, MF_STRING, TrayOpenFolderCommand, Text(L"Open folder", L"打开文件夹"));
     AppendMenuW(menu, MF_STRING, TrayRefreshCommand, Text(L"Refresh", L"刷新"));
+    AppendMenuW(menu, MF_STRING, TrayClipboardCommand, Text(L"Clipboard History (Alt+V)", L"剪贴板历史 (Alt+V)"));
+    AppendMenuW(menu, MF_STRING, TrayInputStatsCommand, Text(L"Input Stats", L"键鼠统计"));
     AppendMenuW(menu, MF_STRING, TraySettingsCommand, Text(L"Settings\tCtrl+,", L"设置\tCtrl+,"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, TrayExitCommand, Text(L"Exit", L"退出"));
@@ -11171,7 +11633,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         return DefWindowProcW(hwnd, message, wParam, lParam);
     }
+    case WM_CLIPBOARDUPDATE:
+        if (g_clipboardStore.CaptureFromSystemClipboard(hwnd))
+        {
+            g_clipboardStore.SaveToFile(GetClipboardHistoryPath());
+        }
+        return 0;
     case WM_HOTKEY:
+        if (wParam == static_cast<WPARAM>(ClipboardHotkeyId))
+        {
+            llp::clipboard_ui::ToggleClipboardOverlay(hwnd, BuildClipboardOverlayCallbacks());
+            return 0;
+        }
         if (wParam == static_cast<WPARAM>(g_activeHotkeyId))
         {
             const ULONGLONG started = GetTickCount64();
@@ -11200,6 +11673,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             RebuildFiltered();
             RequestSearchRepaint(hwnd, true);
         }
+        if (LOWORD(wParam) == TrayClipboardCommand) { llp::clipboard_ui::ToggleClipboardOverlay(hwnd, BuildClipboardOverlayCallbacks()); }
+        if (LOWORD(wParam) == TrayInputStatsCommand) { g_settings.lastSettingsPage = 5; ShowSettingsWindow(); }
         if (LOWORD(wParam) == TraySettingsCommand) ShowSettingsWindow();
         if (LOWORD(wParam) == TrayExitCommand) DestroyWindow(hwnd);
         if (LOWORD(wParam) == ItemLaunchCommand && !g_contextItemPaths.empty()) LaunchItemBySourcePath(g_contextItemPaths.front());
@@ -11242,6 +11717,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WmEverythingResults:
         HandleEverythingResults();
+        return 0;
+    case WM_INPUT:
+        g_inputStats.ProcessRawInput(reinterpret_cast<HRAWINPUT>(lParam));
         return 0;
     case WmAdaptiveSnapshot:
         if (wParam == 7)
@@ -11339,6 +11817,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (wParam == MotionTimerId)
         {
             ApplyMotionFrame();
+            return 0;
+        }
+        if (wParam == InputStatsSaveTimerId)
+        {
+            g_inputStats.SaveToFile(GetInputStatsPath());
+            if (g_trayIconAdded && g_hwnd)
+            {
+                const auto snap = g_inputStats.GetSnapshot();
+                NOTIFYICONDATAW tipData = {};
+                tipData.cbSize = sizeof(tipData);
+                tipData.hWnd = g_hwnd;
+                tipData.uID = 1;
+                tipData.uFlags = NIF_TIP;
+                const std::wstring tip = IsChineseLanguage(g_settings.language)
+                    ? (L"LightLaunchpad · 今日 " + std::to_wstring(snap.today.keystrokes) + L" 键 · " + std::to_wstring(snap.today.TotalClicks()) + L" 点击")
+                    : (L"LightLaunchpad · " + std::to_wstring(snap.today.keystrokes) + L" keys · " + std::to_wstring(snap.today.TotalClicks()) + L" clicks");
+                wcsncpy_s(tipData.szTip, tip.c_str(), _TRUNCATE);
+                Shell_NotifyIconW(NIM_MODIFY, &tipData);
+            }
             return 0;
         }
         if (wParam == OrganizationFeedbackTimerId)
@@ -12010,6 +12507,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (g_launchpadFlowProbe.active) WriteFileUtf8(g_launchpadFlowProbe.outputPath, BuildLaunchpadFlowProbeJson());
         g_materialRenderer.Hide();
         g_materialRenderer.Shutdown();
+        KillTimer(hwnd, InputStatsSaveTimerId);
+        if (g_foregroundFocusHook) { UnhookWinEvent(g_foregroundFocusHook); g_foregroundFocusHook = nullptr; }
+        RemoveClipboardFormatListener(hwnd);
+        UnregisterHotKey(hwnd, ClipboardHotkeyId);
+        g_clipboardStore.SaveToFile(GetClipboardHistoryPath());
+        g_inputStats.UnregisterRawInput();
+        g_inputStats.SaveToFile(GetInputStatsPath(), true);
         g_everythingBridge.Shutdown();
         g_searchAccessibility.Shutdown();
         g_shellBroker.Stop();
@@ -12301,6 +12805,23 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
 
     const bool shellBrokerStarted = g_shellBroker.Start(g_hwnd, WmShellBrokerResult);
     AppendStartupLog(L"shell-broker", shellBrokerStarted, shellBrokerStarted ? L"dedicated STA queued" : L"thread creation failed");
+    g_inputStats.LoadFromFile(GetInputStatsPath());
+    if (!g_hotwords.LoadFromFile(GetHotwordsPath())) g_hotwords.SaveToFile(GetHotwordsPath());
+    g_clipboardStore.SetCacheDirectory(GetClipboardCachePath());
+    g_clipboardStore.LoadFromFile(GetClipboardHistoryPath());
+    AddClipboardFormatListener(g_hwnd);
+    g_inputStats.SetEnabled(g_settings.enableInputStats);
+    g_inputStats.SyncRawInputRegistration(g_hwnd);
+    g_inputStats.OnForegroundWindowChanged(GetForegroundWindow());
+    g_foregroundFocusHook = SetWinEventHook(
+        EVENT_SYSTEM_FOREGROUND,
+        EVENT_SYSTEM_FOREGROUND,
+        nullptr,
+        [](HWINEVENTHOOK, DWORD, HWND hwndFg, LONG, LONG, DWORD, DWORD) {
+            g_inputStats.OnForegroundWindowChanged(hwndFg);
+        },
+        0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    SetTimer(g_hwnd, InputStatsSaveTimerId, 60000, nullptr);
     g_everythingDetected = llp::everything::IsEverythingRunning();
     g_everythingBridge.SetCallback([hwnd = g_hwnd](llp::everything::QueryResponse response) {
         {
@@ -12314,12 +12835,51 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     if (!g_diagnosticsUiMode && !g_catalogBrokerProbe.active && !g_shellImportProbe.active && !textInputProbeActive && !g_spotlightFlowProbe.active && !g_launchpadFlowProbe.active && !g_organizationProbe.active && !g_regionUndoProbe.active && !materialProbeActive)
     {
         RegisterCurrentHotkey();
+        RegisterHotKey(g_hwnd, ClipboardHotkeyId, MOD_ALT | MOD_NOREPEAT, 'V');
         AppendStartupLog(L"hotkey-registered", g_hotkeyRegistered, g_settings.hotkey);
         AddTrayIcon();
     }
     else if (g_diagnosticsUiMode)
     {
         ShowSettingsWindow();
+    }
+
+    const std::wstring captureSettingsDir = CommandLineValue(L"--capture-settings");
+    if (!captureSettingsDir.empty())
+    {
+        CreateDirectoryW(captureSettingsDir.c_str(), nullptr);
+        const int savedPage = g_settings.lastSettingsPage;
+        const int pages[] = {0, 1, 2, 3, 5};
+        for (int p : pages)
+        {
+            g_settings.lastSettingsPage = p;
+            ShowSettingsWindow();
+            MSG m{};
+            for (int tick = 0; tick < 8; ++tick)
+            {
+                while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageW(&m); }
+                Sleep(30);
+            }
+            if (g_settingsHwnd)
+            {
+                const std::wstring shotName = L"settings_page_" + std::to_wstring(p) + L".png";
+                llp::settings_ui::CaptureSettingsStudioPng(g_settingsHwnd, JoinPath(captureSettingsDir, shotName.c_str()));
+            }
+        }
+        if (g_clipboardStore.Items().empty())
+        {
+            g_clipboardStore.AddText(L"https://lightlaunchpad.thomasthzh.top", L"Chrome");
+            g_clipboardStore.AddText(L"#3B82F6", L"Figma");
+            g_clipboardStore.AddText(L"Alt+V 液态玻璃剪贴板历史：支持智能识别色值/链接/截图，Shift+Enter 去格式纯文本粘贴。", L"Code");
+            if (!g_clipboardStore.Items().empty()) g_clipboardStore.TogglePin(g_clipboardStore.Items()[0].id);
+        }
+        llp::clipboard_ui::CaptureClipboardOverlayPng(g_hwnd, BuildClipboardOverlayCallbacks(), JoinPath(captureSettingsDir, L"clipboard_overlay.png"));
+        g_settings.lastSettingsPage = savedPage;
+        if (g_settingsHwnd) llp::settings_ui::CloseSettingsStudio(g_settingsHwnd);
+        DestroyWindow(g_hwnd);
+        CloseHandle(mutex);
+        if (comInitialized) CoUninitialize();
+        return 0;
     }
 
     g_shellReadyTick = GetTickCount64();
